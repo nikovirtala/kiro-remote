@@ -1,0 +1,18 @@
+{
+  "name": "@kiro-remote/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check ."
+  },
+  "dependencies": {
+    "@kiro-remote/core": "workspace:*",
+    "@kiro-remote/mcp": "workspace:*"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@kiro-remote/cdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "kiro-remote-cdk": "./bin/app.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./cdk": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "synth": "echo \"cdk synth is wired up in a later feature\""
+  },
+  "dependencies": {
+    "@kiro-remote/auth": "workspace:*",
+    "@kiro-remote/core": "workspace:*"
+  }
+}

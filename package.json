@@ -1,0 +1,26 @@
+{
+  "name": "kiro-remote",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A personal AWS control plane (CDK) that wraps kiro-cli to launch and drive Kiro cloud sessions via a REST API and an MCP server.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=26"
+  },
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "synth": "pnpm --filter @kiro-remote/cdk synth"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.6",
+    "@types/node": "^26.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

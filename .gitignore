@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# CDK
+cdk.out/
+
+# mise runtime data (sandbox-local)
+.mise-data/
+.mise-cache/
+.extralib/
+
+# Test coverage
+coverage/
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
