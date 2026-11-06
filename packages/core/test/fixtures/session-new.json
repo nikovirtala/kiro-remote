@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "session/new",
+  "params": {
+    "cwd": "/workspace/project",
+    "additionalDirectories": ["/workspace/shared"],
+    "mcpServers": [],
+    "_meta": {
+      "kiro": {
+        "modeId": "vibe",
+        "modelId": "claude-sonnet",
+        "effortLevel": "high"
+      }
+    }
+  }
+}

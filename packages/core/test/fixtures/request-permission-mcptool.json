@@ -1,0 +1,30 @@
+{
+  "method": "session/request_permission",
+  "params": {
+    "sessionId": "session-1",
+    "toolCall": {
+      "toolCallId": "call-2",
+      "title": "@example-server/search",
+      "status": "pending"
+    },
+    "options": [
+      { "optionId": "accept", "name": "Allow", "kind": "allow_once" },
+      { "optionId": "reject", "name": "Deny", "kind": "reject_once" }
+    ],
+    "_meta": {
+      "kiro": {
+        "mcpTool": {
+          "version": 1,
+          "identity": {
+            "serverName": "example-server",
+            "toolName": "search"
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": true
+          }
+        }
+      }
+    }
+  }
+}

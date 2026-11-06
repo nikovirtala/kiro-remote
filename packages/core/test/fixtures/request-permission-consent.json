@@ -1,0 +1,28 @@
+{
+  "method": "session/request_permission",
+  "params": {
+    "sessionId": "session-1",
+    "toolCall": {
+      "toolCallId": "call-1",
+      "title": "Run tests",
+      "status": "pending"
+    },
+    "options": [
+      { "optionId": "accept", "name": "Allow", "kind": "allow_once" },
+      { "optionId": "always-accept", "name": "Always allow", "kind": "allow_always" },
+      { "optionId": "reject", "name": "Deny", "kind": "reject_once" },
+      { "optionId": "always-reject", "name": "Always deny", "kind": "reject_always" }
+    ],
+    "_meta": {
+      "kiro": {
+        "consent": {
+          "capability": "shell",
+          "resource": "npm run test",
+          "triggeringResource": "npm run test",
+          "workspaceRoot": "/workspace/project",
+          "persistableConsent": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "outcome": {
+    "outcome": "selected",
+    "optionId": "always-accept"
+  },
+  "_meta": {
+    "kiro": {
+      "consent": {
+        "scope": "workspace",
+        "resource": "npm run *",
+        "workspaceRoot": "/workspace/project"
+      }
+    }
+  }
+}
