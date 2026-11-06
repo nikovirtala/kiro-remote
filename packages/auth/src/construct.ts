@@ -132,6 +132,8 @@ export class KiroRemoteAuth extends Construct {
 
     this.resourceServer = this.userPool.addResourceServer("McpResourceServer", {
       identifier: this.mcpResourceIdentifier,
+      // The friendly name must match ^[\w\s+=,.@-]+$ (no scheme separators).
+      userPoolResourceServerName: "kiro-remote-mcp",
       scopes: [readScope, writeScope, deleteScope],
     });
 
