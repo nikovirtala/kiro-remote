@@ -16,8 +16,8 @@ import type {
   ClientSession,
   ClientTurn,
   KiroRemoteClient,
-} from "@nikovirtala/api";
-import type { Principal } from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-api";
+import type { Principal } from "@nikovirtala/kiro-remote-core";
 
 /** A minimal fetch signature so tests inject a fake without a real network. */
 export type FetchLike = (

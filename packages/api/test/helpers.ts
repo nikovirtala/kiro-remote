@@ -8,15 +8,15 @@
  * network or any AWS SDK transport.
  */
 
-import type { FacadeConfig } from "@nikovirtala/auth";
+import type { FacadeConfig } from "@nikovirtala/kiro-remote-auth";
 import type {
   AccessTokenClaims,
   Command,
   CommandQueue,
   Repository,
   TokenVerifier,
-} from "@nikovirtala/core";
-import { Repository as CoreRepository } from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
+import { Repository as CoreRepository } from "@nikovirtala/kiro-remote-core";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import type { ApiContext, FacadeDeps } from "../src/context.ts";
 import { NoopObservability } from "../src/observability.ts";

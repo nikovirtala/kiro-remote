@@ -1,4 +1,4 @@
-import { requiredScope } from "@nikovirtala/core";
+import { requiredScope } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
 import type { HttpRequest } from "../src/http.ts";
 import { buildOpenApiDocument } from "../src/openapi.ts";

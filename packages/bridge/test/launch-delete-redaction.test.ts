@@ -1,4 +1,4 @@
-import type { Command } from "@nikovirtala/core";
+import type { Command } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { parseCloudSessionId } from "../src/headless.ts";
 import { createLogger } from "../src/logger.ts";

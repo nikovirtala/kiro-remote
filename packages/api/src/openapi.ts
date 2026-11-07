@@ -8,7 +8,7 @@
  * can NEVER drift from the enforced authorization (a test asserts this parity).
  */
 
-import { type FacadeConfig, facadeEndpoints } from "@nikovirtala/auth";
+import { type FacadeConfig, facadeEndpoints } from "@nikovirtala/kiro-remote-auth";
 import {
   type Action,
   AdoptSessionSchema,
@@ -24,7 +24,7 @@ import {
   SessionSchema,
   TurnSchema,
   toOpenApiSchema,
-} from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
 
 /** The resource-server scope identifier prefix advertised in the scheme. */
 function scopedName(resourceIdentifier: string, scope: string): string {

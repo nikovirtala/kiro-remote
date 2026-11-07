@@ -3,7 +3,7 @@
  * whole package runs offline in tests (DynamoDB reads, the SQS enqueue behind
  * the core service, the token verifier, the idempotency store are all mocks).
  *
- * The context also carries the facade dependencies from @nikovirtala/auth and
+ * The context also carries the facade dependencies from @nikovirtala/kiro-remote-auth and
  * the optional MCP transport handler (FEAT-006) for the /mcp seam.
  */
 
@@ -13,14 +13,14 @@ import type {
   FacadeConfig,
   RevokeDeps,
   TokenDeps,
-} from "@nikovirtala/auth";
+} from "@nikovirtala/kiro-remote-auth";
 import type {
   AuthenticateConfig,
   Capabilities,
   Principal,
   Repository,
   ServiceDeps,
-} from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
 import type { McpTransportHandler } from "./mcp-seam.ts";
 import { NoopObservability, type Observability } from "./observability.ts";
 

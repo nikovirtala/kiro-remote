@@ -87,7 +87,7 @@ First, get a token. The easiest way is the CLI:
 
 ```bash
 export KIRO_REMOTE_URL=https://<host>
-mise exec -- pnpm --filter @nikovirtala/mcp exec kiro-remote login
+mise exec -- pnpm --filter @nikovirtala/kiro-remote-mcp exec kiro-remote login
 ```
 
 Alternatively, drive the discovery → authorize → token chain yourself using the

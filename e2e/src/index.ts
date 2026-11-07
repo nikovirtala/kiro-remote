@@ -1,5 +1,5 @@
 /**
- * @nikovirtala/e2e
+ * @nikovirtala/kiro-remote-e2e
  *
  * The live end-to-end harness and the offline-derivable PR artifacts. The
  * harness drives the full control-plane flow (login, launch, poll, follow-up,
@@ -12,7 +12,7 @@
  * Inspector), it is recorded as `blocked: <exact reason>` -- never fabricated.
  */
 
-export const PACKAGE_NAME = "@nikovirtala/e2e";
+export const PACKAGE_NAME = "@nikovirtala/kiro-remote-e2e";
 
 export { type HarnessConfig, loadConfig, type Secrets } from "./config.ts";
 export {

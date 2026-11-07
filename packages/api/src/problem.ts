@@ -2,7 +2,7 @@
  * RFC 9457 problem+json error responses.
  *
  * Every error the API emits is an `application/problem+json` document. Typed
- * service/auth errors from @nikovirtala/core map to the correct status and
+ * service/auth errors from @nikovirtala/kiro-remote-core map to the correct status and
  * `type` here, which is the single place that owns the HTTP error contract:
  *
  *   UnauthorizedError      -> 401 + WWW-Authenticate: Bearer resource_metadata=..., scope=...
@@ -24,7 +24,7 @@ import {
   UnauthorizedError,
   wwwAuthenticateHeader,
   z,
-} from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
 import type { HttpResponse } from "./http.ts";
 
 /** Base URI namespace for our problem `type` values. */

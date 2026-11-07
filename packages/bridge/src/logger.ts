@@ -8,7 +8,7 @@
  * action, not logged).
  */
 
-import { redact } from "@nikovirtala/core";
+import { redact } from "@nikovirtala/kiro-remote-core";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 

@@ -25,7 +25,7 @@ import {
   type KiroGateway,
   type PermissionAnswer,
   type SessionInputs,
-} from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
 import type { Logger } from "./logger.ts";
 import type { StdioJsonRpcTransport } from "./transport.ts";
 

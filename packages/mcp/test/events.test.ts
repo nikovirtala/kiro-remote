@@ -3,8 +3,12 @@
  * behavior.
  */
 
-import type { ClientEventsPage, ClientPermission, KiroRemoteClient } from "@nikovirtala/api";
-import type { Principal } from "@nikovirtala/core";
+import type {
+  ClientEventsPage,
+  ClientPermission,
+  KiroRemoteClient,
+} from "@nikovirtala/kiro-remote-api";
+import type { Principal } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, it } from "vitest";
 import {
   collectEvents,

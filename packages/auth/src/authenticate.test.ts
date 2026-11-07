@@ -13,7 +13,7 @@ import {
   requiredScope,
   UnauthorizedError,
   wwwAuthenticateHeader,
-} from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
 import { generateLocalKeypair, localVerifier, signJwt } from "./test-helpers.ts";
 

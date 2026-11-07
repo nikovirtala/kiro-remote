@@ -1,5 +1,5 @@
 /**
- * @nikovirtala/auth
+ * @nikovirtala/kiro-remote-auth
  *
  * OAuth 2.1 Cognito facade. Cognito is the ONLY token issuer: the facade never
  * mints, signs, or reshapes tokens; it brokers the authorization-code / refresh
@@ -14,7 +14,7 @@
  *  - the standalone KiroRemoteAuth CDK construct.
  */
 
-export const PACKAGE_NAME = "@nikovirtala/auth";
+export const PACKAGE_NAME = "@nikovirtala/kiro-remote-auth";
 
 export * from "./authorize.ts";
 export * from "./callback.ts";

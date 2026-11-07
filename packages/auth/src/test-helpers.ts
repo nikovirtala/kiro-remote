@@ -14,7 +14,7 @@ import {
   generateKeyPairSync,
   type KeyObject,
 } from "node:crypto";
-import type { AccessTokenClaims, TokenVerifier } from "@nikovirtala/core";
+import type { AccessTokenClaims, TokenVerifier } from "@nikovirtala/kiro-remote-core";
 import type { CognitoPort, CognitoTokenSet, FetchLike } from "./cognito.ts";
 import type { KmsPort } from "./kms.ts";
 

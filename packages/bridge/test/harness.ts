@@ -5,7 +5,7 @@
 
 import { fileURLToPath } from "node:url";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { Repository, type SessionMetaItem, sessionPk } from "@nikovirtala/core";
+import { Repository, type SessionMetaItem, sessionPk } from "@nikovirtala/kiro-remote-core";
 import { createLogger } from "../src/logger.ts";
 import { CollectingMetricSink } from "../src/metrics.ts";
 import { BridgeServer } from "../src/serve.ts";

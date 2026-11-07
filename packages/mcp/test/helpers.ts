@@ -7,8 +7,8 @@
  * REST API (for the HTTP client) and a fake OAuth facade (for the CLI flows).
  */
 
-import type { Command, CommandQueue, Repository } from "@nikovirtala/core";
-import { Repository as CoreRepository, type Principal } from "@nikovirtala/core";
+import type { Command, CommandQueue, Repository } from "@nikovirtala/kiro-remote-core";
+import { Repository as CoreRepository, type Principal } from "@nikovirtala/kiro-remote-core";
 import { InProcessClient } from "../src/client.ts";
 import type { FetchLike } from "../src/http-client.ts";
 import type { OAuthFetch } from "../src/oauth.ts";

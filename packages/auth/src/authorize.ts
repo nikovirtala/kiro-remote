@@ -12,7 +12,7 @@
  * redirect back to the client with ?error=... per OAuth 2.1.
  */
 
-import type { Repository } from "@nikovirtala/core";
+import type { Repository } from "@nikovirtala/kiro-remote-core";
 import { CimdError } from "./cimd.ts";
 import { type ClientResolver, redirectUriAllowed } from "./clients.ts";
 import type { FacadeConfig } from "./config.ts";

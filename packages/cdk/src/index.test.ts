@@ -5,7 +5,7 @@ import { PACKAGE_NAME } from "./index.ts";
 import { KiroRemoteStack } from "./stack.ts";
 
 test("cdk package exposes its name", () => {
-  expect(PACKAGE_NAME).toBe("@nikovirtala/cdk");
+  expect(PACKAGE_NAME).toBe("@nikovirtala/kiro-remote-cdk");
 });
 
 test("the stack emits the named CfnOutputs operators look up", () => {

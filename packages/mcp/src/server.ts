@@ -21,7 +21,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
-import { ForbiddenError, type Principal, redact } from "@nikovirtala/core";
+import { ForbiddenError, type Principal, redact } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 import { authorizeTool, findTool, type ToolResult, toolListEntries } from "./tools.ts";
 

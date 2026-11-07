@@ -10,14 +10,14 @@
  *
  * FEAT-006 implements the MCP server over the ONE {@link KiroRemoteClient}
  * interface defined here. There is exactly one definition of this interface in
- * the whole workspace -- it lives in this seam file and @nikovirtala/mcp
+ * the whole workspace -- it lives in this seam file and @nikovirtala/kiro-remote-mcp
  * imports it, so the in-process variant (which calls the core service
  * directly, no self-HTTP) and the HTTP variant (which calls the REST API with
  * the user's bearer token) share an identical contract and the MCP tools never
  * branch on transport.
  *
- * Why the interface lives here and not in @nikovirtala/mcp: @nikovirtala/mcp
- * depends on @nikovirtala/api for the {@link McpTransportHandler} seam types,
+ * Why the interface lives here and not in @nikovirtala/kiro-remote-mcp: @nikovirtala/kiro-remote-mcp
+ * depends on @nikovirtala/kiro-remote-api for the {@link McpTransportHandler} seam types,
  * so the dependency edge is mcp -> api. Putting the client interface here keeps
  * that edge acyclic while still letting FEAT-006 build both implementations
  * against the single canonical definition.
@@ -27,7 +27,7 @@
  * the contract (auth boundary + protected-resource advertisement) is testable.
  */
 
-import type { Action, Principal, Resource } from "@nikovirtala/core";
+import type { Action, Principal, Resource } from "@nikovirtala/kiro-remote-core";
 
 /* -------------------------------------------------------------------------- */
 /* Plain data shapes the client returns (transport-agnostic)                  */

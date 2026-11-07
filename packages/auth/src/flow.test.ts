@@ -1,4 +1,4 @@
-import { Repository, type RepositoryDeps } from "@nikovirtala/core";
+import { Repository, type RepositoryDeps } from "@nikovirtala/kiro-remote-core";
 import { beforeEach, describe, expect, test } from "vitest";
 import { type AuthorizeTxData, handleAuthorize } from "./authorize.ts";
 import { handleCallback } from "./callback.ts";

@@ -14,8 +14,8 @@
  */
 
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
-import type { McpTransportHandler, McpTransportRequest } from "@nikovirtala/api";
-import { type Principal, redact } from "@nikovirtala/core";
+import type { McpTransportHandler, McpTransportRequest } from "@nikovirtala/kiro-remote-api";
+import { type Principal, redact } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 import {
   callTool,

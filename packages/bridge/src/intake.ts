@@ -17,7 +17,7 @@ import {
   ReceiveMessageCommand,
   type SQSClient,
 } from "@aws-sdk/client-sqs";
-import type { Command } from "@nikovirtala/core";
+import type { Command } from "@nikovirtala/kiro-remote-core";
 import type { Logger } from "./logger.ts";
 import type { SessionManager } from "./session-manager.ts";
 

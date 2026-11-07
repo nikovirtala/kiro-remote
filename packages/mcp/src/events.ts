@@ -17,8 +17,8 @@
  * concatenation of that turn's assistant message chunks), never raw events.
  */
 
-import type { ClientEvent, ClientPermission } from "@nikovirtala/api";
-import type { Principal } from "@nikovirtala/core";
+import type { ClientEvent, ClientPermission } from "@nikovirtala/kiro-remote-api";
+import type { Principal } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 
 /** Hard cap on how long kiro_wait_for_events blocks. */

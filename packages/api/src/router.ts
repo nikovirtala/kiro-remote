@@ -14,7 +14,12 @@
  * passed to core's authenticate(); it is NEVER forwarded to Kiro or logged.
  */
 
-import { authenticate, ForbiddenError, type Principal, UnauthorizedError } from "@nikovirtala/core";
+import {
+  authenticate,
+  ForbiddenError,
+  type Principal,
+  UnauthorizedError,
+} from "@nikovirtala/kiro-remote-core";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import type { ApiContext } from "./context.ts";
 import { dispatchFacade, isFacadePath } from "./facade.ts";

@@ -1,5 +1,5 @@
 {
-  "name": "@nikovirtala/cdk",
+  "name": "@nikovirtala/kiro-remote-cdk",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -18,8 +18,8 @@
     "deploy": "cdk deploy --app \"node bin/app.ts\""
   },
   "dependencies": {
-    "@nikovirtala/auth": "workspace:*",
-    "@nikovirtala/core": "workspace:*",
+    "@nikovirtala/kiro-remote-auth": "workspace:*",
+    "@nikovirtala/kiro-remote-core": "workspace:*",
     "aws-cdk-lib": "^2.275.0",
     "cdk-nag": "^3.0.2",
     "constructs": "^10.0.0"

@@ -33,7 +33,7 @@ import {
   setConfig,
   getSession as svcGetSession,
   listSessions as svcListSessions,
-} from "@nikovirtala/core";
+} from "@nikovirtala/kiro-remote-core";
 import type { ApiContext } from "./context.ts";
 import {
   acceptedResponse,

@@ -2,7 +2,7 @@
  * Tool catalog, schema parity, annotations, and scope-mapping tests.
  */
 
-import { requiredScope, toMcpInputSchema } from "@nikovirtala/core";
+import { requiredScope, toMcpInputSchema } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, it } from "vitest";
 import { CORE_SCHEMA_FOR_TOOL, TOOL_DEFS, TOOL_NAMES, toolListEntries } from "../src/tools.ts";
 

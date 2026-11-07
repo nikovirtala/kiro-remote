@@ -1,4 +1,4 @@
-import type { Command } from "@nikovirtala/core";
+import type { Command } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test } from "vitest";
 import { createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult, SHELL_PERMISSION_PARAMS } from "./scenarios.ts";
