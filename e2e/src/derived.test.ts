@@ -46,6 +46,9 @@ describe("derived artifacts", () => {
     // Derived from the real capabilities() over the fake advertisement.
     expect(value.capabilityMatrix.executionTargets).toContain("cloud");
     expect(value.capabilityMatrix.models).toContain("claude-sonnet");
+    // Shared object references (configOptions/modes) must not be mangled into
+    // "[Circular]" by the redactor -- they are not actual cycles.
+    expect(JSON.stringify(caps?.value)).not.toContain("[Circular]");
   });
 
   it("records the launch-path selection rule (acp vs headless)", () => {

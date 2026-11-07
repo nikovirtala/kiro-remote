@@ -90,14 +90,23 @@ export function recordDerivedArtifacts(report: Report): void {
   );
 
   // 2. The capability matrix derived from the FAKE-HARNESS advertisement.
+  //    capabilities() returns the SAME configOption/mode object references that
+  //    live in the initialize result, so the combined payload shares references
+  //    between initializeResult and capabilityMatrix. A JSON round-trip fully
+  //    duplicates every node (no shared references survive) so the redactor's
+  //    circular guard does not mistake a shared reference for "[Circular]" --
+  //    these are shared references, not actual cycles.
   const caps = capabilities(FAKE_HARNESS_INITIALIZE);
+  const capabilityPayload = JSON.parse(
+    JSON.stringify({
+      initializeResult: FAKE_HARNESS_INITIALIZE,
+      capabilityMatrix: caps,
+    }),
+  );
   report.derive(
     "capability_matrix",
     "capabilities() applied to the FAKE-ACP harness default advertisement (packages/bridge/test/scenarios.ts initResult) -- this is the fake-harness advertisement, NOT a live Kiro initialize result",
-    {
-      initializeResult: FAKE_HARNESS_INITIALIZE,
-      capabilityMatrix: caps,
-    },
+    capabilityPayload,
   );
 
   // 3. The launch-path selection rule the bridge code applies.
