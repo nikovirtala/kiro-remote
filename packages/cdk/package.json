@@ -14,10 +14,16 @@
     "build": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
-    "synth": "echo \"cdk synth is wired up in a later feature\""
+    "synth": "cdk synth --app \"node bin/app.ts\" --quiet"
   },
   "dependencies": {
     "@kiro-remote/auth": "workspace:*",
-    "@kiro-remote/core": "workspace:*"
+    "@kiro-remote/core": "workspace:*",
+    "aws-cdk-lib": "^2.275.0",
+    "cdk-nag": "^3.0.2",
+    "constructs": "^10.0.0"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1148.0"
   }
 }

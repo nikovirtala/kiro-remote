@@ -8,6 +8,7 @@ build/
 
 # CDK
 cdk.out/
+cdk.context.json
 
 # mise runtime data (sandbox-local)
 .mise-data/
