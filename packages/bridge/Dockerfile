@@ -91,16 +91,27 @@ ARG KIRO_CLI_INSTALL_URL=https://kiro.dev/install.sh
 
 # Install curl + ca-certificates, then install kiro-cli via the official script
 # with the pinned version, then drop the build-only packages.
+#
+# The official script installs the single kiro-cli binary into ROOT's home
+# (/root/.local/bin/kiro-cli). The container runs as the non-root `bridge` user
+# (below), and /root is mode 0700 -- a non-root process cannot traverse it, so
+# a symlink pointing INTO /root/.local/bin resolves to EACCES at exec time
+# (the bridge crashed with `spawn kiro-cli EACCES`). We therefore copy the REAL
+# binary out to a world-executable system path (/usr/local/bin, already on the
+# default PATH) as a 0755 file so the non-root user can read+execute it. `cp -L`
+# dereferences, so we copy the actual executable even if `command -v` resolves a
+# symlink. Nothing kiro-cli needs at runtime is left reachable only via /root.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && test -n "${KIRO_CLI_VERSION}" \
     && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | KIRO_CLI_VERSION="${KIRO_CLI_VERSION}" sh -s -- --version "${KIRO_CLI_VERSION}" \
-    && ln -sf "$(command -v kiro-cli || echo /root/.local/bin/kiro-cli)" /usr/local/bin/kiro-cli \
+    && KIRO_BIN="$(command -v kiro-cli || true)" \
+    && { [ -n "${KIRO_BIN}" ] || KIRO_BIN=/root/.local/bin/kiro-cli; } \
+    && cp -L "${KIRO_BIN}" /usr/local/bin/kiro-cli \
+    && chmod 0755 /usr/local/bin/kiro-cli \
     && apt-get purge -y curl \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
-
-ENV PATH="/root/.local/bin:${PATH}"
 
 # The self-contained bundle is the ONLY app artifact needed at runtime: it
 # inlines the @nikovirtala/* workspace code AND @aws-sdk/*, so there is no
@@ -111,6 +122,15 @@ COPY --from=deps /app/dist/bridge.cjs ./dist/bridge.cjs
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 bridge \
     && chown -R bridge:bridge /app
+
+# Build-time proof that the non-root `bridge` user can actually EXECUTE
+# kiro-cli from the system PATH (not just that the file exists). This exec runs
+# as the bridge uid via runuser (provided by util-linux in bookworm-slim) and
+# fails the image build loudly if a future change reintroduces the EACCES /
+# /root-only regression -- `--version` is a local, offline exec that needs no
+# network or auth.
+RUN runuser -u bridge -- kiro-cli --version
+
 USER bridge
 
 # Cheap liveness probe: a bare Node exec that cannot re-trigger the old

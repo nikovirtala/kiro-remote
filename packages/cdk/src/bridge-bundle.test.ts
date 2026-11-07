@@ -86,4 +86,30 @@ describe("bridge image bundle", () => {
       /pnpm\s+--filter\s+@nikovirtala\/kiro-remote-cdk\s+exec\s+esbuild/.test(dockerfile);
     expect(resolvableInvocation).toBe(true);
   });
+
+  // This guards a THIRD failure class: the runtime `kiro-cli` must be
+  // EXECUTABLE by the non-root `bridge` user. The official install script
+  // drops the binary into ROOT's home (/root/.local/bin), which is mode 0700;
+  // a symlink into /root plus `ENV PATH="/root/.local/bin:..."` left kiro-cli
+  // reachable only through a path the non-root user cannot traverse, so the
+  // bridge crashed with `spawn kiro-cli EACCES` and ECS tripped the deployment
+  // circuit breaker. The fix copies the real binary to a world-executable
+  // system path. This cheap content assertion closes that gap.
+  test("the Dockerfile installs kiro-cli to a world-executable system path (not a /root-only symlink)", () => {
+    const dockerfile = readFileSync(DOCKERFILE, "utf8");
+
+    // kiro-cli must be materialized as a real, world-executable file on a
+    // system PATH dir the non-root user can reach.
+    expect(dockerfile).toMatch(/cp\s+-L\s+"?\$\{?KIRO_BIN\}?"?\s+\/usr\/local\/bin\/kiro-cli/);
+    expect(dockerfile).toMatch(/chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli/);
+
+    // It must NOT keep kiro-cli reachable only via /root: no symlink target
+    // under /root and no /root/.local/bin on PATH for the runtime user.
+    expect(dockerfile).not.toMatch(/ENV\s+PATH="\/root\/\.local\/bin/);
+    expect(dockerfile).not.toMatch(/ln\s+-sf\s+"?\$\(command\s+-v\s+kiro-cli/);
+
+    // A build-time exec check must prove the non-root `bridge` user can run
+    // kiro-cli, so a future regression fails the image build loudly.
+    expect(dockerfile).toMatch(/runuser\s+-u\s+bridge\s+--\s+kiro-cli\s+--version/);
+  });
 });
