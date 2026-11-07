@@ -366,9 +366,31 @@ between the two steps.
 
 The bridge image is `linux/arm64` (ECS Fargate on Graviton). It installs
 `kiro-cli` via the official install script pinned by the `KIRO_CLI_VERSION` build
-ARG, and runs `bridge serve` via Node type stripping.
+ARG.
+
+At **build time** the image esbuild-bundles the bridge CLI
+([`packages/bridge/src/cli.ts`](../packages/bridge/src/cli.ts)) into a single
+self-contained CommonJS file (`dist/bridge.cjs`) and the container then runs
+`node dist/bridge.cjs serve`. The bundle inlines the `@nikovirtala/*` workspace
+code **and** `@aws-sdk/*`, so the runtime image carries no `node_modules` and no
+raw `.ts` source. This mirrors the API Lambda's build-time bundling in
+[`packages/cdk/src/api-asset.ts`](../packages/cdk/src/api-asset.ts).
+
+Why bundle instead of running the TypeScript source directly? Node refuses to
+type-strip `.ts` files that resolve under a `node_modules` path (see the Node
+["Type stripping in dependencies"](https://nodejs.org/api/typescript.html)
+docs). The bridge's entry imports `@nikovirtala/kiro-remote-core`, whose
+package.json exports a raw `./src/index.ts` reached through pnpm's `node_modules`
+symlink, so running `node packages/bridge/src/cli.ts` crashed the container at
+module load (exit 1, before any log). Bundling inlines that code, so there is no
+bare `@nikovirtala` import and no `.ts` under `node_modules` at runtime. The
+container `HEALTHCHECK` is a cheap `node -e "process.exit(0)"` liveness probe
+(the same intent as the ECS container health check), not an invocation of the
+bridge CLI.
+
 `KIRO_API_KEY` is **never** baked into the image; it is injected as an ECS secret
-at runtime.
+at runtime. The `kiro-cli` child process is spawned as a runtime PATH binary via
+`child_process`, so it is neither bundled nor externalized.
 
 `bin/app.ts` wires this image automatically on the real-asset path: passing
 `-c kiroCliVersion=<ver>` makes the app set the construct's `bridgeImage` prop to

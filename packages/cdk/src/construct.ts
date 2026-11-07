@@ -563,7 +563,11 @@ export class KiroRemote extends Construct {
 
     const bridgeLogGroup = new LogGroup(this, "BridgeLogs", {
       retention: RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.DESTROY,
+      // RETAIN so a failed-stack rollback (e.g. the ECS deployment circuit
+      // breaker tripping) does NOT delete the container logs -- otherwise the
+      // diagnostics for the very failure that caused the rollback are lost
+      // ("No CloudWatch Logs found").
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     taskDef.addContainer("bridge", {
@@ -584,10 +588,14 @@ export class KiroRemote extends Construct {
         KIRO_API_KEY: EcsSecret.fromSecretsManager(this.kiroApiKeySecret),
       },
       logging: LogDrivers.awsLogs({ streamPrefix: "bridge", logGroup: bridgeLogGroup }),
-      // Health check fails if the ACP process has been silent for 60 s: the
-      // bridge writes its liveness; the probe times out inside that window.
+      // Cheap liveness probe: a bare Node exec that only proves the container's
+      // Node runtime is responsive. It deliberately does NOT invoke the bridge
+      // CLI -- the old `node packages/bridge/src/cli.ts healthcheck` both hit
+      // the node_modules .ts type-strip crash and called a `healthcheck`
+      // subcommand the CLI does not implement (cli.ts exits 2 on unknown
+      // commands). This matches the Dockerfile HEALTHCHECK's intent.
       healthCheck: {
-        command: ["CMD-SHELL", "node packages/bridge/src/cli.ts healthcheck || exit 1"],
+        command: ["CMD-SHELL", 'node -e "process.exit(0)" || exit 1'],
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),
         retries: 2,

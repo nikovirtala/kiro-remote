@@ -5,15 +5,20 @@
 # - linux/arm64 (the ECS task runs on Graviton).
 # - Installs kiro-cli via the OFFICIAL install script, pinned by a build ARG
 #   (never hardcode a version here).
-# - Runs TypeScript directly via Node 26 native type stripping, so there is no
-#   compile step; `bridge serve` is the Node entrypoint.
+# - esbuild-bundles the bridge CLI (packages/bridge/src/cli.ts) into a single
+#   self-contained CommonJS file at IMAGE-BUILD time and runs that bundle, so
+#   there is no bare `@nikovirtala/*` import and no raw `.ts` under node_modules
+#   at runtime. (Node refuses to type-strip `.ts` files resolved under a
+#   node_modules path, which is why running the raw source crashed the
+#   container at module load; bundling inlines the workspace code and sidesteps
+#   that entirely, mirroring the API Lambda in packages/cdk/src/api-asset.ts.)
 # - KIRO_API_KEY is injected as an ECS secret at RUNTIME (never baked into the
 #   image, never an ENV/ARG here).
 
 ARG NODE_VERSION=26.13.0
 
 ############################
-# deps: install workspace node_modules with pnpm
+# deps: install workspace node_modules with pnpm and bundle the bridge
 ############################
 # TARGETPLATFORM is provided by buildkit from the build-level --platform flag
 # (CDK passes platform: Platform.LINUX_ARM64 to ContainerImage.fromAsset), so
@@ -31,15 +36,42 @@ RUN npm install -g pnpm@${PNPM_VERSION}
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/core/package.json packages/core/package.json
 COPY packages/bridge/package.json packages/bridge/package.json
+COPY packages/cdk/package.json packages/cdk/package.json
 
-# Install only the bridge (and its workspace deps). --frozen-lockfile keeps the
-# image reproducible; the lockfile is the source of truth.
+# Install the bridge (and its workspace deps) plus the cdk package, whose dev
+# dependency esbuild performs the bundling below. --frozen-lockfile keeps the
+# image reproducible; --prod=false pulls in the esbuild devDependency.
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     PNPM_HOME=/pnpm pnpm install --frozen-lockfile \
-      --filter @nikovirtala/kiro-remote-bridge... --prod=false
+      --filter @nikovirtala/kiro-remote-bridge... \
+      --filter @nikovirtala/kiro-remote-cdk --prod=false
+
+# The sources that get bundled (the workspace .ts entry + its imports).
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/core ./packages/core
+COPY packages/bridge ./packages/bridge
+
+# Bundle the bridge CLI to a SINGLE self-contained CommonJS file. Settings
+# mirror packages/cdk/src/api-asset.ts, except @aws-sdk/* is BUNDLED IN (no
+# --external) so the runtime image needs no node_modules at all:
+#   - --format=cjs with a `.cjs` extension: the repo-root package.json is
+#     "type": "module", so a `.js` CommonJS bundle would be mis-read as ESM and
+#     `require` would throw; `.cjs` forces CommonJS regardless.
+#   - --resolve-extensions includes `.ts` so esbuild resolves the repo's
+#     explicit `.ts` import specifiers (allowImportingTsExtensions +
+#     rewriteRelativeImportExtensions in tsconfig) without a custom plugin.
+# The kiro-cli child process is a runtime PATH binary spawned via
+# child_process, not an import, so it is neither bundled nor externalized.
+RUN node_modules/.bin/esbuild packages/bridge/src/cli.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --format=cjs \
+      --resolve-extensions=.ts,.js,.mjs,.json \
+      --outfile=/app/dist/bridge.cjs
 
 ############################
-# runtime: kiro-cli + the bridge source
+# runtime: kiro-cli + the self-contained bridge bundle
 ############################
 FROM --platform=$TARGETPLATFORM node:${NODE_VERSION}-bookworm-slim AS runtime
 WORKDIR /app
@@ -62,24 +94,24 @@ RUN apt-get update \
 
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Workspace deps and source (TypeScript executed directly; no build artifacts).
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json pnpm-workspace.yaml ./
-COPY tsconfig.base.json ./tsconfig.base.json
-COPY packages/core ./packages/core
-COPY packages/bridge ./packages/bridge
+# The self-contained bundle is the ONLY app artifact needed at runtime: it
+# inlines the @nikovirtala/* workspace code AND @aws-sdk/*, so there is no
+# node_modules and no raw .ts source in the runtime image. The `.cjs` extension
+# forces CommonJS, so no package.json "type" shim is copied.
+COPY --from=deps /app/dist/bridge.cjs ./dist/bridge.cjs
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 bridge \
     && chown -R bridge:bridge /app
 USER bridge
 
-# The health check fails if the ACP process has not answered for 60 s; the
-# bridge writes its health state, so the check inspects process liveness.
+# Cheap liveness probe: a bare Node exec that cannot re-trigger the old
+# type-strip crash and does not depend on an unimplemented subcommand. It only
+# proves the Node runtime in the container is responsive.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD node -e "process.exit(0)"
 
-# `bridge serve` is the Node entrypoint. KIRO_API_KEY arrives via ECS secret at
-# runtime -- it is never present in this image.
-ENTRYPOINT ["node", "packages/bridge/src/cli.ts"]
+# Run the bundled bridge. `serve` is the only implemented subcommand.
+# KIRO_API_KEY arrives via ECS secret at runtime -- never present in this image.
+ENTRYPOINT ["node", "dist/bridge.cjs"]
 CMD ["serve"]

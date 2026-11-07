@@ -188,6 +188,34 @@ describe("KiroRemote", () => {
     expect(container.Image).toBe("public.ecr.aws/amazonlinux/amazonlinux:2023");
   });
 
+  test("the bridge container runs the bundle (command 'serve') and its healthCheck never touches the raw cli.ts path or an unimplemented subcommand", () => {
+    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+    const def = (
+      Object.values(taskDefs)[0].Properties as {
+        ContainerDefinitions: Array<{
+          Command?: string[];
+          HealthCheck?: { Command?: string[] };
+        }>;
+      }
+    ).ContainerDefinitions[0];
+    // The container runs the bundled entrypoint's `serve` subcommand.
+    expect(def.Command).toEqual(["serve"]);
+    // The old probe ran `node packages/bridge/src/cli.ts healthcheck`, which
+    // both hit the node_modules .ts type-strip crash and called a subcommand
+    // cli.ts does not implement. The new probe must do neither.
+    const healthCommand = (def.HealthCheck?.Command ?? []).join(" ");
+    expect(healthCommand).not.toContain("cli.ts");
+    expect(healthCommand).not.toContain("healthcheck");
+    expect(healthCommand).toContain("process.exit(0)");
+  });
+
+  test("the bridge log group is RETAINed so a rollback keeps the container logs", () => {
+    template.hasResource("AWS::Logs::LogGroup", {
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+    });
+  });
+
   test("the arm64 Graviton runtime platform is set on the task definition", () => {
     template.hasResourceProperties("AWS::ECS::TaskDefinition", {
       RuntimePlatform: { CpuArchitecture: "ARM64", OperatingSystemFamily: "LINUX" },
