@@ -28,7 +28,7 @@ import {
 import type { HttpResponse } from "./http.ts";
 
 /** Base URI namespace for our problem `type` values. */
-export const PROBLEM_TYPE_BASE = "https://kiro-remote.dev/problems";
+export const PROBLEM_TYPE_BASE = "https://kiro-remote.nikovirtala.dev/problems";
 
 /** An RFC 9457 problem detail document. */
 export interface ProblemDetail {

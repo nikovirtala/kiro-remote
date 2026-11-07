@@ -43,7 +43,7 @@ import {
   noContentResponse,
 } from "./http.ts";
 import { requireIdempotencyKey, withIdempotency } from "./idempotency.ts";
-import { CapabilityUnavailableError, UnprocessableError } from "./problem.ts";
+import { CapabilityUnavailableError, PROBLEM_TYPE_BASE, UnprocessableError } from "./problem.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Capability gating                                                          */
@@ -134,7 +134,7 @@ export async function getTurn(
   const turn = await ctx.repo.getTurn(req.params.id, req.params.turnId);
   if (!turn) {
     return jsonResponse(404, {
-      type: "https://kiro-remote.dev/problems/turn-not-found",
+      type: `${PROBLEM_TYPE_BASE}/turn-not-found`,
       title: "Turn Not Found",
       status: 404,
     });
