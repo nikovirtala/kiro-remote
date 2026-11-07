@@ -37,6 +37,15 @@ export function createLoopbackRoundtrip(deps: LoopbackDeps = {}): AuthorizationR
 
   return ({ authorizeUrl, state }) =>
     new Promise((resolve, reject) => {
+      // The redirect_uri captured at authorize time (with the real ephemeral
+      // port) is the SINGLE source of truth: the token exchange MUST send the
+      // byte-identical string, because the facade compares it with a strict
+      // equality check. We capture it once in the `listen` callback (below) and
+      // reuse it here, instead of recomputing from `server.address()` after
+      // `server.close()` -- which returns null, yielding a bogus port-0 URI and
+      // an "invalid_grant (redirect_uri does not match ...)" failure.
+      let boundRedirectUri: string | undefined;
+
       const server = createServer((req, res) => {
         const url = new URL(req.url ?? "/", "http://127.0.0.1");
         if (url.pathname !== "/callback") {
@@ -57,9 +66,14 @@ export function createLoopbackRoundtrip(deps: LoopbackDeps = {}): AuthorizationR
         server.close();
         clearTimeout(timer);
         if (ok && code) {
-          const addr = server.address();
-          const port = typeof addr === "object" && addr ? addr.port : 0;
-          resolve({ code, redirectUri: `http://127.0.0.1:${port}/callback` });
+          if (!boundRedirectUri) {
+            // Defensive: the callback fired before the listen callback bound the
+            // redirect_uri. This should be impossible (the browser can only be
+            // opened after we have the port), but never emit a port-0 URI.
+            reject(new Error("loopback callback arrived before the redirect_uri was bound"));
+            return;
+          }
+          resolve({ code, redirectUri: boundRedirectUri });
         } else {
           reject(new Error("loopback callback did not carry a valid code/state"));
         }
@@ -73,9 +87,9 @@ export function createLoopbackRoundtrip(deps: LoopbackDeps = {}): AuthorizationR
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
         const port = typeof addr === "object" && addr ? addr.port : 0;
-        const redirectUri = `http://127.0.0.1:${port}/callback`;
+        boundRedirectUri = `http://127.0.0.1:${port}/callback`;
         // Open the browser; the URL is never logged.
-        open(authorizeUrl(redirectUri));
+        open(authorizeUrl(boundRedirectUri));
       });
 
       server.on("error", (err) => {
