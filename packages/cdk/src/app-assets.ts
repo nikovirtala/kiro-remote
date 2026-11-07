@@ -23,6 +23,33 @@
 import type { ContainerImage } from "aws-cdk-lib/aws-ecs";
 import type { Code } from "aws-cdk-lib/aws-lambda";
 
+/**
+ * Paths excluded from the bridge image's `ContainerImage.fromAsset` build
+ * context (the monorepo root).
+ *
+ * CDK stages the ENTIRE context directory into `cdk.out/asset.<hash>/` BEFORE
+ * invoking Docker. The context root is the repo root, which CONTAINS
+ * `packages/cdk/cdk.out` -- so without an exclusion CDK copies cdk.out into the
+ * staged asset, which itself contains cdk.out, recursing until the path exceeds
+ * the OS limit (ENAMETOOLONG). The repo root has no `.dockerignore` of its own
+ * (the `packages/bridge/.dockerignore` is NOT read, since Docker reads the
+ * ignore file from the CONTEXT root), so the exclusion must be passed to
+ * `fromAsset` explicitly -- this is the copy step that actually failed.
+ *
+ * `**\/cdk.out` (the recursion source) and `**\/node_modules` (huge, and
+ * re-installed by the Dockerfile's own pnpm `deps` stage) MUST be excluded.
+ * None of these globs touch a path the Dockerfile COPYs (package.json,
+ * pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json, packages/core,
+ * packages/bridge), so the staged context still has everything the build needs.
+ */
+export const BRIDGE_IMAGE_EXCLUDES: readonly string[] = [
+  "**/node_modules",
+  "**/cdk.out",
+  "**/.api-bundle",
+  ".git",
+  "**/.git",
+];
+
 /** The opt-in context inputs resolved by bin/app.ts. */
 export interface AppAssetsInput {
   /**

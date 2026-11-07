@@ -11,7 +11,7 @@
 import type { ContainerImage } from "aws-cdk-lib/aws-ecs";
 import type { Code } from "aws-cdk-lib/aws-lambda";
 import { describe, expect, test, vi } from "vitest";
-import { type AppAssetsFactories, selectAppAssets } from "./app-assets.ts";
+import { type AppAssetsFactories, BRIDGE_IMAGE_EXCLUDES, selectAppAssets } from "./app-assets.ts";
 
 // Sentinel fakes standing in for the real (Docker/esbuild) assets. We only care
 // about identity + whether the factory ran, never the real resources.
@@ -77,5 +77,42 @@ describe("selectAppAssets", () => {
     );
     expect(factories.buildBridgeImage).not.toHaveBeenCalled();
     expect(factories.buildApiLambdaCode).not.toHaveBeenCalled();
+  });
+});
+
+describe("BRIDGE_IMAGE_EXCLUDES", () => {
+  // These globs are passed as the `exclude` option to the bridge image's
+  // `ContainerImage.fromAsset(repoRoot, ...)` so CDK does not recursively stage
+  // packages/cdk/cdk.out into the asset (ENAMETOOLONG). We assert the critical
+  // entries directly here because the fromAsset excludes are not observable in
+  // the synthesized template (they only affect the staged context on disk).
+
+  test("excludes cdk.out (the recursion source) and node_modules", () => {
+    // cdk.out is the entry that actually triggered the failure; node_modules is
+    // re-installed by the Dockerfile's own deps stage so the host copy is waste.
+    expect(BRIDGE_IMAGE_EXCLUDES).toContain("**/cdk.out");
+    expect(BRIDGE_IMAGE_EXCLUDES).toContain("**/node_modules");
+  });
+
+  test("excludes the gitignored esbuild output and the .git tree", () => {
+    expect(BRIDGE_IMAGE_EXCLUDES).toContain("**/.api-bundle");
+    expect(BRIDGE_IMAGE_EXCLUDES).toContain(".git");
+  });
+
+  test("does NOT exclude any path the Dockerfile COPYs from the context", () => {
+    // The staged context must still contain everything the bridge build needs.
+    // None of these required COPY sources may match an exclude glob.
+    const requiredCopySources = [
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "tsconfig.base.json",
+      "packages/core",
+      "packages/bridge",
+      "packages/bridge/Dockerfile",
+    ];
+    for (const source of requiredCopySources) {
+      expect(BRIDGE_IMAGE_EXCLUDES).not.toContain(source);
+    }
   });
 });

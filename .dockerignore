@@ -1,0 +1,28 @@
+# Docker build context ignore for the bridge image asset.
+#
+# The bridge image's `ContainerImage.fromAsset` build context is the MONOREPO
+# ROOT (the Dockerfile COPYs package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
+# tsconfig.base.json and the whole packages/core + packages/bridge trees). Docker
+# reads the `.dockerignore` from the CONTEXT root, so it must live HERE -- the
+# packages/bridge/.dockerignore is never consulted for this context.
+#
+# cdk.out is the critical entry: the repo root contains packages/cdk/cdk.out, and
+# staging it into the asset recurses (ENAMETOOLONG). node_modules is re-installed
+# by the Dockerfile's own pnpm `deps` stage, so the host copy is pure waste.
+
+**/node_modules
+**/cdk.out
+**/.api-bundle
+.git
+**/.git
+
+# Build output / detritus not needed by the image build.
+**/dist
+**/build
+**/coverage
+*.tsbuildinfo
+*.log
+.agents
+.mise-data
+.mise-cache
+.extralib

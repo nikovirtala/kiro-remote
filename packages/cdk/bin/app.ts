@@ -15,7 +15,7 @@ import { App } from "aws-cdk-lib";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { ContainerImage } from "aws-cdk-lib/aws-ecs";
 import { buildApiLambdaCode } from "../src/api-asset.ts";
-import { selectAppAssets } from "../src/app-assets.ts";
+import { BRIDGE_IMAGE_EXCLUDES, selectAppAssets } from "../src/app-assets.ts";
 import { KiroRemoteDnsStack } from "../src/dns-stack.ts";
 import { applyAwsSolutionsChecks } from "../src/nag.ts";
 import { KiroRemoteStack } from "../src/stack.ts";
@@ -68,6 +68,11 @@ const { kiroCliVersion, bridgeImage, apiLambdaCode } = selectAppAssets(
         file: "packages/bridge/Dockerfile",
         platform: Platform.LINUX_ARM64,
         buildArgs: { KIRO_CLI_VERSION: version },
+        // The build context is the repo root, which CONTAINS packages/cdk/cdk.out.
+        // Exclude it (and node_modules / .api-bundle / .git) so CDK does not
+        // recursively stage cdk.out into the asset -- that recursion overflows
+        // the path length (ENAMETOOLONG). See BRIDGE_IMAGE_EXCLUDES.
+        exclude: [...BRIDGE_IMAGE_EXCLUDES],
       }),
     // Real API Lambda asset (esbuild, in-process, no Docker).
     buildApiLambdaCode,
