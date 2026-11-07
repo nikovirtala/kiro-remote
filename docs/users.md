@@ -4,15 +4,18 @@
 Cognito OAuth access token, and you can only get one by signing in as a user in
 the pool.
 
-The Cognito user pool is created with **self-sign-up OFF** and **MFA required**
-(passkey/WebAuthn or TOTP). There is no public signup endpoint, so **you**, the
-operator, create users with the AWS CLI, and each user enrolls MFA on first
-sign-in through managed login.
+The Cognito user pool is created with **self-sign-up OFF** and **passwordless,
+passkey-first sign-in** (WebAuthn). There is no separately-required MFA step: a
+passkey login is already multi-factor (possession + required user verification),
+and Cognito treats requiring MFA on top of a passkey first-auth factor as
+mutually exclusive. There is no public signup endpoint, so **you**, the operator,
+create users with the AWS CLI, and each user registers a passkey on first sign-in
+through managed login.
 
 This matches the auth construct
 ([`packages/auth/src/construct.ts`](../packages/auth/src/construct.ts)):
-`selfSignUpEnabled: false`, `mfa: REQUIRED`, TOTP enabled, and passkey allowed as a
-first-auth factor.
+`selfSignUpEnabled: false`, `mfa: OFF`, passkey allowed as a first-auth factor, and
+`passkeyUserVerification: REQUIRED`.
 
 ## 1. Find the user pool id
 
@@ -51,13 +54,12 @@ aws cognito-idp admin-set-user-password \
 
 `--permanent` avoids the force-change-password state so you can sign in directly.
 
-## 4. Enroll MFA on first sign-in
+## 4. Register a passkey on first sign-in
 
-MFA is **required** by the pool, so the first interactive sign-in through managed
-login will prompt you to enroll a second factor:
-
-- a **passkey** (WebAuthn), or
-- **TOTP** (an authenticator app).
+The pool is passwordless and passkey-first, so the first interactive sign-in
+through managed login prompts you to register a **passkey** (WebAuthn). User
+verification (biometric/PIN) is required on the passkey, which makes the passkey
+itself the second factor; there is no separate TOTP/MFA step.
 
 Managed login (the Cognito hosted UI) is served from:
 
@@ -68,13 +70,13 @@ https://<cognitoDomainPrefix>.auth.<region>.amazoncognito.com
 with the prefix you passed as `-c cognitoDomainPrefix=...` at deploy time. You do
 not open this URL directly for day-to-day use; the login flow (via
 `kiro-remote login` or the OAuth authorize chain) redirects you there, you
-authenticate and complete MFA, and you are redirected back with a code that is
+authenticate with your passkey, and you are redirected back with a code that is
 exchanged for tokens.
 
 ## 5. Get a token
 
-Once the user exists and MFA is enrolled, obtain an access token with the CLI (the
-simplest path):
+Once the user exists and a passkey is registered, obtain an access token with the
+CLI (the simplest path):
 
 ```bash
 export KIRO_REMOTE_URL=https://<host>

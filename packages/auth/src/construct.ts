@@ -3,8 +3,11 @@
  * the OAuth facade.
  *
  * It provisions:
- *   - a Cognito user pool with self-sign-up OFF and MFA REQUIRED via passkey
- *     (WebAuthn) or TOTP, using the newer managed-login experience,
+ *   - a Cognito user pool with self-sign-up OFF and passwordless, passkey-first
+ *     (WebAuthn) sign-in using the newer managed-login experience. There is no
+ *     separately-required MFA step: a passkey login is already multi-factor
+ *     (possession + required user verification), which Cognito treats as
+ *     mutually exclusive with requiring MFA on top of a passkey first factor,
  *   - a resource server whose identifier is the canonical MCP URL
  *     (https://<host>/mcp) with scopes sessions:read / sessions:write /
  *     sessions:delete,
@@ -98,14 +101,21 @@ export class KiroRemoteAuth extends Construct {
 
     this.userPool = new UserPool(this, "UserPool", {
       selfSignUpEnabled: false,
-      // Passkey + TOTP require the Essentials feature plan.
+      // Passkeys require the Essentials feature plan.
       featurePlan: FeaturePlan.ESSENTIALS,
-      mfa: Mfa.REQUIRED,
-      // TOTP as the classic second factor; no SMS.
-      mfaSecondFactor: { sms: false, otp: true },
-      // Allow passkey (WebAuthn) as a first-auth factor alongside password.
+      // Option B: passwordless, passkey-first. No separately-required MFA step.
+      // Cognito rejects requiring MFA on top of a passkey first-auth factor
+      // ("Cannot set WebAuthn factor configuration to SINGLE_FACTOR if MFA is
+      // required and WebAuthn is an allowed first auth factor"), because a
+      // passkey login is already multi-factor. The security comes from the
+      // passkey itself (possession + required user verification below).
+      mfa: Mfa.OFF,
+      // Passkey (WebAuthn) is an allowed first-auth factor so sign-in can be
+      // passwordless and passkey-first. Cognito requires `password` to remain
+      // an allowed first factor as well (it must be true), so it stays enabled.
       signInPolicy: { allowedFirstAuthFactors: { password: true, passkey: true } },
-      // Require user verification when a passkey is used for MFA.
+      // Require user verification (biometric/PIN) on the passkey. This is the
+      // second factor inherent to the passkey and does not conflict with MFA.
       passkeyUserVerification: PasskeyUserVerification.REQUIRED,
       ...(props.passkeyRelyingPartyId
         ? { passkeyRelyingPartyId: props.passkeyRelyingPartyId }

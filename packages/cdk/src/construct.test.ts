@@ -13,7 +13,7 @@
  *   - the task role is scoped to its own table/bucket/queue/secret,
  *   - KIRO_API_KEY is a Secrets Manager ECS `secrets` entry (not a plain env),
  *   - the WAF has two rate-based rules and is associated with the API,
- *   - the Cognito pool has self-sign-up off + MFA required and the resource
+ *   - the Cognito pool has self-sign-up off + passwordless passkey-first sign-in and the resource
  *     server + facade client exist with the specified token lifetimes,
  *   - the region flows from stack props.
  */
@@ -247,10 +247,15 @@ describe("KiroRemote", () => {
     template.resourceCountIs("AWS::WAFv2::WebACLAssociation", 1);
   });
 
-  test("the Cognito pool has self-sign-up off and MFA required", () => {
+  test("the Cognito pool has self-sign-up off and is passwordless passkey-first", () => {
     template.hasResourceProperties("AWS::Cognito::UserPool", {
       AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
-      MfaConfiguration: "ON",
+      // No separately-required MFA step (the passkey is inherently multi-factor).
+      MfaConfiguration: "OFF",
+      // Passkey (WebAuthn) is an allowed first-auth factor.
+      Policies: Match.objectLike({
+        SignInPolicy: { AllowedFirstAuthFactors: Match.arrayWith(["WEB_AUTHN"]) },
+      }),
     });
   });
 

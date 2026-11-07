@@ -1,6 +1,6 @@
 /**
  * CDK assertion test for KiroRemoteAuth. Confirms the construct synthesizes a
- * user pool (self-sign-up off, MFA required), a resource server with the three
+ * user pool (self-sign-up off, passwordless passkey-first), a resource server with the three
  * scopes, a public no-secret facade client with the right token lifetimes and
  * the single callback URL, and an optional pre-registered client. Full stack
  * assembly + cdk-nag run in FEAT-007; here we only assert the resource graph.
@@ -27,10 +27,15 @@ function synth(): Template {
 describe("KiroRemoteAuth", () => {
   const template = synth();
 
-  test("creates a user pool with self sign-up off and MFA required", () => {
+  test("creates a passwordless passkey-first user pool with self sign-up off", () => {
     template.hasResourceProperties("AWS::Cognito::UserPool", {
       AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
-      MfaConfiguration: "ON",
+      // No separately-required MFA step (the passkey is inherently multi-factor).
+      MfaConfiguration: "OFF",
+      // Passkey (WebAuthn) is an allowed first-auth factor.
+      Policies: Match.objectLike({
+        SignInPolicy: { AllowedFirstAuthFactors: Match.arrayWith(["WEB_AUTHN"]) },
+      }),
     });
   });
 

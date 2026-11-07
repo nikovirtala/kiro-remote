@@ -98,12 +98,12 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
       reason:
         "KIRO_API_KEY (ksk_) is a long-lived personal token rotated out-of-band by the operator; automatic Secrets Manager rotation is not applicable to a user API key.",
     },
-    // COG8: the user pool stays on the Essentials feature plan (passkey/TOTP);
+    // COG8: the user pool stays on the Essentials feature plan (passkeys);
     // the Plus tier is not warranted for a single-tenant personal control plane.
     {
       id: "AwsSolutions-COG8",
       reason:
-        "The pool uses the Essentials feature plan (passkey + TOTP, MFA required, self-sign-up off); the Plus tier's threat-protection is not warranted for a single-tenant personal control plane.",
+        "The pool uses the Essentials feature plan (passwordless passkey-first sign-in, self-sign-up off); the Plus tier's threat-protection is not warranted for a single-tenant personal control plane.",
     },
     // DynamoDB: PITR explicitly enabled; acknowledgement is informational.
     {
@@ -114,11 +114,12 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     {
       id: "AwsSolutions-COG1",
       reason:
-        "Self-sign-up is OFF and the pool is admin-created only; a password-complexity policy does not apply to an admin-provisioned, MFA-required pool.",
+        "Self-sign-up is OFF and the pool is admin-created only; a password-complexity policy does not apply to an admin-provisioned, passkey-first pool.",
     },
     {
       id: "AwsSolutions-COG2",
-      reason: "MFA is REQUIRED on the user pool (passkey/TOTP).",
+      reason:
+        "No separately-required MFA step: the pool is passwordless and passkey-first, and a passkey login is already multi-factor (possession + required user verification). Cognito rejects requiring MFA on top of a passkey first-auth factor.",
     },
     {
       id: "AwsSolutions-COG3",
