@@ -48,4 +48,14 @@ describe("cdk-nag AwsSolutions", () => {
     applyAwsSolutionsChecks(app);
     expect(() => app.synth()).not.toThrow();
   });
+
+  test("synth with a custom domain stays green (ACM cert + DomainName add no un-acknowledged finding)", () => {
+    const app = new App();
+    new KiroRemoteStack(app, "KiroRemoteStack", {
+      env: ENV,
+      kiroRemote: { ...KIRO_REMOTE_PROPS, customDomain: { domainName: "kiro.example.dev" } },
+    });
+    applyAwsSolutionsChecks(app);
+    expect(() => app.synth()).not.toThrow();
+  });
 });

@@ -23,7 +23,10 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, test } from "vitest";
 import { KiroRemote } from "./construct.ts";
 
-function synth(region = "eu-west-1"): { template: Template; stack: Stack } {
+function synth(
+  region = "eu-west-1",
+  customDomain?: { domainName: string; certificateArn?: string },
+): { template: Template; stack: Stack } {
   const app = new App();
   const stack = new Stack(app, "TestStack", { env: { account: "111111111111", region } });
   new KiroRemote(stack, "KiroRemote", {
@@ -33,6 +36,7 @@ function synth(region = "eu-west-1"): { template: Template; stack: Stack } {
     preRegisteredClients: [
       { name: "ClaudeCode", callbackUrls: ["https://claude.ai/api/mcp/auth_callback"] },
     ],
+    ...(customDomain ? { customDomain } : {}),
   });
   return { template: Template.fromStack(stack), stack };
 }
@@ -270,5 +274,41 @@ describe("KiroRemote", () => {
     // A different region synthesizes cleanly too.
     const other = synth("ap-southeast-2");
     expect(other.stack.region).toBe("ap-southeast-2");
+  });
+
+  test("the custom domain is opt-in: with no prop there is no cert/domain/mapping", () => {
+    // The default-domain path (no customDomain prop) must be unchanged.
+    template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+    template.resourceCountIs("AWS::ApiGatewayV2::DomainName", 0);
+    template.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 0);
+  });
+
+  test("with customDomain set it creates a DNS-validated cert, a DomainName, and a mapping", () => {
+    const { template: t } = synth("eu-north-1", { domainName: "kiro.example.dev" });
+    // A new regional ACM certificate for the host, DNS-validated.
+    t.resourceCountIs("AWS::CertificateManager::Certificate", 1);
+    t.hasResourceProperties("AWS::CertificateManager::Certificate", {
+      DomainName: "kiro.example.dev",
+      ValidationMethod: "DNS",
+    });
+    // The apigatewayv2 custom domain and its mapping to the HTTP API.
+    t.resourceCountIs("AWS::ApiGatewayV2::DomainName", 1);
+    t.hasResourceProperties("AWS::ApiGatewayV2::DomainName", {
+      DomainName: "kiro.example.dev",
+    });
+    t.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 1);
+  });
+
+  test("with customDomain.certificateArn set it imports the cert (no new Certificate)", () => {
+    const { template: t } = synth("eu-north-1", {
+      domainName: "kiro.example.dev",
+      certificateArn:
+        "arn:aws:acm:eu-north-1:111111111111:certificate/00000000-0000-0000-0000-000000000000",
+    });
+    // No new ACM certificate resource -- the existing one is imported.
+    t.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+    // The DomainName + mapping are still created.
+    t.resourceCountIs("AWS::ApiGatewayV2::DomainName", 1);
+    t.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 1);
   });
 });

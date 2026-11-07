@@ -29,4 +29,24 @@ test("the stack emits the named CfnOutputs operators look up", () => {
   ]) {
     template.hasOutput(logicalId, Match.objectLike({ Description: Match.anyValue() }));
   }
+  // Without a custom domain the custom-domain outputs are absent (opt-in).
+  expect(Object.keys(template.findOutputs("CustomDomainTarget")).length).toBe(0);
+});
+
+test("a custom domain adds the CustomDomainTarget output the operator CNAMEs to", () => {
+  const app = new App();
+  const stack = new KiroRemoteStack(app, "KiroRemoteStack", {
+    env: { account: "111111111111", region: "eu-north-1" },
+    kiroRemote: {
+      publicBaseUrl: "https://kiro-remote.example.dev",
+      cognitoDomainPrefix: "kiro-remote-test",
+      allowedRepos: ["acme/*"],
+      customDomain: { domainName: "kiro-remote.example.dev" },
+    },
+  });
+  const template = Template.fromStack(stack);
+
+  for (const logicalId of ["CustomDomainTarget", "CustomDomainHostedZoneId"]) {
+    template.hasOutput(logicalId, Match.objectLike({ Description: Match.anyValue() }));
+  }
 });

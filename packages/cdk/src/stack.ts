@@ -49,5 +49,22 @@ export class KiroRemoteStack extends Stack {
       value: this.kiroRemote.auth.mcpResourceIdentifier,
       description: "The RFC 8707 MCP resource identifier (<host>/mcp audience)",
     });
+
+    // When a custom domain is configured, publish the regional target the
+    // operator must CNAME to at their DNS provider (e.g. Cloudflare). The ACM
+    // DNS-validation record values are not emitted as outputs for a zone-less
+    // DNS-validated cert -- read those from the ACM console / describe-certificate.
+    if (this.kiroRemote.customDomainName) {
+      new CfnOutput(this, "CustomDomainTarget", {
+        value: this.kiroRemote.customDomainName.regionalDomainName,
+        description:
+          "API Gateway regional domain name -- the CNAME target for the custom host (set at your DNS provider)",
+      });
+      new CfnOutput(this, "CustomDomainHostedZoneId", {
+        value: this.kiroRemote.customDomainName.regionalHostedZoneId,
+        description:
+          "Region-specific Route 53 hosted zone id of the custom domain regional endpoint",
+      });
+    }
   }
 }

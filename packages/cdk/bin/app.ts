@@ -31,12 +31,23 @@ const allowedRepos = Array.isArray(allowedReposCtx)
     ? allowedReposCtx.split(",")
     : ["*/*"];
 
+// Optional API Gateway v2 custom domain. Enabled by passing
+// `-c customDomainName=<host>` (and optionally `-c certificateArn=<arn>` to
+// import an existing cert instead of creating a DNS-validated one). Omitted =>
+// default execute-api domain only, so synth without it is unchanged.
+const customDomainName = app.node.tryGetContext("customDomainName") as string | undefined;
+const certificateArn = app.node.tryGetContext("certificateArn") as string | undefined;
+const customDomain = customDomainName
+  ? { domainName: customDomainName, ...(certificateArn ? { certificateArn } : {}) }
+  : undefined;
+
 new KiroRemoteStack(app, "KiroRemoteStack", {
   ...(account && region ? { env: { account, region } } : {}),
   kiroRemote: {
     publicBaseUrl,
     cognitoDomainPrefix,
     allowedRepos,
+    ...(customDomain ? { customDomain } : {}),
   },
 });
 

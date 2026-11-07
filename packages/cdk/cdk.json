@@ -8,6 +8,7 @@
     "publicBaseUrl": "https://kiro-remote.nikovirtala.dev",
     "cognitoDomainPrefix": "kiro-remote",
     "allowedRepos": "*/*",
+    "customDomainName": "kiro-remote.nikovirtala.dev",
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "@aws-cdk/core:validateSnapshotRemovalPolicy": true,

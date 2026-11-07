@@ -30,8 +30,13 @@
 
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
 import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
-import { HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
+import { DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import {
+  Certificate,
+  CertificateValidation,
+  type ICertificate,
+} from "aws-cdk-lib/aws-certificatemanager";
 import {
   AttributeType,
   BillingMode,
@@ -112,6 +117,32 @@ export interface KiroRemoteProps {
   preRegisteredClients?: PreRegisteredClientProps[];
 
   /**
+   * Optional API Gateway v2 custom domain fronting the HTTP API. When set, the
+   * construct creates (or imports) a regional ACM certificate for
+   * `domainName` and maps the domain to the HTTP API's default stage. DNS
+   * records (the ACM validation CNAME and the final CNAME to the regional
+   * target) are created by the operator at their DNS provider (e.g.
+   * Cloudflare) -- there is no Route 53 automation. See
+   * [`docs/deploy.md`](../../../docs/deploy.md) for the exact records.
+   *
+   * When omitted, only the API Gateway default
+   * `https://<api-id>.execute-api.<region>.amazonaws.com` domain is created
+   * (the default-domain path is unchanged).
+   */
+  customDomain?: {
+    /** The custom host, e.g. "kiro-remote.example.com". */
+    domainName: string;
+    /**
+     * ARN of an existing regional ACM certificate for `domainName`. When
+     * omitted, a new DNS-validated certificate is created (the operator adds
+     * the emitted validation CNAME at their DNS provider; CloudFormation waits
+     * on validation during deploy). Pre-creating the certificate and passing
+     * its ARN avoids the deploy blocking on validation.
+     */
+    certificateArn?: string;
+  };
+
+  /**
    * Override for the bridge container image. When omitted, a lightweight
    * placeholder registry image is used so `cdk synth` runs WITHOUT a Docker
    * build in constrained CI/sandboxes. Production deploys pass
@@ -159,6 +190,12 @@ export class KiroRemote extends Construct {
   readonly bridgeService: FargateService;
   /** The HTTP API fronting the api Lambdas at base path /v1. */
   readonly httpApi: HttpApi;
+  /**
+   * The optional API Gateway v2 custom domain mapped to the HTTP API. Present
+   * only when {@link KiroRemoteProps.customDomain} is supplied. Its
+   * `regionalDomainName` is the CNAME target the operator points their DNS at.
+   */
+  readonly customDomainName?: DomainName;
   /** The WAFv2 web ACL protecting the API. */
   readonly webAcl: CfnWebACL;
   /** The OAUTH#CODE callback Lambda. */
@@ -317,8 +354,31 @@ export class KiroRemote extends Construct {
     const callbackIntegration = new HttpLambdaIntegration("CallbackIntegration", this.callbackFn);
     const tokenIntegration = new HttpLambdaIntegration("TokenIntegration", this.tokenFn);
 
+    // Optional API Gateway v2 custom domain. Created before the HttpApi so it
+    // can be wired as the default-stage domain mapping. The certificate is
+    // regional (same stack region as the HTTP API) -- correct for an apigw v2
+    // regional custom domain. DNS records live at the operator's DNS provider.
+    if (props.customDomain) {
+      const certificate: ICertificate = props.customDomain.certificateArn
+        ? Certificate.fromCertificateArn(this, "ApiCertificate", props.customDomain.certificateArn)
+        : new Certificate(this, "ApiCertificate", {
+            domainName: props.customDomain.domainName,
+            // DNS validation with no hosted zone: ACM emits a validation CNAME
+            // the operator adds at their DNS provider (Cloudflare, "DNS only").
+            validation: CertificateValidation.fromDns(),
+          });
+      this.customDomainName = new DomainName(this, "ApiDomainName", {
+        domainName: props.customDomain.domainName,
+        certificate,
+      });
+    }
+
     this.httpApi = new HttpApi(this, "HttpApi", {
       description: "kiro-remote control plane HTTP API",
+      // Map the custom domain to the default stage when one is configured.
+      ...(this.customDomainName
+        ? { defaultDomainMapping: { domainName: this.customDomainName } }
+        : {}),
     });
 
     // The REST surface and the MCP transport live under /v1 and /mcp.
