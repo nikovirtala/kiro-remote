@@ -1,5 +1,5 @@
 {
-  "name": "@kiro-remote/e2e",
+  "name": "@nikovirtala/e2e",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,8 +13,8 @@
     "lint": "biome check ."
   },
   "dependencies": {
-    "@kiro-remote/api": "workspace:*",
-    "@kiro-remote/core": "workspace:*",
-    "@kiro-remote/mcp": "workspace:*"
+    "@nikovirtala/api": "workspace:*",
+    "@nikovirtala/core": "workspace:*",
+    "@nikovirtala/mcp": "workspace:*"
   }
 }

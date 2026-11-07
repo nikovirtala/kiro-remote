@@ -32,7 +32,7 @@ import {
   type Principal,
   toMcpInputSchema,
   z,
-} from "@kiro-remote/core";
+} from "@nikovirtala/core";
 import type { ToolClient } from "./client.ts";
 import { collectEvents, finalTranscript } from "./events.ts";
 

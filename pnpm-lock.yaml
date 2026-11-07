@@ -181,13 +181,13 @@ importers:
 
   e2e:
     dependencies:
-      '@kiro-remote/api':
+      '@nikovirtala/api':
         specifier: workspace:*
         version: link:../packages/api
-      '@kiro-remote/core':
+      '@nikovirtala/core':
         specifier: workspace:*
         version: link:../packages/core
-      '@kiro-remote/mcp':
+      '@nikovirtala/mcp':
         specifier: workspace:*
         version: link:../packages/mcp
 
@@ -202,10 +202,10 @@ importers:
       '@aws-lambda-powertools/tracer':
         specifier: ^2.30.0
         version: 2.36.0
-      '@kiro-remote/auth':
+      '@nikovirtala/auth':
         specifier: workspace:*
         version: link:../auth
-      '@kiro-remote/core':
+      '@nikovirtala/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -221,7 +221,7 @@ importers:
       '@aws-sdk/client-kms':
         specifier: ^3.1163.0
         version: 3.1163.0
-      '@kiro-remote/core':
+      '@nikovirtala/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -252,7 +252,7 @@ importers:
       '@aws-sdk/lib-dynamodb':
         specifier: ^3.1163.0
         version: 3.1163.0(@aws-sdk/client-dynamodb@3.1163.0)
-      '@kiro-remote/core':
+      '@nikovirtala/core':
         specifier: workspace:*
         version: link:../core
       ulid:
@@ -261,10 +261,10 @@ importers:
 
   packages/cdk:
     dependencies:
-      '@kiro-remote/auth':
+      '@nikovirtala/auth':
         specifier: workspace:*
         version: link:../auth
-      '@kiro-remote/core':
+      '@nikovirtala/core':
         specifier: workspace:*
         version: link:../core
       aws-cdk-lib:
@@ -304,18 +304,18 @@ importers:
 
   packages/mcp:
     dependencies:
-      '@kiro-remote/api':
-        specifier: workspace:*
-        version: link:../api
-      '@kiro-remote/auth':
-        specifier: workspace:*
-        version: link:../auth
-      '@kiro-remote/core':
-        specifier: workspace:*
-        version: link:../core
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(zod@4.6.7)
+      '@nikovirtala/api':
+        specifier: workspace:*
+        version: link:../api
+      '@nikovirtala/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@nikovirtala/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 

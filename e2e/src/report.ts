@@ -14,7 +14,7 @@
  * presence booleans by the config layer and are never passed to the report.
  */
 
-import { redact } from "@kiro-remote/core";
+import { redact } from "@nikovirtala/core";
 
 /** The outcome of a single harness step. */
 export type StepStatus = "ran" | "blocked" | "skipped";

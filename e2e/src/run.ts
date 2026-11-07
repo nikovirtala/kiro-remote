@@ -17,7 +17,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { redact } from "@kiro-remote/core";
+import { redact } from "@nikovirtala/core";
 import { loadConfig } from "./config.ts";
 import { recordDerivedArtifacts } from "./derived.ts";
 import { type PreflightProbes, preflight } from "./preflight.ts";

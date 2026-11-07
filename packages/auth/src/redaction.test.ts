@@ -4,7 +4,7 @@
  * line must be routed through it.
  */
 
-import { redact } from "@kiro-remote/core";
+import { redact } from "@nikovirtala/core";
 import { describe, expect, test } from "vitest";
 
 describe("redaction of facade secrets", () => {

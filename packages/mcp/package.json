@@ -1,5 +1,5 @@
 {
-  "name": "@kiro-remote/mcp",
+  "name": "@nikovirtala/mcp",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -15,9 +15,9 @@
     "lint": "biome check ."
   },
   "dependencies": {
-    "@kiro-remote/api": "workspace:*",
-    "@kiro-remote/auth": "workspace:*",
-    "@kiro-remote/core": "workspace:*",
+    "@nikovirtala/api": "workspace:*",
+    "@nikovirtala/auth": "workspace:*",
+    "@nikovirtala/core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.32.2"
   }
 }

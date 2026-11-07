@@ -10,7 +10,7 @@
  * (so the client's RFC 9207 check against the advertised AS issuer passes).
  */
 
-import type { Repository } from "@kiro-remote/core";
+import type { Repository } from "@nikovirtala/core";
 import type { AuthorizeTxData } from "./authorize.ts";
 import type { CognitoPort } from "./cognito.ts";
 import type { FacadeConfig } from "./config.ts";

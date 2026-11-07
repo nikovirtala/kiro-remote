@@ -1,5 +1,5 @@
 /**
- * @kiro-remote/api
+ * @nikovirtala/api
  *
  * AWS Lambda handlers that are thin over the core service layer, wired to an
  * API Gateway HTTP API at base path /v1:
@@ -15,7 +15,7 @@
  * authorizer); the client token is never forwarded to Kiro.
  */
 
-export const PACKAGE_NAME = "@kiro-remote/api";
+export const PACKAGE_NAME = "@nikovirtala/api";
 
 export type { ApiContext, FacadeDeps } from "./context.ts";
 export { withDefaults } from "./context.ts";

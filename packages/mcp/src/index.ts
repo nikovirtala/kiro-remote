@@ -1,10 +1,10 @@
 /**
- * @kiro-remote/mcp
+ * @nikovirtala/mcp
  *
  * One MCP server on @modelcontextprotocol/sdk exposed over two transports --
  * the Streamable HTTP transport mounted at /mcp on the API, and the stdio
  * transport run by `kiro-remote mcp` -- both written against the ONE canonical
- * {@link KiroRemoteClient} interface (defined in @kiro-remote/api, implemented
+ * {@link KiroRemoteClient} interface (defined in @nikovirtala/api, implemented
  * here as {@link InProcessClient} and {@link HttpClient}). The 14 tools call
  * only that interface, so they contain no transport-forked logic.
  *
@@ -13,7 +13,7 @@
  * can compose the in-process /mcp handler onto the API context.
  */
 
-export const PACKAGE_NAME = "@kiro-remote/mcp";
+export const PACKAGE_NAME = "@nikovirtala/mcp";
 
 // CLI + OAuth + storage.
 export {
@@ -26,7 +26,7 @@ export {
   type WhoamiCommandDeps,
   whoamiCommand,
 } from "./cli-commands.ts";
-// The single client interface (canonical in @kiro-remote/api) and its impls.
+// The single client interface (canonical in @nikovirtala/api) and its impls.
 export type { ToolClient } from "./client.ts";
 export { InProcessClient, type InProcessClientDeps } from "./client.ts";
 export {

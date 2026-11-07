@@ -8,8 +8,8 @@
  * REST API still enforces authorization authoritatively server-side.
  */
 
-import type { Principal } from "@kiro-remote/core";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Principal } from "@nikovirtala/core";
 import type { ToolClient } from "./client.ts";
 import type { Keychain } from "./keychain.ts";
 import { buildMcpServer, type Logger, silentLogger } from "./server.ts";

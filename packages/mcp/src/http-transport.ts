@@ -13,9 +13,9 @@
  * {@link listTools}, so there is no transport-forked behavior.
  */
 
-import type { McpTransportHandler, McpTransportRequest } from "@kiro-remote/api";
-import { type Principal, redact } from "@kiro-remote/core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { McpTransportHandler, McpTransportRequest } from "@nikovirtala/api";
+import { type Principal, redact } from "@nikovirtala/core";
 import type { ToolClient } from "./client.ts";
 import {
   callTool,

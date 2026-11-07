@@ -16,7 +16,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { Repository, type SessionInputs, type SessionMetaItem } from "@kiro-remote/core";
+import { Repository, type SessionInputs, type SessionMetaItem } from "@nikovirtala/core";
 import { AcpGateway } from "./gateway.ts";
 import { defaultHeadlessRunner, type HeadlessRunner } from "./headless.ts";
 import { HealthMonitor } from "./health.ts";

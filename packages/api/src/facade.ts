@@ -1,5 +1,5 @@
 /**
- * Mount the @kiro-remote/auth OAuth facade handlers on THIS API with NO
+ * Mount the @nikovirtala/auth OAuth facade handlers on THIS API with NO
  * authentication. These endpoints are the OAuth 2.1 Cognito facade the MCP
  * clients talk to before they ever hold a token, so they must be reachable
  * unauthenticated:
@@ -25,7 +25,7 @@ import {
   handleProtectedResourceMetadata,
   handleRevoke,
   handleToken,
-} from "@kiro-remote/auth";
+} from "@nikovirtala/auth";
 import type { ApiContext } from "./context.ts";
 import type { HttpRequest, HttpResponse } from "./http.ts";
 

@@ -13,7 +13,7 @@
  */
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { JSONRPC_INTERNAL_ERROR, JSONRPC_VERSION, replyForUnknownRequest } from "@kiro-remote/core";
+import { JSONRPC_INTERNAL_ERROR, JSONRPC_VERSION, replyForUnknownRequest } from "@nikovirtala/core";
 import type { Logger } from "./logger.ts";
 
 export interface SpawnSpec {

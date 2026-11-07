@@ -1,6 +1,6 @@
 /**
  * The OAuth 2.1 authorization-code + PKCE login flow for the `kiro-remote` CLI,
- * run against the @kiro-remote/auth facade.
+ * run against the @nikovirtala/auth facade.
  *
  * Flow:
  *   1. Fetch the CLI's own CIMD document from
@@ -19,7 +19,7 @@
  * fully testable offline against a fake facade (no real network, no browser).
  */
 
-import { generateCodeVerifier, generateOpaqueToken, s256Challenge } from "@kiro-remote/auth";
+import { generateCodeVerifier, generateOpaqueToken, s256Challenge } from "@nikovirtala/auth";
 
 /** The subset of the CIMD document the CLI needs. */
 export interface CliClientMetadata {

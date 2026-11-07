@@ -1,4 +1,4 @@
-import type { SessionInputs, SessionMetaItem } from "@kiro-remote/core";
+import type { SessionInputs, SessionMetaItem } from "@nikovirtala/core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { Supervisor, TRANSPORT_LOST_REASON } from "../src/supervisor.ts";
 import { createHarness, type Harness, requireHarness } from "./harness.ts";

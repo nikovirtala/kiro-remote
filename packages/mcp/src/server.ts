@@ -14,7 +14,6 @@
  * core's redact.
  */
 
-import { ForbiddenError, type Principal, redact } from "@kiro-remote/core";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -22,6 +21,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
+import { ForbiddenError, type Principal, redact } from "@nikovirtala/core";
 import type { ToolClient } from "./client.ts";
 import { authorizeTool, findTool, type ToolResult, toolListEntries } from "./tools.ts";
 

@@ -12,7 +12,7 @@ Both surfaces expose the same **14 tools**.
 
 ## The `kiro-remote` CLI
 
-The CLI lives in `packages/mcp` (private workspace package `@kiro-remote/mcp`, bin
+The CLI lives in `packages/mcp` (private workspace package `@nikovirtala/mcp`, bin
 name `kiro-remote`, entry
 [`packages/mcp/src/cli.ts`](../packages/mcp/src/cli.ts)). Commands:
 
@@ -40,10 +40,10 @@ The package is a private workspace package, so run its bin through pnpm:
 export KIRO_REMOTE_URL=https://<host>
 
 # Log in once (opens managed login in your browser, enrolls/uses MFA).
-mise exec -- pnpm --filter @kiro-remote/mcp exec kiro-remote login
+mise exec -- pnpm --filter @nikovirtala/mcp exec kiro-remote login
 
 # Confirm who you are.
-mise exec -- pnpm --filter @kiro-remote/mcp exec kiro-remote whoami
+mise exec -- pnpm --filter @nikovirtala/mcp exec kiro-remote whoami
 ```
 
 (If you manage Node/pnpm yourself, drop the `mise exec --` prefix.)
@@ -60,7 +60,7 @@ Claude Desktop-style `mcpServers` entry:
   "mcpServers": {
     "kiro-remote": {
       "command": "mise",
-      "args": ["exec", "--", "pnpm", "--filter", "@kiro-remote/mcp", "exec", "kiro-remote", "mcp"],
+      "args": ["exec", "--", "pnpm", "--filter", "@nikovirtala/mcp", "exec", "kiro-remote", "mcp"],
       "env": {
         "KIRO_REMOTE_URL": "https://<host>"
       }

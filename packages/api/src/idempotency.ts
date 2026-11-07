@@ -8,7 +8,7 @@
  * retried launch never enqueues a second command.
  */
 
-import type { Repository } from "@kiro-remote/core";
+import type { Repository } from "@nikovirtala/core";
 import type { HttpRequest, HttpResponse } from "./http.ts";
 import { BadRequestError } from "./problem.ts";
 

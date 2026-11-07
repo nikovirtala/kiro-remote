@@ -1,5 +1,5 @@
 /**
- * @kiro-remote/core
+ * @nikovirtala/core
  *
  * Single source of truth for the kiro-remote control plane:
  *  - zod schemas (REST validation + OpenAPI 3.1 + MCP tool input schemas)
@@ -13,7 +13,7 @@
  *  - the redaction utility
  */
 
-export const PACKAGE_NAME = "@kiro-remote/core";
+export const PACKAGE_NAME = "@nikovirtala/core";
 
 export * from "./auth/authenticate.ts";
 export * from "./auth/authorize.ts";

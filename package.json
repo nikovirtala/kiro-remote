@@ -15,8 +15,8 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "synth": "pnpm --filter @kiro-remote/cdk synth",
-    "e2e": "pnpm --filter @kiro-remote/e2e e2e"
+    "synth": "pnpm --filter @nikovirtala/cdk synth",
+    "e2e": "pnpm --filter @nikovirtala/e2e e2e"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.6",

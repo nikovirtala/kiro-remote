@@ -1,4 +1,4 @@
-import { type Command, hasExtensionMethod } from "@kiro-remote/core";
+import { type Command, hasExtensionMethod } from "@nikovirtala/core";
 import { afterEach, describe, expect, test } from "vitest";
 import { createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";

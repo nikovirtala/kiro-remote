@@ -142,10 +142,10 @@ commands from `packages/cdk` (its `cdk.json` sets `app` to `node bin/app.ts`). T
 
 ```bash
 # Bootstrap (once per account/region).
-mise exec -- pnpm --filter @kiro-remote/cdk exec cdk bootstrap
+mise exec -- pnpm --filter @nikovirtala/cdk exec cdk bootstrap
 
 # Deploy with your real context values.
-mise exec -- pnpm --filter @kiro-remote/cdk exec cdk deploy \
+mise exec -- pnpm --filter @nikovirtala/cdk exec cdk deploy \
   -c publicBaseUrl=https://<host> \
   -c cognitoDomainPrefix=<prefix> \
   -c allowedRepos=owner/repo1,owner/repo2

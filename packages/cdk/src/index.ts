@@ -1,8 +1,8 @@
 /**
- * @kiro-remote/cdk
+ * @nikovirtala/cdk
  *
  * The reusable KiroRemote construct (the whole control plane as one resource
- * graph) and the KiroRemoteAuth construct (re-exported from @kiro-remote/auth).
+ * graph) and the KiroRemoteAuth construct (re-exported from @nikovirtala/auth).
  * Consumers import them via the `./cdk` subpath export:
  *
  *   import { KiroRemote, KiroRemoteAuth } from "kiro-remote/cdk";
@@ -10,14 +10,14 @@
  * `bin/app.ts` is a thin consumer that instantiates the stack with props.
  */
 
-export const PACKAGE_NAME = "@kiro-remote/cdk";
+export const PACKAGE_NAME = "@nikovirtala/cdk";
 
 // Re-export the standalone Cognito facade construct for direct reuse.
 export {
   KiroRemoteAuth,
   type KiroRemoteAuthProps,
   type PreRegisteredClientProps,
-} from "@kiro-remote/auth";
+} from "@nikovirtala/auth";
 export {
   DEFAULT_CIMD_ALLOWED_HOST,
   DEFAULT_EVENT_TTL_DAYS,

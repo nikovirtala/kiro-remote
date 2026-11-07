@@ -78,7 +78,7 @@ simplest path):
 
 ```bash
 export KIRO_REMOTE_URL=https://<host>
-mise exec -- pnpm --filter @kiro-remote/mcp exec kiro-remote login
+mise exec -- pnpm --filter @nikovirtala/mcp exec kiro-remote login
 ```
 
 This runs the OAuth authorization-code + PKCE flow against the facade, opens

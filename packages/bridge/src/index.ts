@@ -1,5 +1,5 @@
 /**
- * @kiro-remote/bridge
+ * @nikovirtala/bridge
  *
  * Container entrypoint (`bridge serve`): one ACP V3 gateway over a single
  * `kiro-cli acp --agent-engine=v3` child, SQS FIFO command intake, and
@@ -10,7 +10,7 @@
  * them against a fake scripted ACP agent with injected AWS clients.
  */
 
-export const PACKAGE_NAME = "@kiro-remote/bridge";
+export const PACKAGE_NAME = "@nikovirtala/bridge";
 
 export * from "./gateway.ts";
 export * from "./headless.ts";

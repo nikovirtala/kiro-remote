@@ -28,7 +28,7 @@
  * literals and const objects only.
  */
 
-import { KiroRemoteAuth, type PreRegisteredClientProps } from "@kiro-remote/auth";
+import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/auth";
 import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 import { HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
@@ -124,7 +124,7 @@ export interface KiroRemoteProps {
    * Override for the API Lambda code. When omitted, a tiny inline placeholder
    * handler is used so `cdk synth` runs WITHOUT a Node bundling step in
    * constrained CI/sandboxes. Production deploys pass a bundled asset whose
-   * handler builds the {@link import("@kiro-remote/api").ApiContext} from env
+   * handler builds the {@link import("@nikovirtala/api").ApiContext} from env
    * and calls `createHandler`.
    */
   apiLambdaCode?: Code;

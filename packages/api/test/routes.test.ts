@@ -485,7 +485,7 @@ describe("Kiro-mapped concurrency error", () => {
   test("a ConcurrencyLimitError from Kiro (enqueue) maps to 429 with Retry-After", async () => {
     const h = buildHarness({ ids: ["turn-k", "cmd-k"] });
     h.seedSession({ id: "s1", status: "idle" });
-    const { ConcurrencyLimitError } = await import("@kiro-remote/core");
+    const { ConcurrencyLimitError } = await import("@nikovirtala/core");
     h.queue.enqueue = async () => {
       throw new ConcurrencyLimitError(10, 10);
     };

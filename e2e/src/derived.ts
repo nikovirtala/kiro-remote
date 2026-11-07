@@ -14,8 +14,8 @@
  *     exact rules the bridge (FEAT-004) and auth facade (FEAT-003) code apply.
  */
 
-import { capabilities, type InitializeResult } from "@kiro-remote/core";
-import { toolListEntries } from "@kiro-remote/mcp";
+import { capabilities, type InitializeResult } from "@nikovirtala/core";
+import { toolListEntries } from "@nikovirtala/mcp";
 import type { Report } from "./report.ts";
 
 /**
@@ -85,7 +85,7 @@ export function recordDerivedArtifacts(report: Report): void {
   }));
   report.derive(
     "mcp_tool_list",
-    "static MCP tool registry (@kiro-remote/mcp toolListEntries) -- the identical list a live MCP Inspector would show; NOT from a live Kiro run",
+    "static MCP tool registry (@nikovirtala/mcp toolListEntries) -- the identical list a live MCP Inspector would show; NOT from a live Kiro run",
     { count: tools.length, tools },
   );
 

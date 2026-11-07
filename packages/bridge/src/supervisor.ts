@@ -18,7 +18,7 @@ import {
   type Repository,
   type SessionInputs,
   type SessionMetaItem,
-} from "@kiro-remote/core";
+} from "@nikovirtala/core";
 import type { AcpGateway } from "./gateway.ts";
 import type { Logger } from "./logger.ts";
 import type { Metrics } from "./metrics.ts";

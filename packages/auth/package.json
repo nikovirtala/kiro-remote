@@ -1,5 +1,5 @@
 {
-  "name": "@kiro-remote/auth",
+  "name": "@nikovirtala/auth",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1163.0",
     "@aws-sdk/client-kms": "^3.1163.0",
-    "@kiro-remote/core": "workspace:*"
+    "@nikovirtala/core": "workspace:*"
   },
   "peerDependencies": {
     "aws-cdk-lib": "^2.275.0",

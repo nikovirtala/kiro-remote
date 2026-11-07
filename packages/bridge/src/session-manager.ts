@@ -26,7 +26,7 @@ import {
   type SessionInputs,
   type SessionMetaItem,
   transition,
-} from "@kiro-remote/core";
+} from "@nikovirtala/core";
 import { ulid } from "ulid";
 import type { AcpGateway } from "./gateway.ts";
 import { type HeadlessRunner, headlessDelete, headlessLaunch } from "./headless.ts";

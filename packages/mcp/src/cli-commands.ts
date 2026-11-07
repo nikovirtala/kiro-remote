@@ -14,7 +14,7 @@
  * output goes through core's redact.
  */
 
-import { redact } from "@kiro-remote/core";
+import { redact } from "@nikovirtala/core";
 import type { Keychain, StoredTokens } from "./keychain.ts";
 import {
   type AuthorizationRoundtrip,

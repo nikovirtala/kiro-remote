@@ -2,7 +2,7 @@
  * The ONE {@link KiroRemoteClient} interface the MCP tools are written against,
  * re-exported here as {@link ToolClient} with its two implementations.
  *
- * The interface is defined once, canonically, in @kiro-remote/api's mcp-seam;
+ * The interface is defined once, canonically, in @nikovirtala/api's mcp-seam;
  * both this package and the API import that single definition so there is no
  * divergence. The tools call ONLY {@link ToolClient}; neither implementation
  * leaks transport details into them.
@@ -22,7 +22,7 @@ import type {
   ClientSession,
   ClientTurn,
   KiroRemoteClient,
-} from "@kiro-remote/api";
+} from "@nikovirtala/api";
 import {
   capabilities as deriveCapabilities,
   type Principal,
@@ -37,9 +37,9 @@ import {
   listSessions as svcListSessions,
   sendPrompt as svcSendPrompt,
   setConfig as svcSetConfig,
-} from "@kiro-remote/core";
+} from "@nikovirtala/core";
 
-/** The single client interface the tools depend on (canonical in @kiro-remote/api). */
+/** The single client interface the tools depend on (canonical in @nikovirtala/api). */
 export type ToolClient = KiroRemoteClient;
 
 const ACTIVE_STATUSES = ["provisioning", "running", "idle", "awaiting_permission"];

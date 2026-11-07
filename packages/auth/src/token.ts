@@ -14,7 +14,7 @@
  * mints, signs, or reshapes tokens -- Cognito is the only issuer.
  */
 
-import type { Repository } from "@kiro-remote/core";
+import type { Repository } from "@nikovirtala/core";
 import { type CognitoPort, CognitoTokenError, type CognitoTokenSet } from "./cognito.ts";
 import type { KmsPort } from "./kms.ts";
 import { sha256Hex, verifyS256 } from "./pkce.ts";

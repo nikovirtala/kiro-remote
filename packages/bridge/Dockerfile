@@ -31,7 +31,7 @@ COPY packages/bridge/package.json packages/bridge/package.json
 # image reproducible; the lockfile is the source of truth.
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     PNPM_HOME=/pnpm pnpm install --frozen-lockfile \
-      --filter @kiro-remote/bridge... --prod=false
+      --filter @nikovirtala/bridge... --prod=false
 
 ############################
 # runtime: kiro-cli + the bridge source

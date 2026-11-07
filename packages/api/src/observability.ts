@@ -9,7 +9,7 @@
 import { Logger } from "@aws-lambda-powertools/logger";
 import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
 import { Tracer } from "@aws-lambda-powertools/tracer";
-import { redact } from "@kiro-remote/core";
+import { redact } from "@nikovirtala/core";
 
 const SERVICE_NAME = "kiro-remote-api";
 const METRICS_NAMESPACE = "KiroRemote";

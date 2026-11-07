@@ -24,12 +24,12 @@ core, auth, bridge, api, mcp, cdk, and the e2e harness's own unit tests.
 Use the workspace filter to run just one package's tests:
 
 ```bash
-mise exec -- pnpm --filter @kiro-remote/core test
-mise exec -- pnpm --filter @kiro-remote/auth test
-mise exec -- pnpm --filter @kiro-remote/bridge test
-mise exec -- pnpm --filter @kiro-remote/api test
-mise exec -- pnpm --filter @kiro-remote/mcp test
-mise exec -- pnpm --filter @kiro-remote/cdk test
+mise exec -- pnpm --filter @nikovirtala/core test
+mise exec -- pnpm --filter @nikovirtala/auth test
+mise exec -- pnpm --filter @nikovirtala/bridge test
+mise exec -- pnpm --filter @nikovirtala/api test
+mise exec -- pnpm --filter @nikovirtala/mcp test
+mise exec -- pnpm --filter @nikovirtala/cdk test
 ```
 
 ## Synthesizing the CDK stack
@@ -38,7 +38,7 @@ mise exec -- pnpm --filter @kiro-remote/cdk test
 checks):
 
 ```bash
-mise exec -- pnpm synth   # pnpm --filter @kiro-remote/cdk synth
+mise exec -- pnpm synth   # pnpm --filter @nikovirtala/cdk synth
 ```
 
 It uses placeholder images/code and the fallback `publicBaseUrl`, so it needs no
@@ -47,7 +47,7 @@ Docker build and no AWS credentials.
 ## The live end-to-end harness
 
 ```bash
-mise exec -- pnpm e2e   # pnpm --filter @kiro-remote/e2e e2e → node src/run.ts
+mise exec -- pnpm e2e   # pnpm --filter @nikovirtala/e2e e2e → node src/run.ts
 ```
 
 The harness ([`e2e/src/run.ts`](../e2e/src/run.ts)) drives the **full live flow**
