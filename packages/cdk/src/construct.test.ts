@@ -175,6 +175,19 @@ describe("KiroRemote", () => {
     }
   });
 
+  test("the placeholder path (no bridgeImage prop) references the placeholder registry image, no Docker asset", () => {
+    // With no bridgeImage override the task definition points at the public
+    // placeholder registry image -- a plain string image, NOT an ECR asset
+    // reference (which would require a Docker build at synth time).
+    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+    const container = (
+      Object.values(taskDefs)[0].Properties as {
+        ContainerDefinitions: Array<{ Image: unknown }>;
+      }
+    ).ContainerDefinitions[0];
+    expect(container.Image).toBe("public.ecr.aws/amazonlinux/amazonlinux:2023");
+  });
+
   test("the arm64 Graviton runtime platform is set on the task definition", () => {
     template.hasResourceProperties("AWS::ECS::TaskDefinition", {
       RuntimePlatform: { CpuArchitecture: "ARM64", OperatingSystemFamily: "LINUX" },

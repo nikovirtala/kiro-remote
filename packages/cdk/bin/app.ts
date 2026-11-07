@@ -9,13 +9,24 @@
  * CDK_DEFAULT_* variables (Kiro sandboxes resolve to us-east-1 regardless).
  */
 
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { App } from "aws-cdk-lib";
+import { Platform } from "aws-cdk-lib/aws-ecr-assets";
+import { ContainerImage } from "aws-cdk-lib/aws-ecs";
 import { buildApiLambdaCode } from "../src/api-asset.ts";
+import { selectAppAssets } from "../src/app-assets.ts";
 import { KiroRemoteDnsStack } from "../src/dns-stack.ts";
 import { applyAwsSolutionsChecks } from "../src/nag.ts";
 import { KiroRemoteStack } from "../src/stack.ts";
 
 const app = new App();
+
+// The monorepo root, resolved relative to THIS file (packages/cdk/bin/app.ts).
+// The bridge Dockerfile's build context MUST be the repo root because it COPYs
+// package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json and the
+// whole packages/core + packages/bridge trees.
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 const account = process.env.CDK_DEFAULT_ACCOUNT;
 const region = process.env.CDK_DEFAULT_REGION;
@@ -35,17 +46,33 @@ const allowedRepos = Array.isArray(allowedReposCtx)
 
 const env = account && region ? { account, region } : undefined;
 
-// OPT-IN production-asset trigger. The real bridge image (FEAT-003) and the
-// real bundled API Lambda code are built ONLY when `-c kiroCliVersion=<ver>`
-// is passed. This single flag gates everything that needs a Docker build or a
-// Node bundler, so the default placeholder path (no flag) synthesizes with no
-// Docker and no bundler and all existing assertion tests stay green.
-const kiroCliVersion = app.node.tryGetContext("kiroCliVersion") as string | undefined;
-
-// Build the real API Lambda asset (esbuild, in-process, no Docker) only on the
-// opt-in path. When absent, apiLambdaCode stays undefined so the construct
-// falls back to its inline placeholder and synth needs no bundler.
-const apiLambdaCode = kiroCliVersion ? buildApiLambdaCode() : undefined;
+// OPT-IN production-asset trigger. The real bridge image AND the real bundled
+// API Lambda code are built ONLY when `-c kiroCliVersion=<ver>` is passed. This
+// single flag gates everything that needs a Docker build or a Node bundler, so
+// the default placeholder path (no flag) synthesizes with no Docker and no
+// bundler and all existing assertion tests stay green.
+//
+// `selectAppAssets` is a pure, unit-tested helper (src/app-assets.ts): it
+// validates the trigger (throwing clearly for a blank value, since the bridge
+// Dockerfile's KIRO_CLI_VERSION build arg has no default) and only then invokes
+// the asset factories. When the flag is absent it builds nothing and the
+// construct falls back to its placeholders.
+const { kiroCliVersion, bridgeImage, apiLambdaCode } = selectAppAssets(
+  { kiroCliVersion: app.node.tryGetContext("kiroCliVersion") as string | undefined },
+  {
+    // Real bridge image from the Dockerfile with the repo root as build context
+    // (linux/arm64 for Graviton). Needs Docker: this runs at synth time on the
+    // operator's machine, not in constrained CI/sandboxes.
+    buildBridgeImage: (version: string) =>
+      ContainerImage.fromAsset(repoRoot, {
+        file: "packages/bridge/Dockerfile",
+        platform: Platform.LINUX_ARM64,
+        buildArgs: { KIRO_CLI_VERSION: version },
+      }),
+    // Real API Lambda asset (esbuild, in-process, no Docker).
+    buildApiLambdaCode,
+  },
+);
 
 // DNS stack (optional, deployed FIRST): a Route 53 PUBLIC hosted zone for the
 // delegated subdomain. Enabled by passing `-c dnsZoneName=<zone>`. Deploy it,
@@ -95,6 +122,7 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     cognitoDomainPrefix,
     allowedRepos,
     ...(kiroCliVersion ? { kiroCliVersion } : {}),
+    ...(bridgeImage ? { bridgeImage } : {}),
     ...(apiLambdaCode ? { apiLambdaCode } : {}),
     ...(customDomain ? { customDomain } : {}),
   },

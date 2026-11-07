@@ -51,17 +51,48 @@ mise exec -- pnpm synth
 The CDK app ([`packages/cdk/bin/app.ts`](../packages/cdk/bin/app.ts)) reads three
 context values, passed with `-c key=value`:
 
-> **Real-asset opt-in — `-c kiroCliVersion=<ver>`.** The default (no
-> `kiroCliVersion`) path ships both a placeholder bridge image and an inline
-> placeholder API Lambda, so `cdk synth`/`cdk deploy` run with **no Docker build
-> and no Node bundler** — ideal for CI/sandboxes. Passing `-c kiroCliVersion=<ver>`
-> is the single trigger that switches on the real production assets: the app
-> bundles the real API Lambda (`src/lambda/entry.ts`) in-process with esbuild
-> (no Docker) and passes it as `apiLambdaCode`, and the same flag is what you set
-> to build the real bridge image from the Dockerfile with that `KIRO_CLI_VERSION`.
-> Run the real-asset build on a machine with Docker (the bridge image needs it);
-> the API Lambda bundle itself is headless and needs only esbuild (installed as a
-> workspace dev dependency).
+> **Real-asset opt-in, `-c kiroCliVersion=<ver>`.** This single flag is the
+> trigger for BOTH real production assets and is **required for a real deploy**:
+> the bridge Dockerfile's `KIRO_CLI_VERSION` build arg has **no default**, so
+> without a concrete version there is nothing to build the real image from. When
+> you pass it:
+>
+> - the app **builds the real bridge container image locally** from
+>   [`packages/bridge/Dockerfile`](../packages/bridge/Dockerfile) via
+>   `ContainerImage.fromAsset` with the repo root as the build context,
+>   `platform: linux/arm64` (Graviton) and `buildArgs: { KIRO_CLI_VERSION }`.
+>   This **needs a working Docker/container runtime** on the machine running
+>   `cdk synth`/`cdk deploy`, and it builds `linux/arm64`; and
+> - the app **bundles the real API Lambda** (`src/lambda/entry.ts`) in-process
+>   with esbuild and passes it as `apiLambdaCode`. The bundle is **headless, no
+>   Docker** (esbuild is a workspace dev dependency).
+>
+> Omitting the flag is the **override seam**: the stack ships a lightweight
+> placeholder bridge image and an inline placeholder API Lambda, so
+> `cdk synth`/`cdk deploy` run with **no Docker build and no Node bundler**,
+> which is what lets `cdk synth` run in constrained CI/sandboxes. The kiro-cli
+> version is **operator-supplied and never hardcoded** anywhere in the repo.
+>
+> The real bridge image build is the only step that needs Docker; run the
+> real-asset deploy on a machine that has it (the API Lambda bundle itself runs
+> anywhere esbuild does). A blank/empty `kiroCliVersion` is rejected with a
+> clear error rather than silently falling back to placeholders.
+>
+> Example real deploy (combining the version with this repo's custom-domain
+> context):
+>
+> ```bash
+> pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
+>   -c kiroCliVersion=1.2.3 \
+>   -c publicBaseUrl=https://kiro-remote.nikovirtala.dev \
+>   -c customDomainName=kiro-remote.nikovirtala.dev \
+>   -c hostedZoneId=<HostedZoneId output>
+> ```
+>
+> **CONFIG#CAPS caveat:** until the bridge first initializes and writes its
+> `CONFIG#CAPS` item, `GET /capabilities` and `GET /models` return the
+> empty-capabilities fallback. This is expected right after a fresh deploy and
+> resolves once the bridge task is healthy and has published its capabilities.
 
 | Context key           | Default                                             | Meaning                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -126,7 +157,7 @@ entrypoint only wires the three context keys above; to set the rest you edit
 | `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `permissionTimeout`    | `24h`                                     | How long a permission request stays answerable.                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg. Required when building the image from the Dockerfile.                                                                                                                                                                                                                                                                                                                 |
+| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg (which has no default). Also the single opt-in trigger for the real assets (see the [real-asset opt-in callout](#3-choose-your-deploy-context)). Operator-supplied, never hardcoded; required for a real deploy.                                                                                                                                                       |
 | `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade.                                                                                                                                                                                                                                                                                                                                         |
 | `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api). |
 | `bridgeImage`          | placeholder registry image                | Override the bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                      |
@@ -339,8 +370,12 @@ ARG, and runs `bridge serve` via Node type stripping.
 `KIRO_API_KEY` is **never** baked into the image; it is injected as an ECS secret
 at runtime.
 
-To wire it into the stack, set `bridgeImage` in the construct props to a
-`fromAsset` build of the repo root, for example:
+`bin/app.ts` wires this image automatically on the real-asset path: passing
+`-c kiroCliVersion=<ver>` makes the app set the construct's `bridgeImage` prop to
+a `fromAsset` build of the repo root (the build context is the repo root because
+the Dockerfile COPYs `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
+`tsconfig.base.json` and the `packages/core` + `packages/bridge` trees). The call
+it makes is:
 
 ```ts
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
@@ -353,8 +388,12 @@ bridgeImage: ContainerImage.fromAsset(repoRoot, {
 }),
 ```
 
-Building this requires a working container runtime; CDK invokes it during
-`cdk deploy`.
+Building this requires a working container runtime (Docker) that can produce a
+`linux/arm64` image; CDK invokes it during `cdk synth`/`cdk deploy` on the
+operator's machine. Omit `-c kiroCliVersion` and the construct keeps its
+lightweight placeholder image so `cdk synth` runs with no container build (the
+constrained CI/sandbox path). The `KIRO_CLI_VERSION` value is operator-supplied
+and never hardcoded in the repo.
 
 ## 4. Store the Kiro API key
 
