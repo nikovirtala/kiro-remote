@@ -22,6 +22,7 @@ import {
 import type { AcpGateway } from "./gateway.ts";
 import type { Logger } from "./logger.ts";
 import type { Metrics } from "./metrics.ts";
+import { persistCaps } from "./persist-caps.ts";
 import type { SessionManager } from "./session-manager.ts";
 
 /** Reason recorded on a turn lost across a transport drop. */
@@ -71,6 +72,9 @@ export class Supervisor {
     await gateway.initialize();
     metrics.count("AcpRestarts");
     logger.info("acp_reconnected");
+    // Re-persist CONFIG#CAPS from the refreshed advertisement (guarded so a
+    // write failure never aborts reconnect).
+    await persistCaps(this.deps.repo, gateway, logger);
 
     // 3. session/load every non-idle session.
     const sessions = await this.deps.listSessions();

@@ -27,6 +27,7 @@ import { HealthMonitor } from "./health.ts";
 import { CommandIntake } from "./intake.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { loggerMetricSink, type MetricSink, Metrics } from "./metrics.ts";
+import { persistCaps } from "./persist-caps.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
 import { SessionManager } from "./session-manager.ts";
 import { Supervisor } from "./supervisor.ts";
@@ -238,6 +239,11 @@ export class BridgeServer {
     this.logger.info("bridge_initialized", {
       extensionMethods: this.gateway.capabilities().extensionMethods,
     });
+    // Persist CONFIG#CAPS so the REST API GET /v1/capabilities, the lambda
+    // capability gate, and the MCP kiro_capabilities tool serve real data
+    // instead of the empty fallback. Guarded so a write failure never kills
+    // startup; reconnect retries the write.
+    await persistCaps(this.repo, this.gateway, this.logger);
   }
 
   /** Begin consuming the SQS FIFO command queue (the long-running loop). */

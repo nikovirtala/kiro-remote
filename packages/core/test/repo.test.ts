@@ -1,7 +1,12 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { ConcurrentModificationError, Repository, type SessionMetaItem } from "../src/index.ts";
+import {
+  ConcurrentModificationError,
+  capabilities as deriveCapabilities,
+  Repository,
+  type SessionMetaItem,
+} from "../src/index.ts";
 
 /**
  * In-memory DynamoDB document client supporting only the command shapes the
@@ -185,6 +190,52 @@ describe("repository: idempotency store (idempotent replay)", () => {
     await expect(r.putIdempotency("user-1", "key-1", { ok: false })).rejects.toMatchObject({
       name: "ConditionalCheckFailedException",
     });
+  });
+});
+
+describe("repository: CONFIG#CAPS + CONFIG#MODELS round-trip", () => {
+  it("stores the raw initialize result so deriveCapabilities reproduces it", async () => {
+    const { r } = repo();
+    const initializeResult = {
+      protocolVersion: 1,
+      agentCapabilities: {
+        _meta: {
+          kiro: {
+            extensionMethods: ["_kiro/openExternalUrl", "_kiro/session/context"],
+            executionTargets: ["cloud", "local"],
+            sessionSources: ["remote", "local"],
+            listScopes: ["cloud"],
+            replayMarking: true,
+          },
+        },
+      },
+      configOptions: [{ configId: "model", values: ["claude-sonnet"] }],
+      modes: [{ modeId: "vibe", name: "Vibe" }],
+    };
+    await r.putCaps({
+      initializeResult,
+      extensionMethods: ["_kiro/openExternalUrl", "_kiro/session/context"],
+      configOptions: initializeResult.configOptions,
+      modes: initializeResult.modes,
+    });
+    const caps = await r.getCaps();
+    expect(caps).not.toBeNull();
+    expect(caps?.PK).toBe("CONFIG");
+    expect(caps?.SK).toBe("CAPS");
+    // The read side reconstructs the advertisement from the raw initialize result.
+    const derived = deriveCapabilities((caps as { initializeResult: object }).initializeResult);
+    expect(derived.extensionMethods).toEqual(["_kiro/openExternalUrl", "_kiro/session/context"]);
+    expect(derived.executionTargets).toEqual(["cloud", "local"]);
+    expect(derived.models).toEqual(["claude-sonnet"]);
+    expect(derived.cloudExecution).toBe(true);
+  });
+
+  it("stores and reads CONFIG#MODELS with a source", async () => {
+    const { r } = repo();
+    await r.putModels(["claude-sonnet", "claude-haiku"], "config_option");
+    const models = await r.getModels();
+    expect(models?.models).toEqual(["claude-sonnet", "claude-haiku"]);
+    expect(models?.source).toBe("config_option");
   });
 });
 
