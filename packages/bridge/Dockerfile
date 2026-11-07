@@ -20,11 +20,10 @@ ARG NODE_VERSION=26.13.0
 ############################
 # deps: install workspace node_modules with pnpm and bundle the bridge
 ############################
-# TARGETPLATFORM is provided by buildkit from the build-level --platform flag
-# (CDK passes platform: Platform.LINUX_ARM64 to ContainerImage.fromAsset), so
-# the image is still arm64 without a constant --platform on FROM.
-ARG TARGETPLATFORM
-FROM --platform=$TARGETPLATFORM node:${NODE_VERSION}-bookworm-slim AS deps
+# CDK passes platform: Platform.LINUX_ARM64 to ContainerImage.fromAsset, so
+# buildkit already sets the target platform from the build-level --platform
+# flag; a per-FROM --platform would be redundant (RedundantTargetPlatform).
+FROM node:${NODE_VERSION}-bookworm-slim AS deps
 WORKDIR /app
 
 # Install the pinned pnpm via npm (the node slim image ships npm but not
@@ -81,35 +80,50 @@ RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/cli.ts \
 ############################
 # runtime: kiro-cli + the self-contained bridge bundle
 ############################
-FROM --platform=$TARGETPLATFORM node:${NODE_VERSION}-bookworm-slim AS runtime
+FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 WORKDIR /app
 
 # The kiro-cli version to install is a REQUIRED build arg (no default pin here).
 ARG KIRO_CLI_VERSION
 # The official install script URL (overridable for mirrors/air-gapped builds).
-ARG KIRO_CLI_INSTALL_URL=https://kiro.dev/install.sh
+# Per the Kiro headless docs the canonical command is
+# `curl -fsSL https://cli.kiro.dev/install | bash` (note: no `.sh` suffix).
+ARG KIRO_CLI_INSTALL_URL=https://cli.kiro.dev/install
 
-# Install curl + ca-certificates, then install kiro-cli via the official script
-# with the pinned version, then drop the build-only packages.
+# Install the build-only deps the official script needs on Linux, then install
+# kiro-cli via that script with the pinned version, then drop the build-only
+# packages.
 #
-# The official script installs the single kiro-cli binary into ROOT's home
-# (/root/.local/bin/kiro-cli). The container runs as the non-root `bridge` user
-# (below), and /root is mode 0700 -- a non-root process cannot traverse it, so
-# a symlink pointing INTO /root/.local/bin resolves to EACCES at exec time
-# (the bridge crashed with `spawn kiro-cli EACCES`). We therefore copy the REAL
-# binary out to a world-executable system path (/usr/local/bin, already on the
-# default PATH) as a 0755 file so the non-root user can read+execute it. `cp -L`
-# dereferences, so we copy the actual executable even if `command -v` resolves a
-# symlink. Nothing kiro-cli needs at runtime is left reachable only via /root.
+# The script's shebang is `#!/bin/bash` and it uses bash-only features
+# (`[[ ]]`, arrays, BASH_REMATCH), so it MUST be piped to `bash` -- piping to
+# `sh` (dash on Debian) would break it. Its `check_dependencies` requires a
+# downloader (curl), `unzip`, and `sha256sum` (coreutils, already present); so
+# `unzip` is added alongside curl + ca-certificates. The version is passed via
+# `--version` (strict semver), NOT an env var. `--no-modify-path` skips the
+# script's shell-rc edits since we relocate the binary ourselves.
+#
+# The script installs the single kiro-cli binary into HOME's `.local/bin`
+# (HOME=/root during this root RUN -> /root/.local/bin/kiro-cli). The container
+# runs as the non-root `bridge` user (below), and /root is mode 0700 -- a
+# non-root process cannot traverse it, so leaving kiro-cli only under /root
+# resolves to EACCES at exec time (the bridge crashed with
+# `spawn kiro-cli EACCES`). We therefore copy the REAL binary out to a
+# world-executable system path (/usr/local/bin, already on the default PATH) as
+# a 0755 file so the non-root user can read+execute it. `cp -L` dereferences, so
+# we copy the actual executable even if KIRO_BIN resolves a symlink. The script
+# edits shell rc files (not the current shell's PATH), so `command -v kiro-cli`
+# right after the pipe may miss it; we resolve the known install dir directly
+# first and fall back to `command -v`.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates unzip \
     && test -n "${KIRO_CLI_VERSION}" \
-    && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | KIRO_CLI_VERSION="${KIRO_CLI_VERSION}" sh -s -- --version "${KIRO_CLI_VERSION}" \
-    && KIRO_BIN="$(command -v kiro-cli || true)" \
-    && { [ -n "${KIRO_BIN}" ] || KIRO_BIN=/root/.local/bin/kiro-cli; } \
+    && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
+    && KIRO_BIN=/root/.local/bin/kiro-cli \
+    && { [ -x "${KIRO_BIN}" ] || KIRO_BIN="$(command -v kiro-cli || true)"; } \
+    && { [ -n "${KIRO_BIN}" ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
     && cp -L "${KIRO_BIN}" /usr/local/bin/kiro-cli \
     && chmod 0755 /usr/local/bin/kiro-cli \
-    && apt-get purge -y curl \
+    && apt-get purge -y curl unzip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 

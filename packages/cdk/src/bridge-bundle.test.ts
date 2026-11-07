@@ -112,4 +112,45 @@ describe("bridge image bundle", () => {
     // kiro-cli, so a future regression fails the image build loudly.
     expect(dockerfile).toMatch(/runuser\s+-u\s+bridge\s+--\s+kiro-cli\s+--version/);
   });
+
+  // This guards a FOURTH failure class: the kiro-cli install invocation itself.
+  // The previous default `https://kiro.dev/install.sh` returned HTTP 404 and
+  // the script was piped to `sh` (dash) even though it has a `#!/bin/bash`
+  // shebang and uses bash-only features, and `unzip` (a dependency the script
+  // requires on Linux) was never installed -- so the install RUN failed with
+  // `curl: (22) ... 404` and `cp: cannot stat '/root/.local/bin/kiro-cli'`.
+  // These cheap content assertions pin the corrected invocation.
+  test("the Dockerfile installs kiro-cli from the official URL, piped to bash, with unzip available", () => {
+    const dockerfile = readFileSync(DOCKERFILE, "utf8");
+
+    // The official install URL is `https://cli.kiro.dev/install` (no `.sh`),
+    // never the 404ing `kiro.dev/install.sh`.
+    expect(dockerfile).toMatch(/KIRO_CLI_INSTALL_URL=https:\/\/cli\.kiro\.dev\/install\b/);
+    expect(dockerfile).not.toMatch(/kiro\.dev\/install\.sh/);
+
+    // The script has a bash shebang and bash-only features, so it must be piped
+    // to `bash`, not `sh`.
+    expect(dockerfile).toMatch(
+      /curl\s+-fsSL\s+"?\$\{?KIRO_CLI_INSTALL_URL\}?"?\s*\|\s*bash\s+-s\s+--/,
+    );
+    expect(dockerfile).not.toMatch(/\|\s*(?:\S+\s+)?sh\s+-s\s+--/);
+
+    // The script's Linux dependency `unzip` must be installed alongside curl.
+    expect(dockerfile).toMatch(/apt-get\s+install\b[^\n]*\bunzip\b/);
+
+    // The version pin is still passed as `--version` and a blank version still
+    // fails fast via the `test -n` guard.
+    expect(dockerfile).toMatch(/--version\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
+    expect(dockerfile).toMatch(/test\s+-n\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
+  });
+
+  // This guards a FIFTH concern: both FROM lines must NOT pin a per-stage
+  // `--platform`, since CDK's build-level `--platform linux/arm64` already sets
+  // the target platform (buildkit warns RedundantTargetPlatform otherwise).
+  test("the Dockerfile does not set a redundant per-FROM --platform", () => {
+    const dockerfile = readFileSync(DOCKERFILE, "utf8");
+
+    expect(dockerfile).not.toMatch(/FROM\s+--platform=/);
+    expect(dockerfile).not.toMatch(/TARGETPLATFORM/);
+  });
 });
