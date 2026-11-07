@@ -29,7 +29,7 @@
  */
 
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
-import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
+import { Duration, RemovalPolicy, Stack, Validations } from "aws-cdk-lib";
 import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import {
@@ -601,7 +601,17 @@ export class KiroRemote extends Construct {
     this.commandQueue.grantConsumeMessages(taskDef.taskRole);
     this.kiroApiKeySecret.grantRead(taskDef.taskRole);
     // The execution role needs to pull the secret to inject it at start.
-    this.kiroApiKeySecret.grantRead(taskDef.obtainExecutionRole());
+    const executionRole = taskDef.obtainExecutionRole();
+    this.kiroApiKeySecret.grantRead(executionRole);
+    // Scoped to the execution role only (not the stack): with an ECR asset
+    // image, CDK grants ecr:GetAuthorizationToken on "*", an action that does
+    // not support resource-level permissions. Image pulls stay scoped to the
+    // asset repository.
+    Validations.of(executionRole).acknowledge({
+      id: "AwsSolutions-IAM5[Resource::*]",
+      reason:
+        "ecr:GetAuthorizationToken does not support resource-level permissions and must use Resource '*' (https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerregistry.html); ECR pull actions remain scoped to the CDK asset repository.",
+    });
 
     this.bridgeService = new FargateService(this, "BridgeService", {
       cluster,
