@@ -87,21 +87,43 @@ describe("bridge image bundle", () => {
     expect(resolvableInvocation).toBe(true);
   });
 
-  // This guards a THIRD failure class: the runtime `kiro-cli` must be
-  // EXECUTABLE by the non-root `bridge` user. The official install script
-  // drops the binary into ROOT's home (/root/.local/bin), which is mode 0700;
-  // a symlink into /root plus `ENV PATH="/root/.local/bin:..."` left kiro-cli
-  // reachable only through a path the non-root user cannot traverse, so the
-  // bridge crashed with `spawn kiro-cli EACCES` and ECS tripped the deployment
-  // circuit breaker. The fix copies the real binary to a world-executable
-  // system path. This cheap content assertion closes that gap.
-  test("the Dockerfile installs kiro-cli to a world-executable system path (not a /root-only symlink)", () => {
+  // This guards a THIRD failure class: BOTH runtime binaries -- `kiro-cli` and
+  // its `kiro-cli-chat` sibling (which `kiro-cli acp` internally exec's) --
+  // must land in a world-executable system path reachable by the non-root
+  // `bridge` user. The official install script drops binaries into HOME's
+  // `.local/bin` (/root/.local/bin, mode 0700) by default; our earlier approach
+  // then cherry-picked ONLY `kiro-cli` into /usr/local/bin, leaving
+  // `kiro-cli-chat` behind -- so `kiro-cli acp` crashed with `failed to launch
+  // kiro-cli-chat: No such file or directory (os error 2)`. The fix installs
+  // GLOBALLY (`Q_INSTALL_GLOBAL=1`, which makes the script's inner install.sh
+  // target /usr/local/bin directly) so both binaries land there together, then
+  // chmods both 0755 and asserts kiro-cli-chat is present. These cheap content
+  // assertions close that gap.
+  test("the Dockerfile installs kiro-cli GLOBALLY so both kiro-cli and kiro-cli-chat land in a world-executable path", () => {
     const dockerfile = readFileSync(DOCKERFILE, "utf8");
 
-    // kiro-cli must be materialized as a real, world-executable file on a
-    // system PATH dir the non-root user can reach.
-    expect(dockerfile).toMatch(/cp\s+-L\s+"?\$\{?KIRO_BIN\}?"?\s+\/usr\/local\/bin\/kiro-cli/);
-    expect(dockerfile).toMatch(/chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli/);
+    // The install must run with Q_INSTALL_GLOBAL=1 so the script targets
+    // /usr/local/bin ($GLOBAL_INSTALL_DIR) directly for BOTH binaries.
+    expect(dockerfile).toMatch(
+      /Q_INSTALL_GLOBAL=1\s+bash\s+-s\s+--\s+--version\s+"?\$\{?KIRO_CLI_VERSION\}?"?/,
+    );
+
+    // Both binaries must be made world-executable together.
+    expect(dockerfile).toMatch(
+      /chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli\s+\/usr\/local\/bin\/kiro-cli-chat/,
+    );
+
+    // The build must ASSERT kiro-cli-chat is actually present+executable, so a
+    // standalone zip (which ships no kiro-cli-chat) fails the build loudly
+    // instead of deploying a broken image.
+    const assertsChatPresent =
+      /command\s+-v\s+kiro-cli-chat/.test(dockerfile) ||
+      /test\s+-x\s+\/usr\/local\/bin\/kiro-cli-chat/.test(dockerfile);
+    expect(assertsChatPresent).toBe(true);
+
+    // The brittle single-binary cherry-pick must be GONE: the build must no
+    // longer relocate ONLY kiro-cli via `cp -L "$KIRO_BIN" /usr/local/bin/kiro-cli`.
+    expect(dockerfile).not.toMatch(/cp\s+-L\s+"?\$\{?KIRO_BIN\}?"?\s+\/usr\/local\/bin\/kiro-cli/);
 
     // It must NOT keep kiro-cli reachable only via /root: no symlink target
     // under /root and no /root/.local/bin on PATH for the runtime user.
@@ -109,8 +131,13 @@ describe("bridge image bundle", () => {
     expect(dockerfile).not.toMatch(/ln\s+-sf\s+"?\$\(command\s+-v\s+kiro-cli/);
 
     // A build-time exec check must prove the non-root `bridge` user can run
-    // kiro-cli, so a future regression fails the image build loudly.
+    // kiro-cli AND reach kiro-cli-chat, so a future regression fails the image
+    // build loudly.
     expect(dockerfile).toMatch(/runuser\s+-u\s+bridge\s+--\s+kiro-cli\s+--version/);
+    const provesChatReachable =
+      /runuser\s+-u\s+bridge\s+--\s+command\s+-v\s+kiro-cli-chat/.test(dockerfile) ||
+      /runuser\s+-u\s+bridge\s+--\s+test\s+-x\s+\/usr\/local\/bin\/kiro-cli-chat/.test(dockerfile);
+    expect(provesChatReachable).toBe(true);
   });
 
   // This guards a FOURTH failure class: the kiro-cli install invocation itself.
@@ -129,9 +156,10 @@ describe("bridge image bundle", () => {
     expect(dockerfile).not.toMatch(/kiro\.dev\/install\.sh/);
 
     // The script has a bash shebang and bash-only features, so it must be piped
-    // to `bash`, not `sh`.
+    // to `bash`, not `sh`. (An optional `Q_INSTALL_GLOBAL=1` env assignment may
+    // precede `bash` so the install targets /usr/local/bin globally.)
     expect(dockerfile).toMatch(
-      /curl\s+-fsSL\s+"?\$\{?KIRO_CLI_INSTALL_URL\}?"?\s*\|\s*bash\s+-s\s+--/,
+      /curl\s+-fsSL\s+"?\$\{?KIRO_CLI_INSTALL_URL\}?"?\s*\|\s*(?:Q_INSTALL_GLOBAL=1\s+)?bash\s+-s\s+--/,
     );
     expect(dockerfile).not.toMatch(/\|\s*(?:\S+\s+)?sh\s+-s\s+--/);
 

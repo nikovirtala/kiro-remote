@@ -99,30 +99,37 @@ ARG KIRO_CLI_INSTALL_URL=https://cli.kiro.dev/install
 # `sh` (dash on Debian) would break it. Its `check_dependencies` requires a
 # downloader (curl), `unzip`, and `sha256sum` (coreutils, already present); so
 # `unzip` is added alongside curl + ca-certificates. The version is passed via
-# `--version` (strict semver), NOT an env var. `--no-modify-path` skips the
-# script's shell-rc edits since we relocate the binary ourselves.
+# `--version` (strict semver), NOT an env var.
 #
-# The script installs the single kiro-cli binary into HOME's `.local/bin`
-# (HOME=/root during this root RUN -> /root/.local/bin/kiro-cli). The container
-# runs as the non-root `bridge` user (below), and /root is mode 0700 -- a
-# non-root process cannot traverse it, so leaving kiro-cli only under /root
-# resolves to EACCES at exec time (the bridge crashed with
-# `spawn kiro-cli EACCES`). We therefore copy the REAL binary out to a
-# world-executable system path (/usr/local/bin, already on the default PATH) as
-# a 0755 file so the non-root user can read+execute it. `cp -L` dereferences, so
-# we copy the actual executable even if KIRO_BIN resolves a symlink. The script
-# edits shell rc files (not the current shell's PATH), so `command -v kiro-cli`
-# right after the pipe may miss it; we resolve the known install dir directly
-# first and fall back to `command -v`.
+# CRITICAL: the CLI ships TWO binaries -- `kiro-cli` (the entrypoint) and
+# `kiro-cli-chat` (the headless chat/ACP engine that `kiro-cli acp` internally
+# exec's). The official script's inner install.sh writes to `$HOME/.local/bin`
+# by default, OR to `/usr/local/bin` ($GLOBAL_INSTALL_DIR) when its env carries
+# `KIRO_CLI_INSTALL_GLOBAL=1`; the OUTER script forwards that flag when it sees
+# `Q_INSTALL_GLOBAL` set (see `install_zip()` / `zip_install_dir()`). Our
+# earlier approach installed into /root/.local/bin and then cherry-picked ONLY
+# `kiro-cli` into /usr/local/bin, leaving `kiro-cli-chat` behind -- so
+# `kiro-cli acp` failed with `failed to launch kiro-cli-chat: No such file or
+# directory (os error 2)`. We therefore set `Q_INSTALL_GLOBAL=1` so BOTH
+# binaries land in /usr/local/bin (on the default PATH and siblings of each
+# other, satisfying either kiro-cli resolution strategy) and are reachable by
+# the non-root `bridge` user. `--no-modify-path` skips the shell-rc edits we do
+# not need.
+#
+# Fallback: if a future script change ignored Q_INSTALL_GLOBAL and still used
+# /root/.local/bin, copy the ENTIRE dir (BOTH binaries + any support files),
+# not just one, into /usr/local/bin. Then explicitly make both 0755 and ASSERT
+# `kiro-cli-chat` is present+executable so a standalone zip (which ships no
+# kiro-cli-chat) fails the build LOUDLY here instead of deploying a broken image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates unzip \
     && test -n "${KIRO_CLI_VERSION}" \
-    && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
-    && KIRO_BIN=/root/.local/bin/kiro-cli \
-    && { [ -x "${KIRO_BIN}" ] || KIRO_BIN="$(command -v kiro-cli || true)"; } \
-    && { [ -n "${KIRO_BIN}" ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
-    && cp -L "${KIRO_BIN}" /usr/local/bin/kiro-cli \
-    && chmod 0755 /usr/local/bin/kiro-cli \
+    && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | Q_INSTALL_GLOBAL=1 bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
+    && { [ -x /usr/local/bin/kiro-cli ] || { [ -d /root/.local/bin ] && cp -a /root/.local/bin/. /usr/local/bin/; }; } \
+    && { [ -x /usr/local/bin/kiro-cli ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
+    && command -v kiro-cli-chat >/dev/null 2>&1 \
+      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; } \
+    && chmod 0755 /usr/local/bin/kiro-cli /usr/local/bin/kiro-cli-chat \
     && apt-get purge -y curl unzip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
@@ -149,12 +156,17 @@ ENV HOME=/home/bridge \
     KIRO_HOME=/home/bridge/.kiro
 
 # Build-time proof that the non-root `bridge` user can actually EXECUTE
-# kiro-cli from the system PATH (not just that the file exists). This exec runs
-# as the bridge uid via runuser (provided by util-linux in bookworm-slim) and
-# fails the image build loudly if a future change reintroduces the EACCES /
-# /root-only regression -- `--version` is a local, offline exec that needs no
-# network or auth.
-RUN runuser -u bridge -- kiro-cli --version
+# kiro-cli from the system PATH (not just that the file exists), AND can
+# SEE+reach its `kiro-cli-chat` sibling (which `kiro-cli acp` exec's). These
+# run as the bridge uid via runuser (provided by util-linux in bookworm-slim)
+# and fail the image build loudly if a future change reintroduces the EACCES /
+# /root-only regression or drops kiro-cli-chat. `kiro-cli --version` is a
+# local, offline exec that needs no network or auth; kiro-cli-chat is asserted
+# executable (`test -x`) rather than run, since it takes ACP args, not
+# `--version`.
+RUN runuser -u bridge -- kiro-cli --version \
+    && runuser -u bridge -- command -v kiro-cli-chat \
+    && runuser -u bridge -- test -x /usr/local/bin/kiro-cli-chat
 
 USER bridge
 
