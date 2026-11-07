@@ -25,7 +25,12 @@ import type { ApiContext } from "./context.ts";
 import { dispatchFacade, isFacadePath } from "./facade.ts";
 import { type HttpRequest, type HttpResponse, jsonResponse, parseEvent } from "./http.ts";
 import { buildOpenApiDocument } from "./openapi.ts";
-import { CapabilityUnavailableError, errorToProblem, NotFoundError } from "./problem.ts";
+import {
+  CapabilityUnavailableError,
+  errorToProblem,
+  isKnownProblem,
+  NotFoundError,
+} from "./problem.ts";
 import {
   deleteSessionRoute,
   getCapabilities,
@@ -182,6 +187,17 @@ export async function route(ctx: ApiContext, req: HttpRequest): Promise<HttpResp
     // Path exists under /v1 but no method matched -> 404 (keeps shape simple).
     return errorToProblem(new NotFoundError());
   } catch (err) {
+    // Log UNEXPECTED errors (the 500 class) so the opaque 500 stops being
+    // invisible. problem.ts owns the error->status contract: every known,
+    // intentional error (incl. the 501 capability-unavailable) is matched by an
+    // explicit `instanceof` branch, and only a truly unexpected throw falls
+    // through to the generic 500. isKnownProblem() reuses that exact set as the
+    // discriminator -- a NON-known error is the >=500 unexpected class, so we
+    // error-log it (redacted) but never the 4xx control flow (auth failures
+    // already have their own authFailure metric).
+    if (!isKnownProblem(err)) {
+      ctx.obs.error("unhandled_error", { err, path: req.path, method: req.method });
+    }
     return errorToProblem(err);
   } finally {
     ctx.obs.flush();

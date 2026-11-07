@@ -119,6 +119,30 @@ function isZodError(err: unknown): err is z.ZodError {
 }
 
 /**
+ * Whether `err` is a KNOWN, intentional error that {@link errorToProblem} maps
+ * to a specific status via an explicit branch (as opposed to falling through to
+ * the generic 500). The router uses this as its "expected vs unexpected"
+ * discriminator: known errors are normal control flow and are NOT error-logged;
+ * anything else is an unexpected failure worth surfacing. This is the single
+ * source of truth for the mapping, so adding a branch below keeps both in sync.
+ */
+export function isKnownProblem(err: unknown): boolean {
+  return (
+    err instanceof UnauthorizedError ||
+    err instanceof ForbiddenError ||
+    err instanceof RepoNotAllowedError ||
+    err instanceof ConcurrencyLimitError ||
+    err instanceof SessionNotFoundError ||
+    err instanceof NotFoundError ||
+    err instanceof CapabilityUnavailableError ||
+    err instanceof UnprocessableError ||
+    err instanceof BadRequestError ||
+    err instanceof InvalidStateError ||
+    isZodError(err)
+  );
+}
+
+/**
  * Map ANY thrown error to an RFC 9457 problem response. Unknown errors become a
  * generic 500 with no internal detail leaked.
  */

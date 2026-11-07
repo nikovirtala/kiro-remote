@@ -14,6 +14,30 @@ import { redact } from "@nikovirtala/kiro-remote-core";
 const SERVICE_NAME = "kiro-remote-api";
 const METRICS_NAMESPACE = "KiroRemote";
 
+/**
+ * Turn an unknown thrown value into a plain, loggable object. An `Error`'s
+ * `name`/`message`/`stack` are non-enumerable, so `redact()` (which walks
+ * enumerable keys) would otherwise drop them; we copy them onto a plain object
+ * so the subsequent {@link redact} pass scrubs any token/URL they carry.
+ */
+function normalizeError(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    return { name: err.name, message: err.message, stack: err.stack };
+  }
+  return { value: typeof err === "string" ? err : String(err) };
+}
+
+/**
+ * Normalize an `err` attribute (if present) to a plain object before the
+ * attributes are handed to {@link redact}.
+ */
+function prepareAttributes(attributes: Record<string, unknown>): Record<string, unknown> {
+  if ("err" in attributes) {
+    return { ...attributes, err: normalizeError(attributes.err) };
+  }
+  return attributes;
+}
+
 /** The metrics the API layer owns. */
 export type ApiMetricName = "SessionsLaunched" | "AuthFailures" | "CimdFetches";
 
@@ -35,6 +59,13 @@ export interface Observability {
   info(message: string, attributes?: Record<string, unknown>): void;
   /** Log a warning line with redacted structured attributes. */
   warn(message: string, attributes?: Record<string, unknown>): void;
+  /**
+   * Log an error line with redacted structured attributes. Use this for
+   * unexpected failures (the 500 class); a thrown value under the `err` key is
+   * normalized to `{ name, message, stack }` before redaction so a token/URL
+   * carried inside an exception message or stack cannot leak into CloudWatch.
+   */
+  error(message: string, attributes?: Record<string, unknown>): void;
   /** Record an auth failure, dimensioned by reason. */
   authFailure(reason: AuthFailureReason): void;
   /** Record a CIMD fetch, dimensioned by outcome. */
@@ -66,6 +97,10 @@ export class PowertoolsObservability implements Observability {
     this.logger.warn(message, redact(attributes));
   }
 
+  error(message: string, attributes: Record<string, unknown> = {}): void {
+    this.logger.error(message, redact(prepareAttributes(attributes)));
+  }
+
   authFailure(reason: AuthFailureReason): void {
     this.metrics.addDimension("reason", reason);
     this.metrics.addMetric("AuthFailures", MetricUnit.Count, 1);
@@ -93,6 +128,7 @@ export class PowertoolsObservability implements Observability {
 export class NoopObservability implements Observability {
   info(): void {}
   warn(): void {}
+  error(): void {}
   authFailure(): void {}
   cimdFetch(): void {}
   sessionLaunched(): void {}
