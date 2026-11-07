@@ -46,6 +46,15 @@ const allowedRepos = Array.isArray(allowedReposCtx)
 
 const env = account && region ? { account, region } : undefined;
 
+// Full ARN of a PRE-EXISTING Secrets Manager secret holding KIRO_API_KEY
+// (ksk_). Passed via `-c kiroApiKeySecretArn=<arn>` (or set in local cdk.json
+// context). RECOMMENDED for real deploys: the secret is created + populated out
+// of band and survives stack rollback, so a failed deploy cannot delete the key
+// before it can be populated. Omitted => the construct creates an empty secret
+// (synth/dev only, destroyed on rollback). The ARN is account/region-specific
+// and user-chosen, so it is NOT hardcoded in the committed cdk.json.
+const kiroApiKeySecretArn = app.node.tryGetContext("kiroApiKeySecretArn") as string | undefined;
+
 // OPT-IN production-asset trigger. The real bridge image AND the real bundled
 // API Lambda code are built ONLY when `-c kiroCliVersion=<ver>` is passed. This
 // single flag gates everything that needs a Docker build or a Node bundler, so
@@ -126,6 +135,7 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     publicBaseUrl,
     cognitoDomainPrefix,
     allowedRepos,
+    ...(kiroApiKeySecretArn ? { kiroApiKeySecretArn } : {}),
     ...(kiroCliVersion ? { kiroCliVersion } : {}),
     ...(bridgeImage ? { bridgeImage } : {}),
     ...(apiLambdaCode ? { apiLambdaCode } : {}),

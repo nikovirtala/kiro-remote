@@ -32,6 +32,7 @@ function synth(
     hostedZoneId?: string;
     zoneName?: string;
   },
+  kiroApiKeySecretArn?: string,
 ): { template: Template; stack: Stack } {
   const app = new App();
   const stack = new Stack(app, "TestStack", { env: { account: "111111111111", region } });
@@ -43,6 +44,7 @@ function synth(
       { name: "ClaudeCode", callbackUrls: ["https://claude.ai/api/mcp/auth_callback"] },
     ],
     ...(customDomain ? { customDomain } : {}),
+    ...(kiroApiKeySecretArn ? { kiroApiKeySecretArn } : {}),
   });
   return { template: Template.fromStack(stack), stack };
 }
@@ -234,6 +236,67 @@ describe("KiroRemote", () => {
     expect(def.Secrets?.some((s) => s.Name === "KIRO_API_KEY")).toBe(true);
     // It must NOT appear as a plain environment variable.
     expect(def.Environment?.some((e) => e.Name === "KIRO_API_KEY")).not.toBe(true);
+  });
+
+  test("without kiroApiKeySecretArn the construct CREATES the KIRO_API_KEY secret (synth/dev fallback)", () => {
+    // Today's behaviour: one in-stack secret is created and wired. This is the
+    // fallback the recommended ARN path replaces (the created secret is deleted
+    // on rollback).
+    template.resourceCountIs("AWS::SecretsManager::Secret", 1);
+    template.hasResourceProperties("AWS::SecretsManager::Secret", {
+      Description: "Kiro API key (ksk_) injected into the bridge as an ECS secret",
+    });
+  });
+
+  test("with kiroApiKeySecretArn the construct IMPORTS the pre-existing secret: no created secret, bridge + roles reference THAT ARN", () => {
+    // A failed deploy must NOT delete the key, so a real deploy points at a
+    // pre-existing secret by its full ARN. The construct imports it (no
+    // AWS::SecretsManager::Secret resource), wires it as the KIRO_API_KEY ECS
+    // secret, and grants GetSecretValue on THAT exact ARN -- never a wildcard.
+    const arn =
+      "arn:aws:secretsmanager:eu-north-1:111122223333:secret:kiro-remote/kiro-api-key-AbCdEf";
+    const { template: t } = synth("eu-north-1", undefined, arn);
+
+    // The secret is imported, not created.
+    t.resourceCountIs("AWS::SecretsManager::Secret", 0);
+
+    // The bridge container's KIRO_API_KEY secret references the provided ARN.
+    const taskDefs = t.findResources("AWS::ECS::TaskDefinition");
+    const def = (
+      Object.values(taskDefs)[0].Properties as {
+        ContainerDefinitions: Array<{ Secrets?: Array<{ Name: string; ValueFrom: string }> }>;
+      }
+    ).ContainerDefinitions[0];
+    const apiKeySecret = def.Secrets?.find((s) => s.Name === "KIRO_API_KEY");
+    expect(apiKeySecret?.ValueFrom).toBe(arn);
+
+    // Both the task role and the execution role are granted GetSecretValue on
+    // the exact imported ARN (no created secret Ref, no wildcard resource).
+    const policies = t.findResources("AWS::IAM::Policy");
+    const secretGrantRoles = new Set<string>();
+    for (const policy of Object.values(policies)) {
+      const props = policy.Properties as {
+        PolicyDocument: { Statement: Array<{ Action?: string | string[]; Resource?: unknown }> };
+        Roles?: Array<{ Ref?: string }>;
+      };
+      for (const stmt of props.PolicyDocument.Statement) {
+        const actions = ([] as string[]).concat(stmt.Action ?? []);
+        if (actions.includes("secretsmanager:GetSecretValue")) {
+          const resources = ([] as unknown[]).concat(stmt.Resource ?? []);
+          // The grant is scoped to exactly the imported ARN -- no wildcard.
+          expect(resources).toContain(arn);
+          expect(resources).not.toContain("*");
+          for (const role of props.Roles ?? []) {
+            if (role.Ref) {
+              secretGrantRoles.add(role.Ref);
+            }
+          }
+        }
+      }
+    }
+    expect(secretGrantRoles.size).toBe(2);
+    expect([...secretGrantRoles].some((r) => r.includes("BridgeTaskTaskRole"))).toBe(true);
+    expect([...secretGrantRoles].some((r) => r.includes("ExecutionRole"))).toBe(true);
   });
 
   test("the bridge container env raises verbosity so an ACP child crash is self-explanatory", () => {

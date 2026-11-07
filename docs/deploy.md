@@ -151,17 +151,18 @@ Additional options exist on `KiroRemoteProps`
 entrypoint only wires the three context keys above; to set the rest you edit
 `bin/app.ts` (or your own thin app) and pass them to the stack. The most useful:
 
-| Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `permissionTimeout`    | `24h`                                     | How long a permission request stays answerable.                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg (which has no default). Also the single opt-in trigger for the real assets (see the [real-asset opt-in callout](#3-choose-your-deploy-context)). Operator-supplied, never hardcoded; required for a real deploy.                                                                                                                                                       |
-| `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade without a CIMD document. Each client presents its `name` as the `client_id` at `/oauth/authorize` and may only use the listed `callbackUrls` as `redirect_uri`. The stack provisions a Cognito app client for each and propagates the id + redirect URIs into the API Lambda so the facade accepts them at runtime.                      |
-| `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api). |
-| `bridgeImage`          | placeholder registry image                | Override the bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                      |
-| `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `permissionTimeout`    | `24h`                                     | How long a permission request stays answerable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg (which has no default). Also the single opt-in trigger for the real assets (see the [real-asset opt-in callout](#3-choose-your-deploy-context)). Operator-supplied, never hardcoded; required for a real deploy.                                                                                                                                                                                                                   |
+| `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade without a CIMD document. Each client presents its `name` as the `client_id` at `/oauth/authorize` and may only use the listed `callbackUrls` as `redirect_uri`. The stack provisions a Cognito app client for each and propagates the id + redirect URIs into the API Lambda so the facade accepts them at runtime.                                                                                  |
+| `kiroApiKeySecretArn`  | — (construct creates an empty secret)     | Full ARN of a **pre-existing** Secrets Manager secret holding the `ksk_` key. **Recommended for real deploys:** the construct imports it, grants the bridge read, and wires it as the `KIRO_API_KEY` ECS secret, and because it is external it **survives a stack rollback**. Omit it and the construct creates an empty secret (synth/dev only) that you must populate and that is destroyed on rollback. Also wired from the `kiroApiKeySecretArn` context key. See [Store the Kiro API key](#4-store-the-kiro-api-key). |
+| `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api).                                                             |
+| `bridgeImage`          | placeholder registry image                | Override the bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 > The defaults for `bridgeImage` and `apiLambdaCode` are deliberately
 > placeholders so `cdk synth` runs with no Docker build and no bundling step in
@@ -419,22 +420,62 @@ and never hardcoded in the repo.
 
 ## 4. Store the Kiro API key
 
-The stack creates a Secrets Manager secret for `KIRO_API_KEY`. Populate it with
-your `ksk_` key so the bridge can authenticate `kiro-cli`. You can set the value
-after the stack exists:
+The bridge needs a **valid** `ksk_` key in Secrets Manager to start. The
+recommended flow is to create and populate that secret **once, out of band**,
+and point the deploy at it by its **full ARN** (`-c kiroApiKeySecretArn=...`).
+The stack then **imports** the secret, grants the bridge read access, and
+injects it as the `KIRO_API_KEY` ECS secret. Because the secret is external, it
+**survives a stack rollback**, so iterating on a failed deploy never destroys
+your key.
 
-```bash
-aws secretsmanager put-secret-value \
-  --secret-id <kiro-api-key-secret-id> \
-  --secret-string 'ksk_xxxxxxxx'
-```
+> **Why this matters.** If the stack _creates_ the secret itself (the fallback
+> below), a failed deploy rolls back and **deletes** that secret before you have
+> any window to populate it: a chicken-and-egg where a first deploy can never
+> succeed. Referencing a pre-existing secret removes that trap.
 
-Find `<kiro-api-key-secret-id>` from the stack's resources, e.g.:
+1. **Create and populate the secret once** (capture the returned full ARN):
 
-```bash
-aws cloudformation list-stack-resources --stack-name KiroRemoteStack \
-  --query "StackResourceSummaries[?ResourceType=='AWS::SecretsManager::Secret']"
-```
+   ```bash
+   aws secretsmanager create-secret \
+     --name kiro-remote/kiro-api-key \
+     --secret-string 'ksk_xxxxxxxx' \
+     --region eu-north-1
+   ```
+
+   The response includes the full ARN, e.g.
+   `arn:aws:secretsmanager:eu-north-1:<account>:secret:kiro-remote/kiro-api-key-<suffix>`
+   (the trailing `-<suffix>` is the random 6-char suffix Secrets Manager adds,
+   and it is part of the ARN the deploy expects).
+
+2. **Deploy pointing at the ARN.** Pass it with `-c kiroApiKeySecretArn=...`
+   (or set it in your local `cdk.json` context):
+
+   ```bash
+   -c kiroApiKeySecretArn=arn:aws:secretsmanager:eu-north-1:<account>:secret:kiro-remote/kiro-api-key-<suffix>
+   ```
+
+   The ARN is not a secret value, but it is account/region-specific, so it is
+   **not** committed to this repo's `cdk.json`; pass it at deploy time or keep
+   it in your own local context.
+
+> **Fallback (NOT recommended for real deploys).** If you omit
+> `kiroApiKeySecretArn`, the stack creates an **empty** secret for `KIRO_API_KEY`
+> (fine for `synth`/dev). You then have to populate it, and it is **destroyed on
+> rollback** (the exact chicken-and-egg above). If you go this route anyway, set
+> the value after the stack exists:
+>
+> ```bash
+> aws secretsmanager put-secret-value \
+>   --secret-id <kiro-api-key-secret-id> \
+>   --secret-string 'ksk_xxxxxxxx'
+> ```
+>
+> and find `<kiro-api-key-secret-id>` from the stack's resources:
+>
+> ```bash
+> aws cloudformation list-stack-resources --stack-name KiroRemoteStack \
+>   --query "StackResourceSummaries[?ResourceType=='AWS::SecretsManager::Secret']"
+> ```
 
 Never commit or echo the real key; use the placeholder `ksk_xxxxxxxx` in notes.
 

@@ -68,7 +68,7 @@ import {
 } from "aws-cdk-lib/aws-route53";
 import { ApiGatewayv2DomainProperties } from "aws-cdk-lib/aws-route53-targets";
 import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
-import { Secret } from "aws-cdk-lib/aws-secretsmanager";
+import { type ISecret, Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue } from "aws-cdk-lib/aws-sqs";
 import { Construct } from "constructs";
 
@@ -122,6 +122,17 @@ export interface KiroRemoteProps {
 
   /** Optional pre-registered public clients passed through to the facade. */
   preRegisteredClients?: PreRegisteredClientProps[];
+
+  /**
+   * Full ARN of a PRE-EXISTING Secrets Manager secret holding the Kiro API
+   * key (ksk_). Strongly recommended for real deploys: the secret is created
+   * and populated out of band and survives stack rollback, avoiding the
+   * chicken-and-egg where an in-stack (empty) secret is deleted on a failed
+   * deploy before it can be populated. When omitted, the construct creates an
+   * (empty) secret -- fine for synth/dev, but it must be populated and will be
+   * destroyed on rollback.
+   */
+  kiroApiKeySecretArn?: string;
 
   /**
    * Optional API Gateway v2 custom domain fronting the HTTP API. When set, the
@@ -219,7 +230,7 @@ export class KiroRemote extends Construct {
   /** The KMS key used ONLY by the OAUTH#CODE callback/token handlers. */
   readonly oauthCodeKey: Key;
   /** The Secrets Manager secret holding KIRO_API_KEY (ksk_). */
-  readonly kiroApiKeySecret: Secret;
+  readonly kiroApiKeySecret: ISecret;
   /** The Cognito facade (user pool, resource server, facade client). */
   readonly auth: KiroRemoteAuth;
   /** The ECS Fargate bridge service. */
@@ -300,9 +311,18 @@ export class KiroRemote extends Construct {
     // KIRO_API_KEY (ksk_) lives ONLY in Secrets Manager and is injected into
     // the bridge container as an ECS secret at runtime -- never a plain env
     // var, never baked into the image, never in synthesized output.
-    this.kiroApiKeySecret = new Secret(this, "KiroApiKeySecret", {
-      description: "Kiro API key (ksk_) injected into the bridge as an ECS secret",
-    });
+    //
+    // Prefer a PRE-EXISTING secret referenced by its full ARN: it is created
+    // and populated out of band and survives stack rollback, so a failed
+    // deploy cannot delete the key before it can be populated. The created
+    // fallback (no ARN) keeps today's synth/dev behaviour but is destroyed on
+    // rollback, so it must be populated out of band and is NOT recommended for
+    // real deploys.
+    this.kiroApiKeySecret = props.kiroApiKeySecretArn
+      ? Secret.fromSecretCompleteArn(this, "KiroApiKeySecret", props.kiroApiKeySecretArn)
+      : new Secret(this, "KiroApiKeySecret", {
+          description: "Kiro API key (ksk_) injected into the bridge as an ECS secret",
+        });
 
     /* ------------------------------- KMS key ----------------------------- */
 
