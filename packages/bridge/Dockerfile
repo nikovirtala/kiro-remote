@@ -15,12 +15,17 @@ ARG NODE_VERSION=26.13.0
 ############################
 # deps: install workspace node_modules with pnpm
 ############################
-FROM --platform=linux/arm64 node:${NODE_VERSION}-bookworm-slim AS deps
+# TARGETPLATFORM is provided by buildkit from the build-level --platform flag
+# (CDK passes platform: Platform.LINUX_ARM64 to ContainerImage.fromAsset), so
+# the image is still arm64 without a constant --platform on FROM.
+ARG TARGETPLATFORM
+FROM --platform=$TARGETPLATFORM node:${NODE_VERSION}-bookworm-slim AS deps
 WORKDIR /app
 
-# Enable the pinned pnpm via corepack.
+# Install the pinned pnpm via npm (the node slim image ships npm but not
+# corepack, which was unbundled from recent Node distributions).
 ARG PNPM_VERSION=12.18.0
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+RUN npm install -g pnpm@${PNPM_VERSION}
 
 # Copy only the manifests first for better layer caching.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
@@ -36,7 +41,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 ############################
 # runtime: kiro-cli + the bridge source
 ############################
-FROM --platform=linux/arm64 node:${NODE_VERSION}-bookworm-slim AS runtime
+FROM --platform=$TARGETPLATFORM node:${NODE_VERSION}-bookworm-slim AS runtime
 WORKDIR /app
 
 # The kiro-cli version to install is a REQUIRED build arg (no default pin here).
