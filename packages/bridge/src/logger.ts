@@ -33,12 +33,28 @@ export interface LoggerOptions {
   sink?: LogSink;
   bindings?: Record<string, unknown>;
   now?: () => number;
+  /**
+   * Environment to read the default level from (defaults to `process.env`).
+   * Injectable so tests can exercise the env-level behaviour deterministically.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
+/** Parse a LogLevel from a raw env value; returns undefined for anything invalid. */
+function parseLogLevel(raw: string | undefined): LogLevel | undefined {
+  if (raw && Object.hasOwn(LEVEL_ORDER, raw)) {
+    return raw as LogLevel;
+  }
+  return undefined;
+}
+
 export function createLogger(opts: LoggerOptions = {}): Logger {
-  const level = opts.level ?? "info";
+  const env = opts.env ?? process.env;
+  // Precedence: explicit opts.level > BRIDGE_LOG_LEVEL env > "info". An invalid
+  // env value is ignored (falls back to info) so a typo never silences logs.
+  const level = opts.level ?? parseLogLevel(env.BRIDGE_LOG_LEVEL) ?? "info";
   const sink = opts.sink ?? defaultSink;
   const bindings = opts.bindings ?? {};
   const now = opts.now ?? (() => Date.now());

@@ -133,9 +133,20 @@ RUN apt-get update \
 # forces CommonJS, so no package.json "type" shim is copied.
 COPY --from=deps /app/dist/bridge.cjs ./dist/bridge.cjs
 
-# Run as a non-root user.
+# Run as a non-root user. `--create-home` makes /home/bridge owned by the
+# bridge user.
 RUN useradd --create-home --uid 10001 bridge \
-    && chown -R bridge:bridge /app
+    && chown -R bridge:bridge /app /home/bridge
+
+# kiro-cli needs a WRITABLE HOME/KIRO_HOME as the non-root user for its config,
+# sign-ins, permissions, sessions, settings and agent state. ECS/Fargate may
+# launch the ENTRYPOINT with HOME unset (or HOME=/, which uid 10001 cannot
+# write) -- a classic exit-1-on-startup. Pin HOME to the created, bridge-owned
+# home and point KIRO_HOME at a writable dir under it so the ACP child can
+# persist its state. (kiro-cli writes logs under $XDG_RUNTIME_DIR or
+# /tmp/kiro-log, both writable, so only HOME/KIRO_HOME needed pinning here.)
+ENV HOME=/home/bridge \
+    KIRO_HOME=/home/bridge/.kiro
 
 # Build-time proof that the non-root `bridge` user can actually EXECUTE
 # kiro-cli from the system PATH (not just that the file exists). This exec runs

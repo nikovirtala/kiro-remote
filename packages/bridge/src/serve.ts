@@ -127,6 +127,11 @@ export class BridgeServer {
     if (apiKey) {
       childEnv.KIRO_API_KEY = apiKey;
     }
+    // Propagate the Kiro CLI's own log level into the child so kiro-cli emits
+    // verbose startup diagnostics to stderr (error|warn|info|debug|trace),
+    // which the transport surfaces on failure. Defaults to debug for now so the
+    // first diagnostic deploys are maximally verbose; dial back via KIRO_LOG_LEVEL.
+    childEnv.KIRO_LOG_LEVEL = env.KIRO_LOG_LEVEL ?? "debug";
 
     const headlessRunner = deps.headlessRunner ?? defaultHeadlessRunner;
 

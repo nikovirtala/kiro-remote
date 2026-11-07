@@ -30,6 +30,9 @@ export interface SpawnSpec {
 /** Injectable spawner so tests substitute a fake ACP agent. */
 export type SpawnFn = (spec: SpawnSpec) => ChildProcessWithoutNullStreams;
 
+/** Max bytes of child stderr retained for the on-exit diagnostic tail. */
+const STDERR_TAIL_LIMIT = 8 * 1024;
+
 export const defaultSpawn: SpawnFn = (spec) =>
   spawn(spec.command, spec.args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -86,6 +89,13 @@ export class StdioJsonRpcTransport {
   private readonly notificationHandlers = new Map<string, NotificationHandler>();
   private buffer = "";
   private closed = false;
+  /**
+   * Rolling tail of the child's stderr, bounded to {@link STDERR_TAIL_LIMIT}
+   * bytes. kiro-cli writes its own startup diagnostics here; on a non-zero
+   * exit we surface this tail at ERROR so the crash is never silent (the tail
+   * is redacted by the logger like every other field).
+   */
+  private stderrTail = "";
 
   constructor(opts: TransportOptions) {
     this.spec = opts.spec;
@@ -108,6 +118,7 @@ export class StdioJsonRpcTransport {
   start(): void {
     this.closed = false;
     this.buffer = "";
+    this.stderrTail = "";
     const child = this.spawnFn(this.spec);
     this.child = child;
 
@@ -115,11 +126,27 @@ export class StdioJsonRpcTransport {
     child.stdout.on("data", (chunk: string) => this.onData(chunk));
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
+      // Retain a bounded tail so a crash surfaces kiro-cli's own message even
+      // at the default info level, and stream live at debug for verbose mode.
+      this.appendStderrTail(chunk);
       // Child diagnostics; redacted by the logger.
       this.logger.debug("acp_stderr", { line: chunk.trimEnd() });
     });
     child.on("exit", (code, signal) => {
-      this.logger.warn("acp_child_exit", { code, signal });
+      // On a clean (code 0) exit the child's stderr is routine; on a failure
+      // (non-zero code or a signal) surface the captured stderr tail at ERROR
+      // so the retained logs always contain kiro-cli's own reason for exiting.
+      // The tail is redacted by the logger, so a leaked ksk_/token is scrubbed.
+      if (code !== 0 || signal) {
+        const tail = this.stderrTail.trimEnd();
+        this.logger.error("acp_child_exit", {
+          code,
+          signal,
+          ...(tail.length > 0 ? { stderr: tail } : {}),
+        });
+      } else {
+        this.logger.warn("acp_child_exit", { code, signal });
+      }
       this.failAllPending(new Error(`acp child exited (code=${code}, signal=${signal})`));
       if (!this.closed) {
         this.onExit?.(code, signal);
@@ -273,6 +300,14 @@ export class StdioJsonRpcTransport {
           error: { code: JSONRPC_INTERNAL_ERROR, message: String(err) },
         }),
       );
+    }
+  }
+
+  /** Append to the bounded stderr tail, discarding the oldest bytes over the cap. */
+  private appendStderrTail(chunk: string): void {
+    this.stderrTail += chunk;
+    if (this.stderrTail.length > STDERR_TAIL_LIMIT) {
+      this.stderrTail = this.stderrTail.slice(this.stderrTail.length - STDERR_TAIL_LIMIT);
     }
   }
 

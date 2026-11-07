@@ -236,6 +236,23 @@ describe("KiroRemote", () => {
     expect(def.Environment?.some((e) => e.Name === "KIRO_API_KEY")).not.toBe(true);
   });
 
+  test("the bridge container env raises verbosity so an ACP child crash is self-explanatory", () => {
+    // Without a visible log level the bridge logger (default info) drops the
+    // ACP child's own stderr, so a kiro-cli exit-1 on startup shows only a code
+    // with no reason. BRIDGE_LOG_LEVEL=debug makes the bridge verbose, and
+    // KIRO_LOG_LEVEL=debug makes kiro-cli ITSELF emit verbose startup
+    // diagnostics to stderr (which the transport surfaces on failure).
+    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+    const def = (
+      Object.values(taskDefs)[0].Properties as {
+        ContainerDefinitions: Array<{ Environment?: Array<{ Name: string; Value: unknown }> }>;
+      }
+    ).ContainerDefinitions[0];
+    const env = new Map((def.Environment ?? []).map((e) => [e.Name, e.Value]));
+    expect(env.get("BRIDGE_LOG_LEVEL")).toBe("debug");
+    expect(env.get("KIRO_LOG_LEVEL")).toBe("debug");
+  });
+
   test("the task role is scoped to its own table/bucket/queue/secret", () => {
     // The task-role policy references the table, bucket, queue, and secret -- and
     // only DynamoDB/S3/SQS/SecretsManager actions (no Action:* ).

@@ -582,6 +582,13 @@ export class KiroRemote extends Construct {
         EVENT_TTL_DAYS: String(eventTtlDays),
         PERMISSION_TIMEOUT_MS: String(permissionTimeout.toMilliseconds()),
         ALLOWED_REPOS: props.allowedRepos.join(","),
+        // Verbose by default while the ACP child's startup is being
+        // diagnosed: the bridge logger honors BRIDGE_LOG_LEVEL, and serve.ts
+        // passes KIRO_LOG_LEVEL=debug into the spawned kiro-cli so its own
+        // stderr diagnostics surface (the transport logs the stderr tail at
+        // ERROR on a non-zero exit). Dial both back to "info" once stable.
+        BRIDGE_LOG_LEVEL: "debug",
+        KIRO_LOG_LEVEL: "debug",
       },
       // KIRO_API_KEY arrives as an ECS SECRET (not a plain env var).
       secrets: {

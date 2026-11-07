@@ -144,6 +144,26 @@ describe("bridge image bundle", () => {
     expect(dockerfile).toMatch(/test\s+-n\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
   });
 
+  // This guards a SIXTH failure class: kiro-cli needs a WRITABLE HOME/KIRO_HOME
+  // as the non-root uid 10001. ECS/Fargate may launch the ENTRYPOINT with HOME
+  // unset (or HOME=/, unwritable by uid 10001), and kiro-cli writing its
+  // config/state to a missing or unwritable HOME is a classic exit-1-on-startup
+  // (observed as `acp_child_exit code=1` with the circuit breaker tripping).
+  // The runtime stage must pin HOME to the created, bridge-owned home and point
+  // KIRO_HOME at a writable dir under it.
+  test("the Dockerfile pins a writable HOME/KIRO_HOME for the non-root bridge user", () => {
+    const dockerfile = readFileSync(DOCKERFILE, "utf8");
+
+    // HOME must be set to the user's created home (not left unset / HOME=/).
+    expect(dockerfile).toMatch(/\bENV\b[\s\S]*?\bHOME=\/home\/bridge\b/);
+    // KIRO_HOME (the Kiro CLI's state dir override) must live under that home.
+    expect(dockerfile).toMatch(/KIRO_HOME=\/home\/bridge\/\.kiro\b/);
+    // The home must be owned by the bridge user so uid 10001 can write it.
+    expect(dockerfile).toMatch(/chown\s+-R\s+bridge:bridge\b[^\n]*\/home\/bridge/);
+    // The user is still created with its home (useradd --create-home).
+    expect(dockerfile).toMatch(/useradd\s+--create-home\s+--uid\s+10001\s+bridge/);
+  });
+
   // This guards a FIFTH concern: both FROM lines must NOT pin a per-stage
   // `--platform`, since CDK's build-level `--platform linux/arm64` already sets
   // the target platform (buildkit warns RedundantTargetPlatform otherwise).
