@@ -57,6 +57,16 @@ context values, passed with `-c key=value`:
 | `cognitoDomainPrefix` | `kiro-remote`                                       | The Cognito managed-login domain prefix. The hosted UI is served from `<prefix>.auth.<region>.amazoncognito.com`.                                                                                                                                                                                                                                                                                            |
 | `allowedRepos`        | `*/*`                                               | Comma-separated GitHub repo globs the bridge may launch sessions against. Launches outside this list are rejected with 403.                                                                                                                                                                                                                                                                                  |
 
+Three more context keys drive the optional custom domain (all unset by default
+except `customDomainName`/`dnsZoneName`, which this repo's `cdk.json` sets to the
+scoped subdomain `kiro-remote.nikovirtala.dev`):
+
+| Context key        | Default                        | Meaning                                                                                                                                                                                                                                                                                                                                      |
+| ------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `customDomainName` | — (default execute-api domain) | The custom host fronting the HTTP API. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain. See [Option B](#option-b--a-custom-domain-recommended).                                                                                                                                             |
+| `dnsZoneName`      | — (no DNS stack)               | When set, `bin/app.ts` also synthesizes `KiroRemoteDnsStack`: a Route 53 **public hosted zone** for a delegated subdomain. Only needed for the automated Route 53 alternative; harmless otherwise (the zone is a separate stack you deploy or ignore). See [the Route 53 alternative](#automated-alternative--route-53-delegated-subdomain). |
+| `hostedZoneId`     | — (zone-less manual CNAME)     | Id of a Route 53 public hosted zone owning `customDomainName` (typically the `HostedZoneId` output of `KiroRemoteDnsStack`). When set, the app stack validates the cert against that zone **and** creates the alias records in it — no manual DNS. Omit for the manual-Cloudflare path. Account-specific; **not** committed to `cdk.json`.   |
+
 > **About `publicBaseUrl` and the chicken-and-egg with the API Gateway default
 > domain:** if you are not using a custom domain, the default domain only exists
 > after the HTTP API is created. A common approach is to deploy once (the synth
@@ -98,17 +108,17 @@ Additional options exist on `KiroRemoteProps`
 entrypoint only wires the three context keys above; to set the rest you edit
 `bin/app.ts` (or your own thin app) and pass them to the stack. The most useful:
 
-| Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                    |
-| ---------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                       |
-| `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                     |
-| `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                         |
-| `permissionTimeout`    | `24h`                                     | How long a permission request stays answerable.                                                                                                                                                                                            |
-| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg. Required when building the image from the Dockerfile.                                                                                             |
-| `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade.                                                                                                                     |
-| `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api). |
-| `bridgeImage`          | placeholder registry image                | Override the bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                  |
-| `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                      |
+| Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `permissionTimeout`    | `24h`                                     | How long a permission request stays answerable.                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg. Required when building the image from the Dockerfile.                                                                                                                                                                                                                                                                                                                 |
+| `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade.                                                                                                                                                                                                                                                                                                                                         |
+| `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api). |
+| `bridgeImage`          | placeholder registry image                | Override the bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                      |
+| `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 > The defaults for `bridgeImage` and `apiLambdaCode` are deliberately
 > placeholders so `cdk synth` runs with no Docker build and no bundling step in
@@ -145,14 +155,27 @@ with its own AWS certificate. Do **not** set `customDomain` for this path.
 
 A custom domain lets `publicBaseUrl` be a stable host you own, e.g.
 `https://kiro-remote.nikovirtala.dev`, and avoids the two-pass deploy. The
-construct can now create the custom domain for you: set the `customDomain` prop
+construct can create the custom domain for you: set the `customDomain` prop
 (or the `customDomainName` context key — see below) and the stack provisions:
 
-1. a **regional ACM certificate** for the host, **DNS-validated** (no Route 53
-   hosted zone is assumed — ACM emits a validation `CNAME` you add at your DNS
-   provider), and
+1. a **regional ACM certificate** for the host, **DNS-validated**, and
 2. an **API Gateway v2 custom `DomainName` + `ApiMapping`** to the HTTP API's
    default stage.
+
+There are two DNS flavours of this, both selected by the same `customDomain`
+prop:
+
+- **Manual Cloudflare CNAMEs (the path this repo uses).** The cert is validated
+  with no Route 53 hosted zone — ACM emits a validation `CNAME` you add at
+  Cloudflare, and you point a service `CNAME` at the regional target yourself.
+  No Route 53 resources are created. This is the default for `kiro-remote` — a
+  **scoped subdomain** (`kiro-remote.nikovirtala.dev`) whose parent zone
+  (`nikovirtala.dev`) lives on Cloudflare — and the steps below describe it.
+- **Automated Route 53 (optional alternative).** If you would rather have ACM
+  validation and the alias record fully CDK-managed, delegate the scoped
+  subdomain to a Route 53 zone once; see
+  [the Route 53 alternative](#automated-alternative--route-53-delegated-subdomain)
+  at the end of this section.
 
 > **The ACM certificate must be in the SAME region as the HTTP API** (API
 > Gateway v2 regional custom domains require a regional cert). The construct
@@ -233,6 +256,68 @@ any DNS records — you add them in the Cloudflare dashboard. There are two:
 Once both records resolve, `https://kiro-remote.nikovirtala.dev` serves the API
 and the facade's PRM / AS-metadata / `McpResourceIdentifier` all line up with
 `publicBaseUrl` with no second deploy.
+
+### Automated alternative — Route 53 delegated subdomain
+
+If you prefer ACM validation **and** the service record to be fully CDK-managed
+(no manual CNAMEs after a one-time delegation), delegate the scoped subdomain
+`kiro-remote.nikovirtala.dev` to its own Route 53 **public hosted zone**. The
+repo ships a second stack, `KiroRemoteDnsStack`
+([`packages/cdk/src/dns-stack.ts`](../packages/cdk/src/dns-stack.ts)), for exactly
+this. Because the delegation at Cloudflare has to happen **between** the two
+deploys, this is a **two-stack** flow — a single `cdk deploy --all` cannot
+complete first-time setup.
+
+> Everything stays scoped to the `kiro-remote` subdomain: only that label is
+> delegated to Route 53; the apex `nikovirtala.dev` and all its other records
+> stay on Cloudflare.
+
+1. **Deploy the DNS stack first.** It is synthesized whenever `dnsZoneName` is
+   set (this repo's `cdk.json` sets it to `kiro-remote.nikovirtala.dev`):
+
+   ```bash
+   mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk exec cdk deploy KiroRemoteDnsStack
+   ```
+
+   Read its `NameServers` output (four Route 53 nameservers) and the
+   `HostedZoneId` output when it finishes:
+
+   ```bash
+   aws cloudformation describe-stacks --stack-name KiroRemoteDnsStack \
+     --query 'Stacks[0].Outputs'
+   ```
+
+2. **Delegate the subdomain at Cloudflare.** In the Cloudflare dashboard for
+   `nikovirtala.dev`, create four `NS` records for the **`kiro-remote`** name,
+   each pointing at one of the Route 53 nameservers from step 1, all **"DNS
+   only" (grey cloud)**. Wait for propagation, then confirm the delegation
+   resolves to the Route 53 nameservers:
+
+   ```bash
+   dig NS kiro-remote.nikovirtala.dev +short
+   ```
+
+3. **Deploy the app stack with the zone imported.** Pass the DNS stack's
+   `HostedZoneId` as the `hostedZoneId` context key (set it in `cdk.json`
+   context or pass `-c hostedZoneId=...` — it is account-specific, so this repo
+   leaves it **unset** in `cdk.json`):
+
+   ```bash
+   mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
+     -c hostedZoneId=<HostedZoneId output>
+   ```
+
+   Now the ACM certificate is DNS-validated **against the Route 53 zone**
+   (an automatic validation record — no manual CNAME) and alias `A`/`AAAA`
+   records are created in the zone pointing at the API Gateway custom domain.
+   There is **no further manual DNS**: once ACM issues the cert the deploy
+   finishes and `https://kiro-remote.nikovirtala.dev` is live.
+
+The same region rule applies: the cert is created in the stack's region, so
+deploy the app stack in the API's region (`eu-north-1` — see
+[the region note](#5-bootstrap-and-deploy)). The DNS stack's `NameServers`,
+`HostedZoneId`, and `HostedZoneName` outputs are the only values you move
+between the two steps.
 
 ## Building the bridge image
 
@@ -351,6 +436,16 @@ Cloudflare service `CNAME` — see [Option B](#option-b--a-custom-domain-recomme
 | -------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `CustomDomainTarget`       | The API Gateway regional domain name — the `CNAME` target for your custom host at your DNS provider.     |
 | `CustomDomainHostedZoneId` | The region-specific hosted zone id of the custom domain's regional endpoint (for Route 53 alias setups). |
+
+When you use the [Route 53 alternative](#automated-alternative--route-53-delegated-subdomain),
+the separate `KiroRemoteDnsStack` publishes its own outputs (read them with
+`aws cloudformation describe-stacks --stack-name KiroRemoteDnsStack`):
+
+| Output logical id | What it is                                                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `NameServers`     | The four Route 53 nameservers for the delegated zone — paste these as `NS` records for `kiro-remote` at Cloudflare.         |
+| `HostedZoneId`    | The hosted zone id — pass it to the app stack as `-c hostedZoneId=<id>` so it imports the zone for cert validation + alias. |
+| `HostedZoneName`  | The delegated zone name (the custom-domain host / zone apex).                                                               |
 
 The managed-login domain is `<cognitoDomainPrefix>.auth.<region>.amazoncognito.com`
 with the prefix you passed at deploy time.
