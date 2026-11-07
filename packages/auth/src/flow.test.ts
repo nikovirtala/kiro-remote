@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { type AuthorizeTxData, handleAuthorize } from "./authorize.ts";
 import { handleCallback } from "./callback.ts";
 import { CimdFetcher } from "./cimd.ts";
-import { ClientResolver } from "./clients.ts";
+import { ClientResolver, redirectUriAllowed } from "./clients.ts";
 import type { FacadeConfig } from "./config.ts";
 import { generateCodeVerifier, s256Challenge, sha256Hex } from "./pkce.ts";
 import { FakeCognito, FakeDdbClient, FakeKms, FakeS3Client } from "./test-helpers.ts";
@@ -287,6 +287,106 @@ describe("full authorize -> callback -> token happy path", () => {
     );
     expect(replay.status).toBe(400);
     expect(JSON.parse(replay.body).error).toBe("invalid_grant");
+  });
+});
+
+describe("ported loopback redirect_uri round-trip (native CLI)", () => {
+  // The CLI registers a PORT-LESS loopback (http://127.0.0.1/callback) in its
+  // CIMD doc but, per the OAuth 2.1 native-app rule, presents a PORT-FULL
+  // ephemeral-port URI at BOTH authorize and token time. The facade MUST store
+  // the exact client-presented ported URI at authorize and compare against the
+  // same ported URI at token time, or the token exchange fails invalid_grant.
+  const LOOPBACK_CLIENT_ID = "https://kiro.example.com/oauth/clients/cli.json";
+  const PORTLESS_REGISTERED = "http://127.0.0.1/callback";
+  const PORTED_REDIRECT = "http://127.0.0.1:54321/callback";
+
+  function loopbackResolver(): ClientResolver {
+    return new ClientResolver({
+      cimd: cimdFetcherFor({
+        client_id: LOOPBACK_CLIENT_ID,
+        client_name: "kiro-remote CLI",
+        redirect_uris: [PORTLESS_REGISTERED],
+      }),
+      preRegistered: [],
+    });
+  }
+
+  test("authorize stores the ported URI and token accepts the same ported URI", async () => {
+    const ddb = new FakeDdbClient();
+    const repo = makeRepo(ddb);
+    const cognito = new FakeCognito({
+      codeTokenSet: { access_token: "ACCESS", token_type: "Bearer", expires_in: 900 },
+    });
+    const kms = new FakeKms();
+
+    const clientVerifier = generateCodeVerifier();
+    const clientChallenge = s256Challenge(clientVerifier);
+
+    // 1. authorize with the PORTED loopback redirect_uri.
+    const authRes = await handleAuthorize(
+      authorizeReq({
+        response_type: "code",
+        client_id: LOOPBACK_CLIENT_ID,
+        redirect_uri: PORTED_REDIRECT,
+        code_challenge: clientChallenge,
+        code_challenge_method: "S256",
+        resource: config.mcpResource,
+        state: "client-state",
+      }),
+      {
+        config,
+        repo,
+        clients: loopbackResolver(),
+        generateState: () => "up-state",
+        generateVerifier: () => "up-verifier",
+      },
+    );
+    expect(authRes.status).toBe(302);
+
+    // The facade must persist the EXACT client-presented ported URI.
+    const tx = await repo.getOAuthTx("up-state");
+    expect(tx).not.toBeNull();
+    const txData = tx?.data as unknown as AuthorizeTxData;
+    expect(txData.redirectUri).toBe(PORTED_REDIRECT);
+
+    // 2. callback mints our code bound to the stored ported redirect_uri.
+    const cbRes = await handleCallback(
+      {
+        method: "GET",
+        path: "/oauth/callback",
+        query: { code: "cognito-code", state: "up-state" },
+        headers: {},
+      },
+      { config, repo, cognito, kms, generateCode: () => "our-code" },
+    );
+    expect(cbRes.status).toBe(302);
+    expect(new URL(cbRes.headers.location).origin + new URL(cbRes.headers.location).pathname).toBe(
+      "http://127.0.0.1:54321/callback",
+    );
+
+    // 3. token exchange with the SAME ported redirect_uri must SUCCEED.
+    const tokRes = await handleToken(
+      {
+        method: "POST",
+        path: "/oauth/token",
+        query: {},
+        headers: {},
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: "our-code",
+          code_verifier: clientVerifier,
+          client_id: LOOPBACK_CLIENT_ID,
+          redirect_uri: PORTED_REDIRECT,
+        }).toString(),
+      },
+      { repo, cognito, kms },
+    );
+    expect(tokRes.status).toBe(200);
+    expect(JSON.parse(tokRes.body).access_token).toBe("ACCESS");
+  });
+
+  test("redirectUriAllowed accepts the ported loopback against a port-less registration", () => {
+    expect(redirectUriAllowed([PORTLESS_REGISTERED], PORTED_REDIRECT)).toBe(true);
   });
 });
 

@@ -80,6 +80,35 @@ export class OAuthError extends Error {
   }
 }
 
+/**
+ * Build a `prefix` message that appends the facade's OAuth `error` /
+ * `error_description` from a non-2xx /oauth/token response, so the CLI prints
+ * the PRECISE reason (e.g. "invalid_grant (redirect_uri does not match ...)").
+ *
+ * The facade's error body is a non-secret RFC 6749 `{error, error_description}`
+ * JSON object (the code/verifier/tokens are in the REQUEST, not this response),
+ * so quoting it is safe; the final message is still run through the CLI's
+ * redact path at the output boundary. Defensive: the body may not be JSON (a
+ * gateway/proxy error page), so guard the parse and fall back to the raw status
+ * plus a truncated body.
+ */
+function tokenFailureMessage(prefix: string, status: number, body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown; error_description?: unknown };
+    if (parsed && typeof parsed.error === "string") {
+      const description =
+        typeof parsed.error_description === "string" ? parsed.error_description : undefined;
+      return description
+        ? `${prefix}: ${parsed.error} (${description})`
+        : `${prefix}: ${parsed.error}`;
+    }
+  } catch {
+    // Not JSON; fall through to the raw-status fallback below.
+  }
+  const snippet = body.trim().slice(0, 200);
+  return snippet ? `${prefix}: HTTP ${status} ${snippet}` : `${prefix}: HTTP ${status}`;
+}
+
 /** The result of a successful login (tokens + metadata needed to refresh). */
 export interface LoginResult {
   tokens: TokenSet;
@@ -165,7 +194,7 @@ export async function login(deps: LoginDeps): Promise<LoginResult> {
   });
   const tokenBody = await tokenRes.text();
   if (tokenRes.status < 200 || tokenRes.status >= 300) {
-    throw new OAuthError("token exchange failed");
+    throw new OAuthError(tokenFailureMessage("token exchange failed", tokenRes.status, tokenBody));
   }
   const tokens = JSON.parse(tokenBody) as TokenSet;
   if (!tokens.access_token) {
@@ -194,7 +223,7 @@ export async function refresh(deps: {
   });
   const body = await res.text();
   if (res.status < 200 || res.status >= 300) {
-    throw new OAuthError("token refresh failed");
+    throw new OAuthError(tokenFailureMessage("token refresh failed", res.status, body));
   }
   const tokens = JSON.parse(body) as TokenSet;
   if (!tokens.access_token) {

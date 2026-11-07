@@ -49,6 +49,43 @@ function toFacadeResponse(r: FacadeResponse): HttpResponse {
   return { status: r.status, headers: r.headers, body: r.body };
 }
 
+/**
+ * Log a 4xx OAuth control-flow rejection server-side so the facade shows WHICH
+ * validation failed (the pure auth handlers carry no logger). The RFC 6749
+ * `error` / `error_description` are non-secret OAuth error codes, and the obs
+ * facade still runs every attribute through core's redact. We log ONLY 4xx:
+ * 2xx is a success and 5xx is already error-logged by the router.
+ */
+function logOauthRejection(
+  ctx: ApiContext,
+  event: string,
+  res: HttpResponse | FacadeResponse,
+): void {
+  if (res.status < 400 || res.status >= 500) {
+    return;
+  }
+  let error: string | undefined;
+  let errorDescription: string | undefined;
+  if (typeof res.body === "string" && res.body.length > 0) {
+    try {
+      const parsed = JSON.parse(res.body) as { error?: unknown; error_description?: unknown };
+      if (typeof parsed.error === "string") {
+        error = parsed.error;
+      }
+      if (typeof parsed.error_description === "string") {
+        errorDescription = parsed.error_description;
+      }
+    } catch {
+      // Non-JSON body (e.g. an HTML error page); log the status alone.
+    }
+  }
+  ctx.obs.warn(event, {
+    status: res.status,
+    ...(error ? { error } : {}),
+    ...(errorDescription ? { error_description: errorDescription } : {}),
+  });
+}
+
 /** Dispatch a facade request. Returns null when the path is not a facade path. */
 export async function dispatchFacade(
   ctx: ApiContext,
@@ -76,10 +113,14 @@ export async function dispatchFacade(
     return toFacadeResponse(await handleAuthorize(facadeReq, facade.authorize));
   }
   if (req.path === "/oauth/callback" && req.method === "GET") {
-    return toFacadeResponse(await handleCallback(facadeReq, facade.callback));
+    const res = toFacadeResponse(await handleCallback(facadeReq, facade.callback));
+    logOauthRejection(ctx, "oauth_callback_rejected", res);
+    return res;
   }
   if (req.path === "/oauth/token" && req.method === "POST") {
-    return toFacadeResponse(await handleToken(facadeReq, facade.token));
+    const res = toFacadeResponse(await handleToken(facadeReq, facade.token));
+    logOauthRejection(ctx, "oauth_token_rejected", res);
+    return res;
   }
   if (req.path === "/oauth/revoke" && req.method === "POST") {
     return toFacadeResponse(await handleRevoke(facadeReq, facade.revoke));
