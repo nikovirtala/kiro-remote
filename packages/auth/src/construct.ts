@@ -29,6 +29,7 @@ import {
   ResourceServerScope,
   UserPool,
   type UserPoolClient,
+  type UserPoolDomain,
   type UserPoolResourceServer,
 } from "aws-cdk-lib/aws-cognito";
 import { Construct } from "constructs";
@@ -75,6 +76,8 @@ export interface FacadeScopes {
 export class KiroRemoteAuth extends Construct {
   /** The Cognito user pool. */
   readonly userPool: UserPool;
+  /** The Cognito-hosted managed-login domain. */
+  readonly managedLoginDomain: UserPoolDomain;
   /** The MCP resource server (identifier = <host>/mcp). */
   readonly resourceServer: UserPoolResourceServer;
   /** The canonical MCP resource identifier used as the RFC 8707 audience. */
@@ -111,7 +114,7 @@ export class KiroRemoteAuth extends Construct {
     });
 
     // Managed login (newer experience) served from a Cognito prefix domain.
-    this.userPool.addDomain("ManagedLoginDomain", {
+    this.managedLoginDomain = this.userPool.addDomain("ManagedLoginDomain", {
       cognitoDomain: { domainPrefix: props.cognitoDomainPrefix },
       managedLoginVersion: 2 as ManagedLoginVersion,
     });

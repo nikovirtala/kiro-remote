@@ -7,7 +7,7 @@
  * hardcoded); Kiro sandboxes run in us-east-1 regardless.
  */
 
-import { Stack, type StackProps } from "aws-cdk-lib";
+import { CfnOutput, Stack, type StackProps } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { KiroRemote, type KiroRemoteProps } from "./construct.ts";
 import { suppressIntentionalFindings } from "./nag.ts";
@@ -25,5 +25,29 @@ export class KiroRemoteStack extends Stack {
     this.kiroRemote = new KiroRemote(this, "KiroRemote", props.kiroRemote);
     // Justified, inline suppressions for every intentional AwsSolutions finding.
     suppressIntentionalFindings(this.kiroRemote);
+
+    // Named outputs with stable logical ids so operators can copy-paste the
+    // resource ids the docs tell them to look up. Values are read from the
+    // construct members -- nothing here is hardcoded.
+    new CfnOutput(this, "UserPoolId", {
+      value: this.kiroRemote.auth.userPool.userPoolId,
+      description: "Cognito user pool id",
+    });
+    new CfnOutput(this, "FacadeClientId", {
+      value: this.kiroRemote.auth.facadeClient.userPoolClientId,
+      description: "The public, no-secret facade app client id",
+    });
+    new CfnOutput(this, "ApiUrl", {
+      value: this.kiroRemote.httpApi.apiEndpoint,
+      description: "The HTTP API default endpoint (facade base host)",
+    });
+    new CfnOutput(this, "ManagedLoginDomainUrl", {
+      value: this.kiroRemote.auth.managedLoginDomain.baseUrl(),
+      description: "Cognito managed-login domain base URL",
+    });
+    new CfnOutput(this, "McpResourceIdentifier", {
+      value: this.kiroRemote.auth.mcpResourceIdentifier,
+      description: "The RFC 8707 MCP resource identifier (<host>/mcp audience)",
+    });
   }
 }

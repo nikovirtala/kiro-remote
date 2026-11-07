@@ -14,7 +14,8 @@
     "build": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
-    "synth": "cdk synth --app \"node bin/app.ts\" --quiet"
+    "synth": "cdk synth --app \"node bin/app.ts\" --quiet",
+    "deploy": "cdk deploy --app \"node bin/app.ts\""
   },
   "dependencies": {
     "@nikovirtala/auth": "workspace:*",

@@ -145,7 +145,7 @@ commands from `packages/cdk` (its `cdk.json` sets `app` to `node bin/app.ts`). T
 mise exec -- pnpm --filter @nikovirtala/cdk exec cdk bootstrap
 
 # Deploy with your real context values.
-mise exec -- pnpm --filter @nikovirtala/cdk exec cdk deploy \
+mise exec -- pnpm --filter @nikovirtala/cdk deploy -- \
   -c publicBaseUrl=https://<host> \
   -c cognitoDomainPrefix=<prefix> \
   -c allowedRepos=owner/repo1,owner/repo2
@@ -155,26 +155,32 @@ The account and region come from `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`
 (standard CDK behavior). Kiro cloud sandboxes always run in `us-east-1` regardless
 of where the stack is deployed.
 
-> There is no custom `deploy` npm script; `packages/cdk/package.json` defines
-> `build`, `test`, and `synth` only. Invoke the local `cdk` binary directly as
-> shown (it uses the same `--app "node bin/app.ts"` that `cdk.json` configures).
+> The `deploy` script runs `cdk deploy --app "node bin/app.ts"` inside
+> `packages/cdk` (the same `--app` invocation as `synth`). The `--` passes the
+> `-c key=value` context args through pnpm to the CDK CLI. A root convenience
+> script mirrors it, so from the repository root you can also run
+> `mise exec -- pnpm run deploy -- -c publicBaseUrl=https://<host> ...`
+> (use `pnpm run deploy` rather than bare `pnpm deploy`, which is pnpm's own
+> built-in command).
 
 ## 6. Find the resource identifiers you'll need
 
-The stack does **not** publish named CloudFormation outputs for the Cognito IDs.
-Read them from the deployed resources. You will need the **user pool id**, the
-**facade app client id**, and the **managed-login domain** for the next guides:
+The stack publishes named CloudFormation outputs for everything the next guides
+reference, so you do not have to hunt through the resource list. `cdk deploy`
+prints them when it finishes; you can also read them back at any time:
 
 ```bash
-# All stack resources (find the Cognito user pool + user pool clients):
-aws cloudformation list-stack-resources --stack-name KiroRemoteStack
-
-# The user pool's details, including its hosted/managed-login domain:
-aws cognito-idp describe-user-pool --user-pool-id <user-pool-id>
-
-# The app clients on the pool (the facade client id is here):
-aws cognito-idp list-user-pool-clients --user-pool-id <user-pool-id>
+aws cloudformation describe-stacks --stack-name KiroRemoteStack \
+  --query 'Stacks[0].Outputs'
 ```
+
+| Output logical id       | What it is                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `UserPoolId`            | The Cognito user pool id (used to register users and inspect app clients).       |
+| `FacadeClientId`        | The public, no-secret facade app client id used by OAuth clients.                |
+| `ApiUrl`                | The HTTP API default endpoint (the facade base host when no custom domain).      |
+| `ManagedLoginDomainUrl` | The Cognito managed-login domain base URL (`https://<prefix>.auth.<region>...`). |
+| `McpResourceIdentifier` | The RFC 8707 MCP resource identifier (`<host>/mcp` audience).                    |
 
 The managed-login domain is `<cognitoDomainPrefix>.auth.<region>.amazoncognito.com`
 with the prefix you passed at deploy time.
