@@ -245,6 +245,22 @@ describe("KiroRemote", () => {
       ]),
     });
     template.resourceCountIs("AWS::WAFv2::WebACLAssociation", 1);
+    // The association references the WebACL arn and a correctly-formed
+    // apigatewayv2 stage ARN. Because the apiId is a token the ResourceArn is
+    // an Fn::Join whose parts include the fixed ARN segments.
+    template.hasResourceProperties("AWS::WAFv2::WebACLAssociation", {
+      WebACLArn: Match.anyValue(),
+      ResourceArn: {
+        "Fn::Join": [
+          "",
+          Match.arrayWith([
+            Match.stringLikeRegexp("^arn:$"),
+            Match.stringLikeRegexp(":apigateway:.*::/apis/$"),
+            Match.stringLikeRegexp("^/stages/\\$default$"),
+          ]),
+        ],
+      },
+    });
   });
 
   test("the Cognito pool has self-sign-up off and is passwordless passkey-first", () => {

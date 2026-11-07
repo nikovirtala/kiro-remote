@@ -550,19 +550,24 @@ export class KiroRemote extends Construct {
       ],
     });
 
-    // Associate the web ACL with the HTTP API's default stage.
+    // Associate the web ACL with the HTTP API's default stage. The WAFv2
+    // regional resource ARN for an API Gateway v2 (HTTP API) stage is
+    // `arn:<partition>:apigateway:<region>::/apis/<apiId>/stages/<stageName>`
+    // (no account id). Build it from the stack partition/region tokens so the
+    // separators are exactly right (formatArn mangled the slash-delimited path).
+    const s = Stack.of(this);
     const stage = this.httpApi.defaultStage;
-    const stageArn = Stack.of(this).formatArn({
-      service: "apigateway",
-      resource: "/apis",
-      account: "",
-      resourceName: `${this.httpApi.apiId}/stages/${stage?.stageName ?? "$default"}`,
-    });
+    const stageName = stage?.stageName ?? "$default";
+    const stageArn = `arn:${s.partition}:apigateway:${s.region}::/apis/${this.httpApi.apiId}/stages/${stageName}`;
     const association = new CfnWebACLAssociation(this, "WebAclAssociation", {
       resourceArn: stageArn,
       webAclArn: this.webAcl.attrArn,
     });
     association.node.addDependency(this.webAcl);
+    // The stage must exist before WAF tries to attach to its ARN.
+    if (stage) {
+      association.node.addDependency(stage);
+    }
 
     /* --------------------------- Fargate bridge -------------------------- */
 
