@@ -62,7 +62,15 @@ COPY packages/bridge ./packages/bridge
 #     rewriteRelativeImportExtensions in tsconfig) without a custom plugin.
 # The kiro-cli child process is a runtime PATH binary spawned via
 # child_process, not an import, so it is neither bundled nor externalized.
-RUN node_modules/.bin/esbuild packages/bridge/src/cli.ts \
+#
+# esbuild is a devDependency of @nikovirtala/kiro-remote-cdk. Under pnpm's
+# default isolated node_modules layout its bin is linked ONLY into the owning
+# package's node_modules/.bin (packages/cdk/node_modules/.bin/esbuild), NOT the
+# workspace-root node_modules/.bin. We therefore invoke the owning package's
+# bin by its explicit path, which resolves under the filtered install above and
+# keeps the working directory at /app so the relative entry path below (and its
+# .ts resolution) stays correct.
+RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/cli.ts \
       --bundle \
       --platform=node \
       --target=node22 \
@@ -108,7 +116,7 @@ USER bridge
 # Cheap liveness probe: a bare Node exec that cannot re-trigger the old
 # type-strip crash and does not depend on an unimplemented subcommand. It only
 # proves the Node runtime in the container is responsive.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=2 \
     CMD node -e "process.exit(0)"
 
 # Run the bundled bridge. `serve` is the only implemented subcommand.

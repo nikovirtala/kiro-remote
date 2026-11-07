@@ -17,6 +17,7 @@
  * container can no longer crash on the type-strip path.
  */
 
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -26,6 +27,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 /** The repo-root-relative path to the bridge CLI entry (packages/cdk/src -> repo root). */
 const CLI_ENTRY = join(here, "..", "..", "bridge", "src", "cli.ts");
+
+/** The bridge Dockerfile (packages/cdk/src -> packages/bridge/Dockerfile). */
+const DOCKERFILE = join(here, "..", "..", "bridge", "Dockerfile");
 
 describe("bridge image bundle", () => {
   test("bundling packages/bridge/src/cli.ts inlines the @nikovirtala/* workspace code (no bare require)", async () => {
@@ -53,5 +57,33 @@ describe("bridge image bundle", () => {
     // Sanity: the bundle actually contains the bridge's own runtime surface
     // (it reached and inlined the application code, not just an empty shell).
     expect(code).toContain("bridge_starting");
+  });
+
+  // This guards a DIFFERENT failure class than the in-process bundle test
+  // above: the Dockerfile's esbuild *bin path*. esbuild is a devDependency of
+  // @nikovirtala/kiro-remote-cdk, so under pnpm's default isolated layout its
+  // bin is linked ONLY into packages/cdk/node_modules/.bin -- NOT the
+  // workspace-root node_modules/.bin. A `RUN node_modules/.bin/esbuild ...`
+  // line (resolving to /app/node_modules/.bin/esbuild) therefore does not exist
+  // in the image and the docker build fails before producing the bundle. The
+  // in-process build() above cannot catch that because it imports esbuild as a
+  // module. This cheap content assertion closes the gap.
+  test("the Dockerfile invokes esbuild via a resolvable bin path (not the non-existent root node_modules/.bin)", () => {
+    const dockerfile = readFileSync(DOCKERFILE, "utf8");
+
+    // The esbuild invocation must exist and bundle the bridge CLI entry.
+    expect(dockerfile).toMatch(/esbuild\s+packages\/bridge\/src\/cli\.ts/);
+
+    // It must NOT use the bare root bin path, which pnpm does not create for a
+    // devDependency owned by a workspace package.
+    expect(dockerfile).not.toMatch(/(?:RUN\s+|&&\s*)node_modules\/\.bin\/esbuild/);
+
+    // It MUST resolve esbuild through the owning package's bin or via
+    // `pnpm --filter <owning-pkg> exec esbuild`, both of which resolve under
+    // the filtered install the Dockerfile performs.
+    const resolvableInvocation =
+      /packages\/cdk\/node_modules\/\.bin\/esbuild/.test(dockerfile) ||
+      /pnpm\s+--filter\s+@nikovirtala\/kiro-remote-cdk\s+exec\s+esbuild/.test(dockerfile);
+    expect(resolvableInvocation).toBe(true);
   });
 });
