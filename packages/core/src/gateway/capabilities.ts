@@ -159,7 +159,7 @@ export function capabilities(init: InitializeResult): Capabilities {
   const cloudExecution =
     executionTargets.some((t) => /cloud|remote/i.test(t)) ||
     sessionSources.some((s) => /remote|cloud/i.test(s)) ||
-    listScopes.some((s) => /cloud|account/i.test(s)) ||
+    listScopes.some((s) => /cloud|remote/i.test(s)) ||
     extensionMethods.some((m) => /cloud|remote/i.test(m));
 
   return {

@@ -88,11 +88,30 @@ describe("capabilities() cloudExecution derivation", () => {
     expect(caps.cloudExecution).toBe(true);
   });
 
-  it("is true when a listScope matches cloud/account", () => {
+  it("is true when a listScope matches cloud/remote", () => {
     const caps = capabilities({
-      agentCapabilities: { _meta: { kiro: { executionTargets: [], listScopes: ["account"] } } },
+      agentCapabilities: { _meta: { kiro: { executionTargets: [], listScopes: ["cloud"] } } },
     });
     expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("is NOT a cloud signal when a listScope is only 'account' (no other signal)", () => {
+    // A purely-local agent may advertise an `account`-scoped listing; on its
+    // own that must not be mistaken for cloud execution and route to ACP.
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: {
+          kiro: {
+            executionTargets: [],
+            sessionSources: ["local"],
+            listScopes: ["account"],
+            extensionMethods: ["_session/steer"],
+          },
+        },
+      },
+    });
+    expect(caps.listScopes).toEqual(["account"]);
+    expect(caps.cloudExecution).toBe(false);
   });
 
   it("normalizes object-shaped executionTargets to string[] and derives cloud", () => {

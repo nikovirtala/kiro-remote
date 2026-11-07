@@ -80,6 +80,54 @@ describe("CONFIG#CAPS persistence", () => {
     expect(h.logLines.join("\n")).not.toContain("ksk_");
   });
 
+  test("a secret-shaped value in the initialize result is redacted before it is persisted", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), level: "debug" });
+
+    // An initialize result that (hypothetically) carries secrets: a sensitive
+    // KEY name (access_token) and a secret-pattern string VALUE (ksk_...).
+    const secretBearingInit = {
+      ...initResult({
+        extensionMethods: ["_kiro/openExternalUrl", "_kiro/session/context"],
+        executionTargets: ["cloud", "local"],
+        modes: [{ modeId: "vibe" }, { modeId: "planner" }],
+      }),
+      access_token: "ksk_live_super_secret_value",
+      sessionHandle: "handle ksk_live_another_secret tail",
+    };
+
+    let persisted: Record<string, unknown> | null = null;
+    const repo = {
+      putCaps: async (item: Record<string, unknown>) => {
+        persisted = item;
+      },
+      putModels: async () => {},
+    };
+    const gateway = {
+      initializeResult: secretBearingInit,
+      capabilities: () => deriveCapabilities(secretBearingInit),
+    };
+
+    // biome-ignore lint/suspicious/noExplicitAny: focused unit with minimal fakes.
+    await persistCaps(repo as any, gateway as any, logger);
+
+    expect(persisted).not.toBeNull();
+    const serialized = JSON.stringify(persisted);
+    // No secret-shaped value survives into the persisted CONFIG#CAPS item.
+    expect(serialized).not.toContain("ksk_");
+    expect(serialized).toContain("[REDACTED]");
+
+    // The round-trip for NON-secret capability fields is preserved: redact()
+    // leaves the capability name arrays and modes intact.
+    const derived = deriveCapabilities(
+      (persisted as { initializeResult: object }).initializeResult,
+    );
+    expect(derived.extensionMethods).toEqual(["_kiro/openExternalUrl", "_kiro/session/context"]);
+    expect(derived.executionTargets).toEqual(["cloud", "local"]);
+    expect(derived.modes.map((m) => m.modeId)).toEqual(["vibe", "planner"]);
+    expect(derived.cloudExecution).toBe(true);
+  });
+
   test("persistCaps swallows a putCaps failure and logs a warning", async () => {
     const lines: string[] = [];
     const logger = createLogger({ sink: (l) => lines.push(l), level: "debug" });

@@ -15,7 +15,7 @@
  * keeps operating and the next reconnect retries the write.
  */
 
-import type { Repository } from "@nikovirtala/kiro-remote-core";
+import { type Repository, redact } from "@nikovirtala/kiro-remote-core";
 import type { AcpGateway } from "./gateway.ts";
 import type { Logger } from "./logger.ts";
 
@@ -31,10 +31,18 @@ export async function persistCaps(
 ): Promise<void> {
   try {
     const caps = gateway.capabilities();
-    // initializeResult MUST be the RAW initialize result so that the read side
-    // (deriveCapabilities(caps.initializeResult)) reproduces the advertisement.
+    // initializeResult MUST be (and remains) the RAW initialize result so the
+    // read side (deriveCapabilities(caps.initializeResult)) reproduces the
+    // advertisement. It is run through core's redact() first so that if the
+    // (still-unknown) real kiro-cli v3 initialize result ever carries a
+    // token/key/signed-URL under some field, that secret is scrubbed before it
+    // lands in DynamoDB. redact() only replaces sensitive KEY names and
+    // secret-pattern string VALUES, so the non-secret capability name arrays
+    // (extensionMethods, executionTargets, sessionSources, listScopes,
+    // configOptions, modes, protocolVersion) pass through unchanged and the
+    // round-trip is preserved.
     await repo.putCaps({
-      initializeResult: gateway.initializeResult as Record<string, unknown>,
+      initializeResult: redact(gateway.initializeResult) as Record<string, unknown>,
       extensionMethods: [...caps.extensionMethods],
       configOptions: [...caps.configOptions],
       modes: [...caps.modes],
