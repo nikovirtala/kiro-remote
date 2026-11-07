@@ -29,6 +29,12 @@ export {
 } from "./http.ts";
 export { requireIdempotencyKey, withIdempotency } from "./idempotency.ts";
 export type {
+  ClientCapabilities,
+  ClientEvent,
+  ClientEventsPage,
+  ClientPermission,
+  ClientSession,
+  ClientTurn,
   KiroRemoteClient,
   McpTransportHandler,
   McpTransportRequest,
