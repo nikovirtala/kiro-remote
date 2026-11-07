@@ -24,6 +24,7 @@
 
 import { Duration } from "aws-cdk-lib";
 import {
+  CfnManagedLoginBranding,
   FeaturePlan,
   type ManagedLoginVersion,
   Mfa,
@@ -173,6 +174,14 @@ export class KiroRemoteAuth extends Construct {
       preventUserExistenceErrors: true,
     });
 
+    // Managed Login v2 refuses to render the hosted login page unless a
+    // branding style exists for the client (otherwise the page shows "Login
+    // pages unavailable"). The CDK domain with `managedLoginVersion: 2` does
+    // NOT auto-create one, so provision a default (Cognito-provided) branding
+    // for every client. `useCognitoProvidedValues: true` applies the default
+    // styling with no custom design work.
+    this.addManagedLoginBranding("FacadeClientBranding", this.facadeClient);
+
     for (const client of props.preRegisteredClients ?? []) {
       this.preRegisteredClients[client.name] = this.userPool.addClient(`Client${client.name}`, {
         generateSecret: false,
@@ -188,6 +197,25 @@ export class KiroRemoteAuth extends Construct {
         enableTokenRevocation: true,
         preventUserExistenceErrors: true,
       });
+      this.addManagedLoginBranding(
+        `Branding${client.name.replace(/[^a-zA-Z0-9]/g, "")}`,
+        this.preRegisteredClients[client.name],
+      );
     }
+  }
+
+  /**
+   * Provision a default (Cognito-provided) Managed Login v2 branding style for
+   * an app client. Managed Login v2 will not render the hosted login page
+   * unless a branding style exists for the client. Depends on the managed
+   * login domain so the branding is created after the domain exists.
+   */
+  private addManagedLoginBranding(id: string, client: UserPoolClient): void {
+    const branding = new CfnManagedLoginBranding(this, id, {
+      userPoolId: this.userPool.userPoolId,
+      clientId: client.userPoolClientId,
+      useCognitoProvidedValues: true,
+    });
+    branding.node.addDependency(this.managedLoginDomain);
   }
 }

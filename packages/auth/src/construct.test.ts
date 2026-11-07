@@ -70,6 +70,22 @@ describe("KiroRemoteAuth", () => {
     expect(callbackSets).toContainEqual(["https://claude.ai/api/mcp/auth_callback"]);
   });
 
+  test("provisions a default Managed Login v2 branding for the facade client", () => {
+    // Managed Login v2 will not render the hosted login page without a branding
+    // style for the client, so every client gets a Cognito-provided default.
+    const brandings = template.findResources("AWS::Cognito::ManagedLoginBranding");
+    const defaults = Object.values(brandings).filter(
+      (b) =>
+        (b.Properties as { UseCognitoProvidedValues?: boolean }).UseCognitoProvidedValues === true,
+    );
+    // One for the facade client + one for the single pre-registered client.
+    expect(defaults).toHaveLength(2);
+    for (const b of defaults) {
+      expect((b.Properties as { UserPoolId?: unknown }).UserPoolId).toBeDefined();
+      expect((b.Properties as { ClientId?: unknown }).ClientId).toBeDefined();
+    }
+  });
+
   test("exposes the resource identifier on the construct", () => {
     const app = new App();
     const stack = new Stack(app, "S2");

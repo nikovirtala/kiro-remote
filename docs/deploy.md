@@ -564,6 +564,12 @@ the separate `KiroRemoteDnsStack` publishes its own outputs (read them with
 The managed-login domain is `<cognitoDomainPrefix>.auth.<region>.amazoncognito.com`
 with the prefix you passed at deploy time.
 
+> Managed Login v2 only renders the hosted login page when a branding style
+> exists for the app client; without one the page shows "Login pages
+> unavailable". The stack provisions a default (Cognito-provided) branding for
+> the facade client and every pre-registered client, so the hosted login page
+> renders out of the box.
+
 ## Next
 
 - [Register a user](./users.md)
