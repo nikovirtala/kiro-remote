@@ -117,6 +117,19 @@ export async function login(deps: LoginDeps): Promise<LoginResult> {
   const codeChallenge = s256Challenge(codeVerifier);
   const state = generateOpaqueToken();
 
+  // The CLI is a full-access personal client: request openid PLUS the three
+  // fully-qualified resource-server scopes the REST API requires (reads need
+  // sessions:read, writes sessions:write, delete sessions:delete). Cognito
+  // prefixes resource-server scopes with the resource identifier, so these
+  // match the facade app client's AllowedOAuthScopes. Without them the issued
+  // access token carries only openid and every /v1 call returns 403.
+  const scope = [
+    "openid",
+    `${resource}/sessions:read`,
+    `${resource}/sessions:write`,
+    `${resource}/sessions:delete`,
+  ].join(" ");
+
   // 3 + 4. Loopback roundtrip returns the code and the exact redirect_uri used.
   const authorizeUrl = (redirectUri: string): string => {
     const params = new URLSearchParams({
@@ -126,7 +139,7 @@ export async function login(deps: LoginDeps): Promise<LoginResult> {
       state,
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
-      scope: "openid",
+      scope,
       resource,
     });
     return `${authorizeEndpoint}?${params.toString()}`;

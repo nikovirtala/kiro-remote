@@ -37,6 +37,18 @@ const fakeRoundtrip: AuthorizationRoundtrip = async ({ authorizeUrl, state }) =>
   if (url.searchParams.get("resource") !== `${BASE}/mcp`) {
     throw new Error("missing RFC 8707 resource");
   }
+  // The authorize request MUST ask for openid PLUS the three fully-qualified
+  // resource-server scopes, or the issued access token can't authorize /v1.
+  const scope = url.searchParams.get("scope") ?? "";
+  const scopes = scope.split(" ");
+  if (
+    !scopes.includes("openid") ||
+    !scopes.includes(`${BASE}/mcp/sessions:read`) ||
+    !scopes.includes(`${BASE}/mcp/sessions:write`) ||
+    !scopes.includes(`${BASE}/mcp/sessions:delete`)
+  ) {
+    throw new Error("missing sessions:* scopes");
+  }
   return { code: "auth-code-xyz", redirectUri: "http://127.0.0.1:54321/callback" };
 };
 
