@@ -96,6 +96,14 @@ export class SessionManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
   /** Maps the cloud (Kiro) session id back to our session id for update routing. */
   private readonly kiroToLocal = new Map<string, string>();
+  /**
+   * In-flight update/notification processing promises. The gateway hooks
+   * fire-and-forget into handleUpdate/handleAgentNotification/
+   * handlePermissionRequested; tracking them here lets the supervisor await
+   * replay actually draining after session/load before it settles an
+   * in-flight turn, instead of racing an un-landed completion event.
+   */
+  private readonly inFlightUpdates = new Set<Promise<void>>();
 
   constructor(deps: SessionManagerDeps) {
     this.gateway = deps.gateway;
@@ -144,6 +152,33 @@ export class SessionManager {
   }
 
   /* ----------------------------- update routing ---------------------------- */
+
+  /**
+   * Register a fire-and-forget hook promise so {@link drainUpdates} can await
+   * it. The gateway hooks call this instead of awaiting; it never throws.
+   */
+  track(work: Promise<void>): void {
+    const tracked = work
+      .catch((err) => {
+        this.logger.warn("update_processing_error", { error: String(err) });
+      })
+      .finally(() => {
+        this.inFlightUpdates.delete(tracked);
+      });
+    this.inFlightUpdates.add(tracked);
+  }
+
+  /**
+   * Resolve once every currently-tracked update/notification has been
+   * persisted. Called after session/load so a reconnect settles an in-flight
+   * turn only after replay has actually drained. Loops because draining one
+   * batch can enqueue more (e.g. a flush that writes additional events).
+   */
+  async drainUpdates(): Promise<void> {
+    while (this.inFlightUpdates.size > 0) {
+      await Promise.all([...this.inFlightUpdates]);
+    }
+  }
 
   /** Called by the gateway hook when a session/update arrives. */
   async handleUpdate(kiroSessionId: string, update: unknown): Promise<void> {
@@ -507,11 +542,23 @@ export class SessionManager {
 
   /* ------------------------- reconnect / supervision ----------------------- */
 
-  /** Register a runtime for a loaded (reconnected) session. */
-  registerLoaded(id: string, kiroSessionId: string, inputs: SessionInputs): SessionRuntime {
+  /**
+   * Register a runtime for a loaded (reconnected) session. When the session had
+   * an in-flight turn, pass its id so replayed updates are attributed to it (the
+   * reconnect settlement keys the transport_lost decision on that turn).
+   */
+  registerLoaded(
+    id: string,
+    kiroSessionId: string,
+    inputs: SessionInputs,
+    activeTurnId?: string | null,
+  ): SessionRuntime {
     const rt = this.runtimeFor(id);
     rt.kiroSessionId = kiroSessionId;
     rt.inputs = inputs;
+    if (activeTurnId !== undefined) {
+      rt.activeTurnId = activeTurnId;
+    }
     this.kiroToLocal.set(kiroSessionId, id);
     return rt;
   }

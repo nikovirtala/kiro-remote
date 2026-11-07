@@ -140,15 +140,15 @@ export class BridgeServer {
       hooks: {
         onSessionUpdate: (sessionId, update) => {
           health.markActivity();
-          void manager.handleUpdate(sessionId, update);
+          manager.track(manager.handleUpdate(sessionId, update));
         },
         onPermissionRequested: (sessionId, requestId, params) => {
           health.markActivity();
-          void manager.handlePermissionRequested(sessionId, requestId, params);
+          manager.track(manager.handlePermissionRequested(sessionId, requestId, params));
         },
         onAgentNotification: (method, params) => {
           health.markActivity();
-          void manager.handleAgentNotification(method, params);
+          manager.track(manager.handleAgentNotification(method, params));
         },
       },
     });

@@ -80,6 +80,10 @@ describe("reconnect / supervision", () => {
       return { sessionId: sid };
     });
 
+    // Inject a clock that advances past the replay-settle window on the first
+    // read so the no-completion branch does not block for the full window; the
+    // replay tool_calls still drain (deterministically) before the decision.
+    let clock = 0;
     const supervisor = new Supervisor({
       gateway: harness.server.gateway,
       manager: harness.server.manager,
@@ -87,6 +91,10 @@ describe("reconnect / supervision", () => {
       logger: harness.server.logger,
       metrics: harness.server.metrics,
       inputsFor,
+      now: () => {
+        clock += 5000;
+        return clock;
+      },
       listSessions: async () => [
         (await requireHarness(harness).repo.getSession("src")) as SessionMetaItem,
       ],
@@ -171,6 +179,66 @@ describe("reconnect / supervision", () => {
     // Replay showed completion -> NOT marked transport_lost.
     expect(turn?.stopReason).not.toBe(TRANSPORT_LOST_REASON);
     expect(turn?.status).toBe("running");
+  });
+
+  test("replay completion delivered live on load (not pre-seeded) settles without transport_lost", async () => {
+    // The completion arrives ONLY as an async session/update emitted by the
+    // agent on session/load -- it is NOT pre-seeded and loadSession is NOT
+    // mocked. The supervisor must await replay draining before reading the log;
+    // a synchronous read would race the un-landed completion and misclassify the
+    // turn as transport_lost.
+    const replayCompletion = {
+      sessionUpdate: "session_info_update",
+      status: "end_turn",
+      _meta: { kiro: { kind: "turn_completion", replay: true } },
+    };
+    harness = await createHarness({
+      newSessionId: "cloud-rc3",
+      initialize: initResult(),
+      onLoad: {
+        messages: [{ kind: "notify", method: "session/update", params: replayCompletion }],
+      },
+      onPrompt: { response: { stopReason: "end_turn" } },
+    });
+    await harness.server.start();
+
+    const session = await harness.seedSession("src3", {
+      status: "running",
+      kiroSessionId: "cloud-rc3",
+      activeTurnId: "turn-live-3",
+    });
+    await harness.repo.putTurn({
+      PK: session.PK,
+      SK: "TURN#turn-live-3",
+      id: "turn-live-3",
+      sessionId: "src3",
+      prompt: "the original prompt",
+      status: "running",
+      stopReason: null,
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      metering: null,
+    });
+
+    const supervisor = new Supervisor({
+      gateway: harness.server.gateway,
+      manager: harness.server.manager,
+      repo: harness.repo,
+      logger: harness.server.logger,
+      metrics: harness.server.metrics,
+      inputsFor,
+      listSessions: async () => [
+        (await requireHarness(harness).repo.getSession("src3")) as SessionMetaItem,
+      ],
+    });
+    await supervisor.reconnect();
+
+    // Replay (drained before the decision) showed completion -> NOT transport_lost.
+    const turn = await harness.repo.getTurn("src3", "turn-live-3");
+    expect(turn?.stopReason).not.toBe(TRANSPORT_LOST_REASON);
+    expect(turn?.status).toBe("running");
+    const promptResent = harness.logLines.some((l) => l.includes("fakeAgentPromptCalled"));
+    expect(promptResent).toBe(false);
   });
 
   test("duplicate replay updates are deduped by toolCallId+content", async () => {

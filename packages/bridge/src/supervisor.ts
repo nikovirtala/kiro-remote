@@ -27,6 +27,11 @@ import type { SessionManager } from "./session-manager.ts";
 /** Reason recorded on a turn lost across a transport drop. */
 export const TRANSPORT_LOST_REASON = "transport_lost";
 
+/** Bounded window to wait for a replayed turn completion to land after load. */
+export const REPLAY_SETTLE_WINDOW_MS = 2000;
+/** Poll interval while waiting for replay to drain. */
+const REPLAY_POLL_MS = 10;
+
 const NON_IDLE_STATUSES = new Set(["running", "awaiting_permission"]);
 
 export interface SupervisorDeps {
@@ -39,13 +44,17 @@ export interface SupervisorDeps {
   inputsFor(session: SessionMetaItem): SessionInputs;
   /** Lists the sessions to consider for reconnect (owned, non-deleted). */
   listSessions(): Promise<SessionMetaItem[]>;
+  /** Clock, injectable for tests. */
+  now?: () => number;
 }
 
 export class Supervisor {
   private readonly deps: SupervisorDeps;
+  private readonly now: () => number;
 
   constructor(deps: SupervisorDeps) {
     this.deps = deps;
+    this.now = deps.now ?? (() => Date.now());
   }
 
   /**
@@ -90,14 +99,20 @@ export class Supervisor {
     });
 
     // Handlers are already registered (reconnect() did it before load). Register
-    // the runtime so replayed updates route and dedupe correctly.
-    manager.registerLoaded(session.id, session.kiroSessionId as string, plan.loadInputs);
+    // the runtime so replayed updates route and dedupe correctly, carrying the
+    // in-flight turn id so a replayed completion is attributed to it.
+    manager.registerLoaded(
+      session.id,
+      session.kiroSessionId as string,
+      plan.loadInputs,
+      session.activeTurnId,
+    );
 
     // session/load re-sending cwd/additionalDirectories/mcpServers.
     await gateway.loadSession(session.kiroSessionId as string, plan.loadInputs);
 
     // An in-flight turn is marked failed transport_lost UNLESS replay shows it
-    // completed. We decide from the event log after replay has been applied.
+    // completed. We decide from the event log only AFTER replay has drained.
     if (session.status === "running" && session.activeTurnId) {
       await this.settleInFlightTurn(session);
     }
@@ -107,12 +122,13 @@ export class Supervisor {
   private async settleInFlightTurn(session: SessionMetaItem): Promise<void> {
     const { repo, logger } = this.deps;
     const turnId = session.activeTurnId as string;
-    // Replay is applied asynchronously via session/update; give it a tick to land.
-    const events = await repo.queryEvents(session.id, 0, { limit: 1000 });
-    const completed = events.some(
-      (e) =>
-        e.turnId === turnId && (e.type === "turn.completed" || e.rawType === "turn_completion"),
-    );
+    // Replay arrives as session/update notifications processed asynchronously by
+    // the manager AFTER session/load resolves; a bare synchronous read here can
+    // race an un-landed completion and misclassify it transport_lost. Wait for
+    // the completion to be persisted, polling a bounded window and draining the
+    // manager's in-flight update processing each pass so the decision keys on a
+    // real signal (the completion event actually landing), not a fixed delay.
+    const completed = await this.waitForTurnCompletion(session.id, turnId);
     const turn = await repo.getTurn(session.id, turnId);
     if (!turn) {
       return;
@@ -137,5 +153,29 @@ export class Supervisor {
       endedAt: new Date().toISOString(),
     });
     logger.warn("inflight_turn_transport_lost", { sessionId: session.id, turnId });
+  }
+
+  /**
+   * Return true once a replayed completion for {@link turnId} is persisted, or
+   * false if none lands within {@link REPLAY_SETTLE_WINDOW_MS}. Each pass drains
+   * the manager's in-flight update processing so an already-delivered update is
+   * observed immediately; the window only bounds how long we wait for a replay
+   * update that is still in flight on the transport.
+   */
+  private async waitForTurnCompletion(sessionId: string, turnId: string): Promise<boolean> {
+    const { repo, manager } = this.deps;
+    const deadline = this.now() + REPLAY_SETTLE_WINDOW_MS;
+    for (;;) {
+      await manager.drainUpdates();
+      const events = await repo.queryEvents(sessionId, 0, { limit: 1000 });
+      const completed = events.some(
+        (e) =>
+          e.turnId === turnId && (e.type === "turn.completed" || e.rawType === "turn_completion"),
+      );
+      if (completed || this.now() >= deadline) {
+        return completed;
+      }
+      await new Promise((resolve) => setTimeout(resolve, REPLAY_POLL_MS));
+    }
   }
 }
