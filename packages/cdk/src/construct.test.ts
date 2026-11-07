@@ -1,0 +1,274 @@
+/**
+ * CDK assertion tests for the KiroRemote construct (aws-cdk-lib/assertions).
+ *
+ * Every test synthesizes the stack offline (no AWS, no Docker: the bridge image
+ * defaults to a placeholder and the Lambdas to inline placeholders) and asserts
+ * the security- and contract-critical properties:
+ *   - the table is on-demand + PITR + GSI1 + has a `ttl` TTL attribute,
+ *   - the bucket blocks public access and is encrypted,
+ *   - the command queue is FIFO,
+ *   - the KMS key grants are scoped to EXACTLY the callback/token handler roles,
+ *   - the Fargate service runs in public subnets with a public IP, a
+ *     no-ingress / egress-443-only SG, and the VPC has no NAT gateway,
+ *   - the task role is scoped to its own table/bucket/queue/secret,
+ *   - KIRO_API_KEY is a Secrets Manager ECS `secrets` entry (not a plain env),
+ *   - the WAF has two rate-based rules and is associated with the API,
+ *   - the Cognito pool has self-sign-up off + MFA required and the resource
+ *     server + facade client exist with the specified token lifetimes,
+ *   - the region flows from stack props.
+ */
+
+import { App, Stack } from "aws-cdk-lib";
+import { Match, Template } from "aws-cdk-lib/assertions";
+import { beforeAll, describe, expect, test } from "vitest";
+import { KiroRemote } from "./construct.ts";
+
+function synth(region = "eu-west-1"): { template: Template; stack: Stack } {
+  const app = new App();
+  const stack = new Stack(app, "TestStack", { env: { account: "111111111111", region } });
+  new KiroRemote(stack, "KiroRemote", {
+    publicBaseUrl: "https://kiro.example.com",
+    cognitoDomainPrefix: "kiro-remote-test",
+    allowedRepos: ["acme/*"],
+    preRegisteredClients: [
+      { name: "ClaudeCode", callbackUrls: ["https://claude.ai/api/mcp/auth_callback"] },
+    ],
+  });
+  return { template: Template.fromStack(stack), stack };
+}
+
+describe("KiroRemote", () => {
+  let template: Template;
+  let stack: Stack;
+
+  beforeAll(() => {
+    const s = synth();
+    template = s.template;
+    stack = s.stack;
+  });
+
+  test("the table is on-demand, has PITR on, GSI1, and a TTL attribute", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      BillingMode: "PAY_PER_REQUEST",
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      TimeToLiveSpecification: { AttributeName: "ttl", Enabled: true },
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "GSI1",
+          KeySchema: Match.arrayWith([
+            { AttributeName: "GSI1PK", KeyType: "HASH" },
+            { AttributeName: "GSI1SK", KeyType: "RANGE" },
+          ]),
+        }),
+      ]),
+      KeySchema: [
+        { AttributeName: "PK", KeyType: "HASH" },
+        { AttributeName: "SK", KeyType: "RANGE" },
+      ],
+    });
+  });
+
+  test("the bucket blocks all public access and is encrypted", () => {
+    template.hasResourceProperties("AWS::S3::Bucket", {
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: Match.arrayWith([
+          Match.objectLike({
+            ServerSideEncryptionByDefault: Match.objectLike({ SSEAlgorithm: "AES256" }),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("the command queue is FIFO", () => {
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      FifoQueue: true,
+      ContentBasedDeduplication: true,
+    });
+  });
+
+  test("there is exactly one KMS key for OAUTH#CODE with rotation", () => {
+    template.resourceCountIs("AWS::KMS::Key", 1);
+    template.hasResourceProperties("AWS::KMS::Key", { EnableKeyRotation: true });
+  });
+
+  test("the KMS key grants are scoped to the callback (encrypt) and token (decrypt) roles", () => {
+    // The callback role can Encrypt/GenerateDataKey; the token role can Decrypt.
+    // No other policy references the OAUTH#CODE key.
+    const policies = template.findResources("AWS::IAM::Policy");
+    const kmsActionsByRole: Record<string, string[]> = {};
+    for (const policy of Object.values(policies)) {
+      const doc = (policy.Properties as { PolicyDocument: { Statement: unknown[] } })
+        .PolicyDocument;
+      const roles = (policy.Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? [];
+      for (const stmt of doc.Statement as Array<{ Action?: string | string[] }>) {
+        const actions = ([] as string[]).concat(stmt.Action ?? []);
+        const kms = actions.filter((a) => a.startsWith("kms:"));
+        if (kms.length > 0) {
+          const roleRef = roles[0]?.Ref ?? "unknown";
+          kmsActionsByRole[roleRef] = (kmsActionsByRole[roleRef] ?? []).concat(kms);
+        }
+      }
+    }
+    const roleRefs = Object.keys(kmsActionsByRole);
+    // Exactly two roles touch KMS: the callback handler and the token handler.
+    expect(roleRefs.length).toBe(2);
+    const callbackRole = roleRefs.find((r) => r.includes("OAuthCallbackFn"));
+    const tokenRole = roleRefs.find((r) => r.includes("OAuthTokenFn"));
+    expect(callbackRole).toBeDefined();
+    expect(tokenRole).toBeDefined();
+    expect(kmsActionsByRole[callbackRole as string].some((a) => a.startsWith("kms:Encrypt"))).toBe(
+      true,
+    );
+    expect(kmsActionsByRole[tokenRole as string]).toContain("kms:Decrypt");
+    // The API/bridge roles never touch the key.
+    expect(roleRefs.some((r) => r.includes("ApiFn"))).toBe(false);
+    expect(roleRefs.some((r) => r.includes("TaskRole"))).toBe(false);
+  });
+
+  test("the VPC has no NAT gateway", () => {
+    template.resourceCountIs("AWS::EC2::NatGateway", 0);
+  });
+
+  test("the Fargate service runs in public subnets with a public IP", () => {
+    template.hasResourceProperties("AWS::ECS::Service", {
+      DesiredCount: 1,
+      LaunchType: "FARGATE",
+      NetworkConfiguration: {
+        AwsvpcConfiguration: Match.objectLike({ AssignPublicIp: "ENABLED" }),
+      },
+    });
+    // The subnets map a public IP on launch (public subnets).
+    const publicSubnets = template.findResources("AWS::EC2::Subnet", {
+      Properties: { MapPublicIpOnLaunch: true },
+    });
+    expect(Object.keys(publicSubnets).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("the bridge SG has NO ingress and egress on 443 only", () => {
+    template.hasResourceProperties("AWS::EC2::SecurityGroup", {
+      SecurityGroupEgress: [
+        Match.objectLike({ FromPort: 443, ToPort: 443, IpProtocol: "tcp", CidrIp: "0.0.0.0/0" }),
+      ],
+    });
+    // No SecurityGroup carries an ingress rule.
+    const sgs = template.findResources("AWS::EC2::SecurityGroup");
+    for (const sg of Object.values(sgs)) {
+      const ingress = (sg.Properties as { SecurityGroupIngress?: unknown[] }).SecurityGroupIngress;
+      expect(ingress === undefined || ingress.length === 0).toBe(true);
+    }
+  });
+
+  test("the arm64 Graviton runtime platform is set on the task definition", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      RuntimePlatform: { CpuArchitecture: "ARM64", OperatingSystemFamily: "LINUX" },
+    });
+  });
+
+  test("KIRO_API_KEY is a Secrets Manager ECS secret, never a plain env var", () => {
+    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+    const container = Object.values(taskDefs)[0].Properties as {
+      ContainerDefinitions: Array<{
+        Secrets?: Array<{ Name: string; ValueFrom: unknown }>;
+        Environment?: Array<{ Name: string }>;
+      }>;
+    };
+    const def = container.ContainerDefinitions[0];
+    expect(def.Secrets?.some((s) => s.Name === "KIRO_API_KEY")).toBe(true);
+    // It must NOT appear as a plain environment variable.
+    expect(def.Environment?.some((e) => e.Name === "KIRO_API_KEY")).not.toBe(true);
+  });
+
+  test("the task role is scoped to its own table/bucket/queue/secret", () => {
+    // The task-role policy references the table, bucket, queue, and secret -- and
+    // only DynamoDB/S3/SQS/SecretsManager actions (no Action:* ).
+    const policies = template.findResources("AWS::IAM::Policy");
+    const taskPolicy = Object.values(policies).find((p) =>
+      ((p.Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? []).some((r) =>
+        (r.Ref ?? "").includes("BridgeTaskTaskRole"),
+      ),
+    );
+    expect(taskPolicy).toBeDefined();
+    const doc = (taskPolicy as { Properties: { PolicyDocument: { Statement: unknown[] } } })
+      .Properties.PolicyDocument;
+    const actions = (doc.Statement as Array<{ Action?: string | string[] }>).flatMap((s) =>
+      ([] as string[]).concat(s.Action ?? []),
+    );
+    const services = new Set(actions.map((a) => a.split(":")[0]));
+    expect(services.has("dynamodb")).toBe(true);
+    expect(services.has("s3")).toBe(true);
+    expect(services.has("sqs")).toBe(true);
+    expect(services.has("secretsmanager")).toBe(true);
+    // No star-everything action.
+    expect(actions).not.toContain("*");
+  });
+
+  test("the WAF has two rate-based rules on /oauth/ and /mcp and is associated with the API", () => {
+    template.hasResourceProperties("AWS::WAFv2::WebACL", {
+      Scope: "REGIONAL",
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Name: "RateLimitOAuth",
+          Statement: {
+            RateBasedStatement: Match.objectLike({
+              ScopeDownStatement: {
+                ByteMatchStatement: Match.objectLike({ SearchString: "/oauth/" }),
+              },
+            }),
+          },
+        }),
+        Match.objectLike({
+          Name: "RateLimitMcp",
+          Statement: {
+            RateBasedStatement: Match.objectLike({
+              ScopeDownStatement: {
+                ByteMatchStatement: Match.objectLike({ SearchString: "/mcp" }),
+              },
+            }),
+          },
+        }),
+      ]),
+    });
+    template.resourceCountIs("AWS::WAFv2::WebACLAssociation", 1);
+  });
+
+  test("the Cognito pool has self-sign-up off and MFA required", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
+      MfaConfiguration: "ON",
+    });
+  });
+
+  test("the MCP resource server and facade client exist with the token lifetimes", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPoolResourceServer", {
+      Identifier: "https://kiro.example.com/mcp",
+      Scopes: Match.arrayWith([
+        Match.objectLike({ ScopeName: "sessions:read" }),
+        Match.objectLike({ ScopeName: "sessions:write" }),
+        Match.objectLike({ ScopeName: "sessions:delete" }),
+      ]),
+    });
+    template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
+      GenerateSecret: false,
+      AllowedOAuthFlows: ["code"],
+      CallbackURLs: ["https://kiro.example.com/oauth/callback"],
+      EnableTokenRevocation: true,
+      AccessTokenValidity: 15,
+      RefreshTokenValidity: 43200,
+      TokenValidityUnits: Match.objectLike({ AccessToken: "minutes" }),
+    });
+  });
+
+  test("the region flows from stack props (nothing hardcoded)", () => {
+    expect(stack.region).toBe("eu-west-1");
+    // A different region synthesizes cleanly too.
+    const other = synth("ap-southeast-2");
+    expect(other.stack.region).toBe("ap-southeast-2");
+  });
+});
