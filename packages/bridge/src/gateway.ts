@@ -8,7 +8,9 @@
  *  - Agent-to-client handlers (session/update, session/request_permission,
  *    _kiro/openExternalUrl) are registered BEFORE any session/new or
  *    session/load -- enforced by {@link registerHandlers}, called in start().
- *  - Every `_kiro/*` call is gated on `agentCapabilities._meta.kiro.extensionMethods`.
+ *  - The bridge issues only standard ACP methods (no outbound `_kiro/*`); any
+ *    future `_kiro/*` call MUST gate on `agentCapabilities._meta.kiro.extensionMethods`
+ *    via core's `hasExtensionMethod` (the same gate the API uses).
  *  - A turn settles ONLY on the session/prompt response/error.
  *  - Permissions are answered by the chosen optionId with canonical
  *    `_meta.kiro.consent` for allow_always/reject_always -- never synthesized.
@@ -19,7 +21,6 @@ import {
   type Capabilities,
   capabilities as deriveCapabilities,
   type GatewaySession,
-  hasExtensionMethod,
   type InitializeResult,
   type KiroGateway,
   type PermissionAnswer,
@@ -196,11 +197,6 @@ export class AcpGateway implements KiroGateway {
     this._initializeResult = result ?? {};
     this._capabilities = deriveCapabilities(this._initializeResult);
     return this._capabilities;
-  }
-
-  /** True when the extension method is advertised; gate every `_kiro/*` call. */
-  canCall(method: string): boolean {
-    return hasExtensionMethod(this._capabilities, method);
   }
 
   async newSession(inputs: SessionInputs): Promise<GatewaySession> {

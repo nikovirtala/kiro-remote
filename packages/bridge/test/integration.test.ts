@@ -1,4 +1,4 @@
-import type { Command } from "@kiro-remote/core";
+import { type Command, hasExtensionMethod } from "@kiro-remote/core";
 import { afterEach, describe, expect, test } from "vitest";
 import { createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
@@ -132,9 +132,11 @@ describe("capability gating", () => {
       onPrompt: { response: { stopReason: "end_turn" } },
     });
     await harness.server.start();
+    // Any future _kiro/* call must gate on the advertised extensionMethods via
+    // core's hasExtensionMethod (the real, shared gate used by the API too).
     const caps = harness.server.gateway.capabilities();
-    expect(harness.server.gateway.canCall("_kiro/session/context")).toBe(false);
-    expect(harness.server.gateway.canCall("_kiro/openExternalUrl")).toBe(true);
+    expect(hasExtensionMethod(caps, "_kiro/session/context")).toBe(false);
+    expect(hasExtensionMethod(caps, "_kiro/openExternalUrl")).toBe(true);
     expect(caps.extensionMethods).toEqual(["_kiro/openExternalUrl"]);
   });
 });
