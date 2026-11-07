@@ -12,6 +12,7 @@
     "dnsZoneName": "kiro-remote.nikovirtala.dev",
     "hostedZoneId": "Z00492973OD5EM79JPSQP",
     "kiroCliVersion": "2.31.0",
+    "kiroApiKeySecretArn": "arn:aws:secretsmanager:eu-north-1:827333031966:secret:kiro-remote/kiro-api-key-DuTGZY",
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
