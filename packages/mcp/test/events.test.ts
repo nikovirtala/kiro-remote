@@ -150,6 +150,42 @@ describe("kiro_get_transcript", () => {
     ]);
   });
 
+  it("pages through ALL events when the log exceeds one read page", async () => {
+    // A paging client: each getEvents call returns the next page after `after`.
+    const pages: Record<number, ClientEventsPage> = {
+      0: {
+        events: [textEvent(1, "turn one ", "t1"), textEvent(2, "done", "t1")],
+        nextCursor: 2,
+        turnStatus: "idle",
+      },
+      2: {
+        events: [textEvent(3, "turn two ", "t2"), textEvent(4, "done", "t2")],
+        nextCursor: 4,
+        turnStatus: "idle",
+      },
+      4: { events: [], nextCursor: 4, turnStatus: "idle" },
+    };
+    const reads: number[] = [];
+    const client = {
+      async getEvents(_p: Principal, _id: string, args: { after: number; wait: number }) {
+        reads.push(args.after);
+        return pages[args.after] ?? { events: [], nextCursor: args.after, turnStatus: "idle" };
+      },
+      async listPermissions() {
+        return { permissions: [] };
+      },
+    } as unknown as KiroRemoteClient;
+
+    const res = await finalTranscript(client, P, "s1");
+    // Later turns (page 2) are NOT omitted.
+    expect(res.turns).toEqual([
+      { turnId: "t1", text: "turn one done" },
+      { turnId: "t2", text: "turn two done" },
+    ]);
+    // It read page-by-page (0 -> 2 -> 4) and stopped on the empty page.
+    expect(reads).toEqual([0, 2, 4]);
+  });
+
   it("reads the whole log from seq 0 without blocking", async () => {
     let seen: { after: number; wait: number } | null = null;
     const client = stubClient({

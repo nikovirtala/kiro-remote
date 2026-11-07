@@ -27,6 +27,13 @@ export const MAX_WAIT_SECONDS = 25;
 export const MAX_EVENTS = 30;
 /** Hard cap on characters of extracted text returned by kiro_wait_for_events. */
 export const MAX_TEXT_CHARS = 8000;
+/**
+ * Upper bound on getEvents pages {@link finalTranscript} will read. A long
+ * session's log can exceed a single read page, so the transcript pages through
+ * all events; this cap guards against a non-advancing cursor and keeps the read
+ * bounded for pathologically large logs.
+ */
+export const MAX_TRANSCRIPT_PAGES = 1000;
 
 /** The normalized event types that carry assistant-visible text content. */
 const ASSISTANT_TEXT_TYPES = new Set(["message.chunk"]);
@@ -144,25 +151,46 @@ export async function finalTranscript(
   principal: Principal,
   sessionId: string,
 ): Promise<TranscriptResult> {
-  // Read the full log from the start without blocking.
-  const page = await client.getEvents(principal, sessionId, { after: 0, wait: 0 });
   const byTurn = new Map<string | null, string>();
   const order: Array<string | null> = [];
 
-  for (const ev of page.events) {
-    if (!ASSISTANT_TEXT_TYPES.has(ev.type)) {
-      continue;
+  // Page through the WHOLE log from the start. A single getEvents read is
+  // bounded (the API/DynamoDB read returns at most one page), so advance the
+  // cursor by the last-returned seq and keep reading until a page is empty or
+  // stops advancing. A hard cap on iterations guards against a non-advancing
+  // cursor so this never loops forever.
+  let after = 0;
+  for (let i = 0; i < MAX_TRANSCRIPT_PAGES; i++) {
+    const page = await client.getEvents(principal, sessionId, { after, wait: 0 });
+    let maxSeq = after;
+    for (const ev of page.events) {
+      // Only accumulate events strictly beyond the cursor so a client that
+      // repeats a page (rather than returning an empty one) cannot double-count.
+      if (ev.seq <= after) {
+        continue;
+      }
+      maxSeq = Math.max(maxSeq, ev.seq);
+      if (!ASSISTANT_TEXT_TYPES.has(ev.type)) {
+        continue;
+      }
+      const text = contentText(ev.payload);
+      if (text === "") {
+        continue;
+      }
+      const key = ev.turnId;
+      if (!byTurn.has(key)) {
+        byTurn.set(key, "");
+        order.push(key);
+      }
+      byTurn.set(key, (byTurn.get(key) ?? "") + text);
     }
-    const text = contentText(ev.payload);
-    if (text === "") {
-      continue;
+    // Advance by the highest NEW seq seen; stop when the cursor cannot advance
+    // (an empty page, or a page with nothing beyond the cursor / no more rows).
+    const next = Math.max(page.nextCursor, maxSeq);
+    if (next <= after) {
+      break;
     }
-    const key = ev.turnId;
-    if (!byTurn.has(key)) {
-      byTurn.set(key, "");
-      order.push(key);
-    }
-    byTurn.set(key, (byTurn.get(key) ?? "") + text);
+    after = next;
   }
 
   return {
