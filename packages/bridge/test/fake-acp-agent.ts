@@ -125,6 +125,9 @@ rl.on("line", (line) => {
       return;
 
     case "session/new":
+      // Echo the received params so a test can assert what the client sent
+      // (cwd/additionalDirectories/mcpServers/_meta.kiro incl. repos).
+      process.stderr.write(`${JSON.stringify({ fakeAgentNewSessionParams: params })}\n`);
       send({ jsonrpc: "2.0", id, result: { sessionId: lastSessionId } });
       return;
 

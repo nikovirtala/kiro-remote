@@ -15,6 +15,15 @@ export interface SessionInputs {
   modeId?: string;
   modelId?: string;
   effortLevel?: string;
+  /**
+   * Target GitHub repositories for a cloud execution target. Carried on
+   * session/new under `_meta.kiro.repos` alongside modeId/modelId/effortLevel
+   * (the V3 migration guide shows Kiro-aware initial values travel there; it
+   * does not name a dedicated top-level repos field, so this is the most
+   * faithful documented placement). The headless fallback passes the same
+   * repos via the `--repo` flag.
+   */
+  repos?: string[];
 }
 
 /** Result of creating or loading a session. */

@@ -230,6 +230,8 @@ export class AcpGateway implements KiroGateway {
     if (inputs.modeId) kiro.modeId = inputs.modeId;
     if (inputs.modelId) kiro.modelId = inputs.modelId;
     if (inputs.effortLevel) kiro.effortLevel = inputs.effortLevel;
+    // Target repos for the cloud execution target ride under _meta.kiro.
+    if (inputs.repos && inputs.repos.length > 0) kiro.repos = inputs.repos;
     return {
       cwd: inputs.cwd,
       ...(inputs.additionalDirectories

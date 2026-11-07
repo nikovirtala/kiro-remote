@@ -7,6 +7,50 @@ import { initResult } from "./scenarios.ts";
 
 let harness: Harness | null = null;
 
+interface NewSessionParams {
+  cwd?: string;
+  additionalDirectories?: string[];
+  mcpServers?: unknown[];
+  _meta?: { kiro?: { repos?: string[]; modeId?: string } };
+}
+
+/**
+ * The fake agent writes `{"fakeAgentNewSessionParams": <session/new params>}`
+ * to its stderr. The bridge transport logs each stderr chunk under an
+ * `acp_stderr` record whose `line` field carries that raw text. Dig the
+ * session/new params back out of the captured log lines.
+ */
+function findNewSessionParams(logLines: string[]): NewSessionParams | null {
+  for (const raw of logLines) {
+    let outer: { msg?: string; line?: string };
+    try {
+      outer = JSON.parse(raw) as { msg?: string; line?: string };
+    } catch {
+      continue;
+    }
+    if (outer.msg !== "acp_stderr" || typeof outer.line !== "string") {
+      continue;
+    }
+    for (const chunk of outer.line.split("\n")) {
+      const trimmed = chunk.trim();
+      if (!trimmed.includes("fakeAgentNewSessionParams")) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(trimmed) as {
+          fakeAgentNewSessionParams?: NewSessionParams;
+        };
+        if (parsed.fakeAgentNewSessionParams) {
+          return parsed.fakeAgentNewSessionParams;
+        }
+      } catch {
+        // partial chunk; keep scanning.
+      }
+    }
+  }
+  return null;
+}
+
 afterEach(async () => {
   if (harness) {
     await harness.stop();
@@ -55,6 +99,35 @@ describe("headless launch fallback", () => {
     expect(runner).toHaveBeenCalled();
     const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
     expect(launchPath?.dimensions?.path).toBe("headless");
+  });
+
+  test("the ACP cloud path conveys repos to session/new under _meta.kiro", async () => {
+    harness = await createHarness({
+      newSessionId: "cloud-acp-1",
+      // "cloud" execution target advertised -> ACP session/new path.
+      initialize: initResult({ executionTargets: ["cloud", "local"] }),
+      onPrompt: { response: { stopReason: "end_turn" } },
+    });
+    await harness.server.start();
+    await harness.seedSession("sa");
+
+    await harness.server.intake.dispatch(launchCmd("sa"));
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sa"))?.status === "idle",
+    );
+
+    const session = await harness.repo.getSession("sa");
+    expect(session?.kiroSessionId).toBe("cloud-acp-1");
+    const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
+    expect(launchPath?.dimensions?.path).toBe("acp");
+
+    // The fake agent echoes the session/new params over stderr, which the
+    // transport surfaces as an `acp_stderr` log record whose `line` field holds
+    // the (newline-delimited) agent stderr. Parse that out and assert repos
+    // rode along under _meta.kiro.repos. This FAILS if the ACP path drops repos.
+    const params = findNewSessionParams(harness.logLines);
+    expect(params).not.toBeNull();
+    expect((params as NewSessionParams)._meta?.kiro?.repos).toEqual(["octo/repo"]);
   });
 
   test("parseCloudSessionId reads the id from stream-json records", () => {

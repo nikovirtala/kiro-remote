@@ -275,17 +275,17 @@ export class SessionManager {
       ...(args.mode ? { modeId: args.mode } : {}),
       ...(args.model ? { modelId: args.model } : {}),
       ...(args.effort ? { effortLevel: args.effort } : {}),
+      ...(args.repos.length > 0 ? { repos: args.repos } : {}),
     });
 
     let path: LaunchPath;
     let kiroSessionId: string;
     if (hasCloudTarget) {
       path = "acp";
-      const session = await this.gateway.newSession({
-        ...inputs,
-        // repos travel as additionalDirectories-style inputs under _meta for cloud.
-        mcpServers: inputs.mcpServers,
-      });
+      // The cloud execution target learns its repos from session/new inputs
+      // (carried under _meta.kiro.repos by the gateway); the headless fallback
+      // passes the same repos via the --repo flag.
+      const session = await this.gateway.newSession(inputs);
       kiroSessionId = session.sessionId;
     } else {
       // No cloud execution target advertised: headless stream-json fallback,
