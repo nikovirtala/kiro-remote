@@ -10,6 +10,7 @@
  */
 
 import { App } from "aws-cdk-lib";
+import { KiroRemoteDnsStack } from "../src/dns-stack.ts";
 import { applyAwsSolutionsChecks } from "../src/nag.ts";
 import { KiroRemoteStack } from "../src/stack.ts";
 
@@ -31,18 +32,51 @@ const allowedRepos = Array.isArray(allowedReposCtx)
     ? allowedReposCtx.split(",")
     : ["*/*"];
 
+const env = account && region ? { account, region } : undefined;
+
+// DNS stack (optional, deployed FIRST): a Route 53 PUBLIC hosted zone for the
+// delegated subdomain. Enabled by passing `-c dnsZoneName=<zone>`. Deploy it,
+// read its `NameServers` output, paste those NS at the parent DNS provider
+// (Cloudflare) to delegate the subdomain, then deploy the app stack with
+// `-c hostedZoneId=<HostedZoneId output>`. Omitted => single-stack synth is
+// unchanged.
+const dnsZoneName = app.node.tryGetContext("dnsZoneName") as string | undefined;
+if (dnsZoneName) {
+  new KiroRemoteDnsStack(app, "KiroRemoteDnsStack", {
+    ...(env ? { env } : {}),
+    zoneName: dnsZoneName,
+  });
+}
+
 // Optional API Gateway v2 custom domain. Enabled by passing
-// `-c customDomainName=<host>` (and optionally `-c certificateArn=<arn>` to
-// import an existing cert instead of creating a DNS-validated one). Omitted =>
-// default execute-api domain only, so synth without it is unchanged.
+// `-c customDomainName=<host>`. DNS modes:
+//   - Route 53 (recommended): also pass `-c hostedZoneId=<id>` (the HostedZoneId
+//     output of KiroRemoteDnsStack, set AFTER that stack is deployed and the
+//     subdomain delegated). The cert is validated against the zone and alias
+//     A/AAAA records are created in it -- no manual DNS.
+//   - Zone-less manual CNAME (fallback): omit hostedZoneId. A DNS-validated cert
+//     is created with no hosted zone and the operator adds the CNAMEs by hand.
+//   - Import an existing cert instead with `-c certificateArn=<arn>`.
+// Omitted => default execute-api domain only, so synth without it is unchanged.
 const customDomainName = app.node.tryGetContext("customDomainName") as string | undefined;
 const certificateArn = app.node.tryGetContext("certificateArn") as string | undefined;
+const hostedZoneId = app.node.tryGetContext("hostedZoneId") as string | undefined;
+// The hosted zone's name defaults to the delegated zone (dnsZoneName) when set,
+// else the custom host itself (the scoped subdomain is its own zone apex).
+const zoneName =
+  (app.node.tryGetContext("hostedZoneName") as string | undefined) ??
+  dnsZoneName ??
+  customDomainName;
 const customDomain = customDomainName
-  ? { domainName: customDomainName, ...(certificateArn ? { certificateArn } : {}) }
+  ? {
+      domainName: customDomainName,
+      ...(certificateArn ? { certificateArn } : {}),
+      ...(hostedZoneId && zoneName ? { hostedZoneId, zoneName } : {}),
+    }
   : undefined;
 
 new KiroRemoteStack(app, "KiroRemoteStack", {
-  ...(account && region ? { env: { account, region } } : {}),
+  ...(env ? { env } : {}),
   kiroRemote: {
     publicBaseUrl,
     cognitoDomainPrefix,

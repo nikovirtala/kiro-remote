@@ -12,6 +12,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { describe, expect, test } from "vitest";
 import { KiroRemote } from "./construct.ts";
+import { KiroRemoteDnsStack } from "./dns-stack.ts";
 import { applyAwsSolutionsChecks, suppressIntentionalFindings } from "./nag.ts";
 import { KiroRemoteStack } from "./stack.ts";
 
@@ -54,6 +55,33 @@ describe("cdk-nag AwsSolutions", () => {
     new KiroRemoteStack(app, "KiroRemoteStack", {
       env: ENV,
       kiroRemote: { ...KIRO_REMOTE_PROPS, customDomain: { domainName: "kiro.example.dev" } },
+    });
+    applyAwsSolutionsChecks(app);
+    expect(() => app.synth()).not.toThrow();
+  });
+
+  test("synth with a Route 53 custom domain stays green (cert + alias records add no finding)", () => {
+    const app = new App();
+    new KiroRemoteStack(app, "KiroRemoteStack", {
+      env: ENV,
+      kiroRemote: {
+        ...KIRO_REMOTE_PROPS,
+        customDomain: {
+          domainName: "kiro-remote.example.dev",
+          hostedZoneId: "Z123EXAMPLE",
+          zoneName: "kiro-remote.example.dev",
+        },
+      },
+    });
+    applyAwsSolutionsChecks(app);
+    expect(() => app.synth()).not.toThrow();
+  });
+
+  test("synth of the DNS stack stays green (public hosted zone adds no un-acknowledged finding)", () => {
+    const app = new App();
+    new KiroRemoteDnsStack(app, "KiroRemoteDnsStack", {
+      env: ENV,
+      zoneName: "kiro-remote.example.dev",
     });
     applyAwsSolutionsChecks(app);
     expect(() => app.synth()).not.toThrow();

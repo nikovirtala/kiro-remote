@@ -25,7 +25,12 @@ import { KiroRemote } from "./construct.ts";
 
 function synth(
   region = "eu-west-1",
-  customDomain?: { domainName: string; certificateArn?: string },
+  customDomain?: {
+    domainName: string;
+    certificateArn?: string;
+    hostedZoneId?: string;
+    zoneName?: string;
+  },
 ): { template: Template; stack: Stack } {
   const app = new App();
   const stack = new Stack(app, "TestStack", { env: { account: "111111111111", region } });
@@ -276,11 +281,12 @@ describe("KiroRemote", () => {
     expect(other.stack.region).toBe("ap-southeast-2");
   });
 
-  test("the custom domain is opt-in: with no prop there is no cert/domain/mapping", () => {
+  test("the custom domain is opt-in: with no prop there is no cert/domain/mapping/records", () => {
     // The default-domain path (no customDomain prop) must be unchanged.
     template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
     template.resourceCountIs("AWS::ApiGatewayV2::DomainName", 0);
     template.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 0);
+    template.resourceCountIs("AWS::Route53::RecordSet", 0);
   });
 
   test("with customDomain set it creates a DNS-validated cert, a DomainName, and a mapping", () => {
@@ -297,6 +303,8 @@ describe("KiroRemote", () => {
       DomainName: "kiro.example.dev",
     });
     t.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 1);
+    // Zone-less (manual-CNAME) fallback: no Route 53 records are created.
+    t.resourceCountIs("AWS::Route53::RecordSet", 0);
   });
 
   test("with customDomain.certificateArn set it imports the cert (no new Certificate)", () => {
@@ -310,5 +318,62 @@ describe("KiroRemote", () => {
     // The DomainName + mapping are still created.
     t.resourceCountIs("AWS::ApiGatewayV2::DomainName", 1);
     t.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 1);
+  });
+
+  test("with a Route 53 hosted zone the cert validates against it and alias A/AAAA records are created", () => {
+    // The scoped subdomain IS the zone apex (domainName === zoneName).
+    const { template: t } = synth("eu-north-1", {
+      domainName: "kiro-remote.example.dev",
+      hostedZoneId: "Z123EXAMPLE",
+      zoneName: "kiro-remote.example.dev",
+    });
+    // The cert is DNS-validated AGAINST the supplied hosted zone (automatic
+    // validation record, no manual CNAME).
+    t.resourceCountIs("AWS::CertificateManager::Certificate", 1);
+    t.hasResourceProperties("AWS::CertificateManager::Certificate", {
+      DomainName: "kiro-remote.example.dev",
+      ValidationMethod: "DNS",
+      DomainValidationOptions: Match.arrayWith([
+        Match.objectLike({
+          DomainName: "kiro-remote.example.dev",
+          HostedZoneId: "Z123EXAMPLE",
+        }),
+      ]),
+    });
+    // The apigatewayv2 custom domain + its mapping to the HTTP API.
+    t.resourceCountIs("AWS::ApiGatewayV2::DomainName", 1);
+    t.resourceCountIs("AWS::ApiGatewayV2::ApiMapping", 1);
+    // Alias A + AAAA records in the zone, at the apex, targeting the apigw
+    // regional custom domain.
+    const records = t.findResources("AWS::Route53::RecordSet");
+    const types = Object.values(records).map((r) => (r.Properties as { Type: string }).Type);
+    expect(types).toContain("A");
+    expect(types).toContain("AAAA");
+    for (const record of Object.values(records)) {
+      const props = record.Properties as {
+        Type: string;
+        Name: string;
+        HostedZoneId: string;
+        AliasTarget?: { DNSName: unknown; HostedZoneId: unknown };
+      };
+      // Apex record (no sub-label) in the supplied zone.
+      expect(props.Name).toBe("kiro-remote.example.dev.");
+      expect(props.HostedZoneId).toBe("Z123EXAMPLE");
+      // An alias to the apigw regional domain (not a plain record).
+      expect(props.AliasTarget).toBeDefined();
+    }
+  });
+
+  test("a sub-record (domainName !== zoneName) sets recordName to the host", () => {
+    const { template: t } = synth("eu-north-1", {
+      domainName: "api.example.dev",
+      hostedZoneId: "Z456EXAMPLE",
+      zoneName: "example.dev",
+    });
+    const records = t.findResources("AWS::Route53::RecordSet");
+    expect(Object.keys(records).length).toBe(2);
+    for (const record of Object.values(records)) {
+      expect((record.Properties as { Name: string }).Name).toBe("api.example.dev.");
+    }
   });
 });

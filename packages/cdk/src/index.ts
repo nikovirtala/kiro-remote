@@ -26,5 +26,7 @@ export {
   KiroRemote,
   type KiroRemoteProps,
 } from "./construct.ts";
+export { KiroRemoteDns, type KiroRemoteDnsProps } from "./dns.ts";
+export { KiroRemoteDnsStack, type KiroRemoteDnsStackProps } from "./dns-stack.ts";
 export { applyAwsSolutionsChecks, suppressIntentionalFindings } from "./nag.ts";
 export { KiroRemoteStack, type KiroRemoteStackProps } from "./stack.ts";

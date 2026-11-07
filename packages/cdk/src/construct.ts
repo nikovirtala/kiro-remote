@@ -59,6 +59,14 @@ import {
 import { Key } from "aws-cdk-lib/aws-kms";
 import { Code, Function as LambdaFunction, Runtime } from "aws-cdk-lib/aws-lambda";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import {
+  AaaaRecord,
+  ARecord,
+  type IPublicHostedZone,
+  PublicHostedZone,
+  RecordTarget,
+} from "aws-cdk-lib/aws-route53";
+import { ApiGatewayv2DomainProperties } from "aws-cdk-lib/aws-route53-targets";
 import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue } from "aws-cdk-lib/aws-sqs";
@@ -118,28 +126,57 @@ export interface KiroRemoteProps {
 
   /**
    * Optional API Gateway v2 custom domain fronting the HTTP API. When set, the
-   * construct creates (or imports) a regional ACM certificate for
-   * `domainName` and maps the domain to the HTTP API's default stage. DNS
-   * records (the ACM validation CNAME and the final CNAME to the regional
-   * target) are created by the operator at their DNS provider (e.g.
-   * Cloudflare) -- there is no Route 53 automation. See
-   * [`docs/deploy.md`](../../../docs/deploy.md) for the exact records.
+   * construct creates (or imports) a regional ACM certificate for `domainName`
+   * and maps the domain to the HTTP API's default stage.
    *
-   * When omitted, only the API Gateway default
+   * There are two DNS modes, both selected by this one prop:
+   *
+   *   - **Route 53 (recommended for this repo).** Supply `hostedZoneId` +
+   *     `zoneName` for a Route 53 PUBLIC hosted zone (e.g. the one created by
+   *     {@link import("./dns-stack.ts").KiroRemoteDnsStack} for a delegated
+   *     subdomain). The construct then imports the zone, DNS-validates the ACM
+   *     cert AGAINST that zone (an automatic validation record, no manual
+   *     CNAME) AND creates alias `A`/`AAAA` records pointing the host at the
+   *     API Gateway custom domain. After the one-time NS delegation at the
+   *     parent provider, there is NO further manual DNS.
+   *   - **Zone-less / manual (fallback).** Omit `hostedZoneId`/`zoneName`. A
+   *     DNS-validated cert is created with no hosted zone (ACM emits a
+   *     validation CNAME the operator adds at their DNS provider) and the
+   *     operator points a CNAME at the emitted regional target themselves. No
+   *     Route 53 resources are created. This is the historical behaviour.
+   *
+   * When the whole prop is omitted, only the API Gateway default
    * `https://<api-id>.execute-api.<region>.amazonaws.com` domain is created
-   * (the default-domain path is unchanged).
+   * (the default-domain path is unchanged). See
+   * [`docs/deploy.md`](../../../docs/deploy.md) for the exact flow.
    */
   customDomain?: {
     /** The custom host, e.g. "kiro-remote.example.com". */
     domainName: string;
     /**
      * ARN of an existing regional ACM certificate for `domainName`. When
-     * omitted, a new DNS-validated certificate is created (the operator adds
-     * the emitted validation CNAME at their DNS provider; CloudFormation waits
-     * on validation during deploy). Pre-creating the certificate and passing
-     * its ARN avoids the deploy blocking on validation.
+     * omitted, a new DNS-validated certificate is created (against the Route 53
+     * zone when one is supplied, otherwise zone-less so the operator adds the
+     * emitted validation CNAME at their DNS provider). Pre-creating the
+     * certificate and passing its ARN avoids the deploy blocking on validation.
      */
     certificateArn?: string;
+    /**
+     * Id of a Route 53 PUBLIC hosted zone that owns `domainName` (typically a
+     * delegated subdomain created by
+     * {@link import("./dns-stack.ts").KiroRemoteDnsStack}). When set together
+     * with {@link zoneName}, the cert is DNS-validated against this zone and
+     * alias `A`/`AAAA` records are created in it -- no manual DNS. Omit for the
+     * zone-less manual-CNAME fallback.
+     */
+    hostedZoneId?: string;
+    /**
+     * Name of the Route 53 hosted zone identified by {@link hostedZoneId}, e.g.
+     * "kiro-remote.nikovirtala.dev". Required alongside `hostedZoneId`. When it
+     * equals `domainName` the host IS the zone apex and the alias records are
+     * created at the apex.
+     */
+    zoneName?: string;
   };
 
   /**
@@ -359,18 +396,58 @@ export class KiroRemote extends Construct {
     // regional (same stack region as the HTTP API) -- correct for an apigw v2
     // regional custom domain. DNS records live at the operator's DNS provider.
     if (props.customDomain) {
-      const certificate: ICertificate = props.customDomain.certificateArn
-        ? Certificate.fromCertificateArn(this, "ApiCertificate", props.customDomain.certificateArn)
+      const { domainName, certificateArn, hostedZoneId, zoneName } = props.customDomain;
+
+      // When a Route 53 hosted zone is supplied (id + name), import it so the
+      // cert can be DNS-validated against it and alias records created in it.
+      const hostedZone: IPublicHostedZone | undefined =
+        hostedZoneId && zoneName
+          ? PublicHostedZone.fromHostedZoneAttributes(this, "ApiHostedZone", {
+              hostedZoneId,
+              zoneName,
+            })
+          : undefined;
+
+      const certificate: ICertificate = certificateArn
+        ? Certificate.fromCertificateArn(this, "ApiCertificate", certificateArn)
         : new Certificate(this, "ApiCertificate", {
-            domainName: props.customDomain.domainName,
-            // DNS validation with no hosted zone: ACM emits a validation CNAME
-            // the operator adds at their DNS provider (Cloudflare, "DNS only").
-            validation: CertificateValidation.fromDns(),
+            domainName,
+            // With a hosted zone: validate against it (an automatic validation
+            // record, no manual CNAME). Without one: zone-less DNS validation
+            // -- ACM emits a validation CNAME the operator adds at their DNS
+            // provider (Cloudflare, "DNS only").
+            validation: hostedZone
+              ? CertificateValidation.fromDns(hostedZone)
+              : CertificateValidation.fromDns(),
           });
       this.customDomainName = new DomainName(this, "ApiDomainName", {
-        domainName: props.customDomain.domainName,
+        domainName,
         certificate,
       });
+
+      // With a hosted zone we also own DNS: create alias A/AAAA records that
+      // point the host at the API Gateway regional custom domain. The scoped
+      // subdomain IS the zone apex, so when domainName === zoneName the records
+      // are created at the apex (omit recordName); otherwise a sub-record.
+      if (hostedZone) {
+        const aliasTarget = RecordTarget.fromAlias(
+          new ApiGatewayv2DomainProperties(
+            this.customDomainName.regionalDomainName,
+            this.customDomainName.regionalHostedZoneId,
+          ),
+        );
+        const recordName = domainName === zoneName ? undefined : domainName;
+        new ARecord(this, "ApiAliasA", {
+          zone: hostedZone,
+          ...(recordName ? { recordName } : {}),
+          target: aliasTarget,
+        });
+        new AaaaRecord(this, "ApiAliasAaaa", {
+          zone: hostedZone,
+          ...(recordName ? { recordName } : {}),
+          target: aliasTarget,
+        });
+      }
     }
 
     this.httpApi = new HttpApi(this, "HttpApi", {
