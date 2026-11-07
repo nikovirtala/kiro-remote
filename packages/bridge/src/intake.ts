@@ -163,6 +163,9 @@ export class CommandIntake {
       case "delete":
         await this.manager.markDeleted(command.sessionId);
         return;
+      case "adopt":
+        await this.manager.adopt(command.sessionId, command.kiroSessionId);
+        return;
       default: {
         const never: never = command;
         throw new Error(`unknown command kind: ${(never as { kind: string }).kind}`);

@@ -150,6 +150,56 @@ export async function launchSession(
   return toSessionView(meta);
 }
 
+export async function adoptSession(
+  deps: ServiceDeps,
+  principal: Principal,
+  args: { kiroSessionId: string },
+): Promise<SessionView> {
+  authorize(principal, "launch");
+
+  // 429: adopting still consumes a cloud-session slot, so the cap applies.
+  const { items } = await deps.repo.listSessionsByUser(principal.sub, { limit: 100 });
+  const active = items.filter((s) => ACTIVE_STATUSES.has(s.status)).length;
+  if (active >= MAX_CLOUD_SESSIONS) {
+    throw new ConcurrencyLimitError(MAX_CLOUD_SESSIONS, active);
+  }
+
+  const id = genId(deps);
+  const ts = nowIso(deps);
+  const meta: SessionMetaItem = {
+    PK: sessionPk(id),
+    SK: "META",
+    id,
+    kiroSessionId: args.kiroSessionId,
+    title: null,
+    repos: [],
+    agent: null,
+    mode: null,
+    model: null,
+    effort: null,
+    status: "provisioning",
+    activeTurnId: null,
+    eventSeq: 0,
+    createdBy: principal.sub,
+    createdAt: ts,
+    updatedAt: ts,
+    version: 0,
+    GSI1PK: `USER#${principal.sub}`,
+    GSI1SK: ts,
+  };
+  await deps.repo.putSession(meta);
+
+  await deps.queue.enqueue({
+    kind: "adopt",
+    sub: principal.sub,
+    sessionId: id,
+    commandId: genId(deps),
+    kiroSessionId: args.kiroSessionId,
+  });
+
+  return toSessionView(meta);
+}
+
 export async function sendPrompt(
   deps: ServiceDeps,
   principal: Principal,

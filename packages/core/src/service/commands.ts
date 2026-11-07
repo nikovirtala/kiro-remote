@@ -57,6 +57,12 @@ export interface DeleteCommand extends CommandBase {
   kind: "delete";
 }
 
+export interface AdoptCommand extends CommandBase {
+  kind: "adopt";
+  /** The existing Kiro session id to load into this control-plane session. */
+  kiroSessionId: string;
+}
+
 export type Command =
   | LaunchCommand
   | PromptCommand
@@ -64,7 +70,8 @@ export type Command =
   | CancelCommand
   | AnswerPermissionCommand
   | SetConfigCommand
-  | DeleteCommand;
+  | DeleteCommand
+  | AdoptCommand;
 
 /** Abstraction over the SQS FIFO queue so the service stays pure and testable. */
 export interface CommandQueue {

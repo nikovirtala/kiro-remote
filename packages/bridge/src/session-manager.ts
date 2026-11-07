@@ -326,6 +326,39 @@ export class SessionManager {
     return { path, kiroSessionId };
   }
 
+  /**
+   * Adopt an EXISTING Kiro cloud session into this control-plane session.
+   *
+   * Unlike {@link launch} there is no first prompt: we register the update
+   * handler (already done at construction) and session/load the existing id,
+   * re-sending the client-owned inputs per the V3 reconnect contract, then
+   * move the session to idle. Never auto-sends a prompt.
+   */
+  async adopt(id: string, kiroSessionId: string): Promise<{ kiroSessionId: string }> {
+    const rt = this.runtimeFor(id);
+    rt.launchStartedAt = this.now();
+    const inputs: SessionInputs = this.inputsFor({});
+    await this.gateway.loadSession(kiroSessionId, inputs);
+
+    rt.kiroSessionId = kiroSessionId;
+    rt.inputs = inputs;
+    this.kiroToLocal.set(kiroSessionId, id);
+
+    this.applyMachine(rt, { kind: "provisioned" });
+
+    const item = await this.repo.getSession(id);
+    if (item) {
+      await this.repo.updateSession(id, item.version, {
+        status: rt.machine.session,
+        kiroSessionId,
+      });
+    }
+    this.metrics.count("SessionsLaunched");
+    this.metrics.count("LaunchPath", 1, { path: "adopt" });
+    this.logger.info("session_adopted", { sessionId: id, kiroSessionId });
+    return { kiroSessionId };
+  }
+
   /* --------------------------- prompt / steer / cancel ---------------------- */
 
   async prompt(id: string, prompt: string, turnId?: string): Promise<void> {

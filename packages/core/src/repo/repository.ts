@@ -338,6 +338,28 @@ export class Repository {
     await this.ddb.send(new PutCommand({ TableName: this.table, Item: item }));
   }
 
+  /** List a session's permission requests, optionally filtered by status. */
+  async queryPermissions(
+    sessionId: string,
+    opts: { status?: PermItem["status"] } = {},
+  ): Promise<PermItem[]> {
+    const res = await this.ddb.send(
+      new QueryCommand({
+        TableName: this.table,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :permPrefix)",
+        ExpressionAttributeValues: {
+          ":pk": sessionPk(sessionId),
+          ":permPrefix": "PERM#",
+        },
+      }),
+    );
+    let items = (res.Items as PermItem[] | undefined) ?? [];
+    if (opts.status) {
+      items = items.filter((p) => p.status === opts.status);
+    }
+    return items;
+  }
+
   async getPermission(sessionId: string, requestId: string): Promise<PermItem | null> {
     const res = await this.ddb.send(
       new GetCommand({
