@@ -344,6 +344,24 @@ export class KiroRemote extends Construct {
       ALLOWED_REPOS: props.allowedRepos.join(","),
     };
 
+    // Propagate the pre-registered (non-CIMD) clients the auth construct
+    // provisions so the API Lambda's ClientResolver accepts them at
+    // /oauth/authorize. The `client_id` a pre-registered client presents is its
+    // logical `name` (the authorize flow always uses the single facade client
+    // for the upstream Cognito call), and its allowed redirect URIs are the
+    // prop's `callbackUrls`. Serialized as JSON so the shape is self-describing
+    // and matches the resolver's PreRegisteredClient entry. Omitted entirely
+    // when there are no pre-registered clients so the env stays clean.
+    if (props.preRegisteredClients && props.preRegisteredClients.length > 0) {
+      commonEnv.PREREGISTERED_CLIENTS = JSON.stringify(
+        props.preRegisteredClients.map((c) => ({
+          clientId: c.name,
+          clientName: c.name,
+          redirectUris: c.callbackUrls,
+        })),
+      );
+    }
+
     // The main REST + /mcp Lambda.
     this.apiFn = new LambdaFunction(this, "ApiFn", {
       runtime: Runtime.NODEJS_22_X,

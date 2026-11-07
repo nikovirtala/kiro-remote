@@ -38,14 +38,13 @@ export interface FacadeConfig {
   /**
    * Hosts (lower-cased, no port) permitted as CIMD `client_id` URL hosts. The
    * construct defaults this to claude.ai plus the facade's own host.
+   *
+   * Pre-registered (non-CIMD) public clients are NOT configured here: they are
+   * resolved by the {@link import("./clients.ts").ClientResolver}'s
+   * pre-registration list, which the deploying stack populates from the
+   * construct's `preRegisteredClients` prop (id + name + redirect URIs).
    */
   cimdAllowedHosts: readonly string[];
-
-  /**
-   * Pre-registered public client ids that may be used at /oauth/authorize
-   * without a CIMD document (Claude Code, VS Code, the facade CLI).
-   */
-  preRegisteredClientIds: readonly string[];
 
   /** KMS key id/arn used to envelope-encrypt the one-time code token set. */
   kmsKeyId: string;

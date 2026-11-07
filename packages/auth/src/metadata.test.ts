@@ -16,7 +16,6 @@ const config: FacadeConfig = {
   cognitoClientId: "facadeclient123",
   cognitoJwksUri: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc/.well-known/jwks.json",
   cimdAllowedHosts: ["claude.ai", "kiro.example.com"],
-  preRegisteredClientIds: [],
   kmsKeyId: "arn:aws:kms:us-east-1:111122223333:key/abc",
 };
 

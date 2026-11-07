@@ -118,6 +118,42 @@ describe("buildContextFromEnv", () => {
     expect(ctx.mcp).toBe(mcp);
   });
 
+  it("populates the client resolver from PREREGISTERED_CLIENTS so a non-CIMD client authorizes", async () => {
+    const preRegistered = [
+      {
+        clientId: "claude-code",
+        clientName: "claude-code",
+        redirectUris: ["https://claude.ai/cb", "http://127.0.0.1/callback"],
+      },
+    ];
+    const ctx = buildContextFromEnv({
+      env: env({ PREREGISTERED_CLIENTS: JSON.stringify(preRegistered) }),
+      clients: clients(),
+    });
+
+    const resolved = await ctx.facade.authorize.clients.resolve("claude-code");
+    expect(resolved.clientId).toBe("claude-code");
+    expect(resolved.clientName).toBe("claude-code");
+    expect(resolved.redirectUris).toEqual(["https://claude.ai/cb", "http://127.0.0.1/callback"]);
+    expect(resolved.isCimd).toBe(false);
+  });
+
+  it("leaves the resolver without pre-registered clients when PREREGISTERED_CLIENTS is absent", async () => {
+    const ctx = buildContextFromEnv({ env: env(), clients: clients() });
+    await expect(ctx.facade.authorize.clients.resolve("unknown-client")).rejects.toThrow(
+      "unknown client_id",
+    );
+  });
+
+  it("throws a clear error when PREREGISTERED_CLIENTS is malformed", () => {
+    expect(() =>
+      buildContextFromEnv({
+        env: env({ PREREGISTERED_CLIENTS: "not json" }),
+        clients: clients(),
+      }),
+    ).toThrow("invalid PREREGISTERED_CLIENTS env var: not valid JSON");
+  });
+
   it("throws a clear error when a required env var is missing", () => {
     const incomplete = env();
     delete incomplete.TABLE_NAME;

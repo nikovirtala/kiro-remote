@@ -30,6 +30,7 @@ import {
   CognitoAdapter,
   type FacadeConfig,
   KmsAdapter,
+  type PreRegisteredClient,
 } from "@nikovirtala/kiro-remote-auth";
 import {
   CognitoTokenVerifier,
@@ -62,6 +63,53 @@ function splitList(value: string | undefined): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * Parse the `PREREGISTERED_CLIENTS` env var into the resolver's pre-registration
+ * list. The construct serializes each pre-registered client the auth construct
+ * provisions as `{ clientId, clientName, redirectUris }` (the `client_id` the
+ * client presents at /oauth/authorize plus its exact allowed redirect URIs), so
+ * a non-CIMD client can complete /oauth/authorize against the deployed facade.
+ * Returns an empty list when the var is absent or empty; throws a clear
+ * configuration error when the var is present but not a valid JSON array of the
+ * expected shape (fail-fast on a misconfigured deploy).
+ */
+function parsePreRegisteredClients(value: string | undefined): PreRegisteredClient[] {
+  if (!value) {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("invalid PREREGISTERED_CLIENTS env var: not valid JSON");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("invalid PREREGISTERED_CLIENTS env var: expected a JSON array");
+  }
+  return parsed.map((entry, index) => {
+    const e = entry as Record<string, unknown>;
+    const clientId = e.clientId;
+    const clientName = e.clientName;
+    const redirectUris = e.redirectUris;
+    if (typeof clientId !== "string" || !clientId) {
+      throw new Error(
+        `invalid PREREGISTERED_CLIENTS[${index}]: clientId must be a non-empty string`,
+      );
+    }
+    if (typeof clientName !== "string" || !clientName) {
+      throw new Error(
+        `invalid PREREGISTERED_CLIENTS[${index}]: clientName must be a non-empty string`,
+      );
+    }
+    if (!Array.isArray(redirectUris) || !redirectUris.every((u) => typeof u === "string")) {
+      throw new Error(
+        `invalid PREREGISTERED_CLIENTS[${index}]: redirectUris must be an array of strings`,
+      );
+    }
+    return { clientId, clientName, redirectUris };
+  });
 }
 
 /** Derive the Cognito JWKS URI for a user pool in the given region. */
@@ -116,7 +164,7 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
   const verifier = new CognitoTokenVerifier({ userPoolId });
 
   const cimdAllowedHosts = splitList(env.CIMD_ALLOWED_HOSTS);
-  const preRegisteredClientIds = splitList(env.PREREGISTERED_CLIENT_IDS);
+  const preRegisteredClients = parsePreRegisteredClients(env.PREREGISTERED_CLIENTS);
 
   const facadeConfig: FacadeConfig = {
     publicBaseUrl,
@@ -126,7 +174,6 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
     cognitoClientId,
     cognitoJwksUri: cognitoJwksUri(region, userPoolId),
     cimdAllowedHosts,
-    preRegisteredClientIds,
     kmsKeyId,
   };
 
@@ -137,10 +184,11 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
   });
   const kmsAdapter = new KmsAdapter({ client: kms, keyId: kmsKeyId });
   const cimd = new CimdFetcher({ allowedHosts: cimdAllowedHosts });
-  // Pre-registered clients resolve against Cognito; their redirect URIs are not
-  // propagated via env, so the resolver's static pre-registration list is empty
-  // and CIMD URL clients are resolved dynamically under the SSRF guard.
-  const clients = new ClientResolver({ cimd, preRegistered: [] });
+  // Pre-registered (non-CIMD) clients provisioned by the construct's
+  // `preRegisteredClients` prop are propagated here via PREREGISTERED_CLIENTS
+  // (id + name + exact redirect URIs) so they can complete /oauth/authorize.
+  // CIMD URL clients are still resolved dynamically under the SSRF guard.
+  const clients = new ClientResolver({ cimd, preRegistered: preRegisteredClients });
 
   const facade: FacadeDeps = {
     config: facadeConfig,

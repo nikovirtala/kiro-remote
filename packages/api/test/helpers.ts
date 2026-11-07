@@ -229,7 +229,6 @@ export function facadeConfig(): FacadeConfig {
     cognitoClientId: "cognito-app-client",
     cognitoJwksUri: "https://cognito.example.com/.well-known/jwks.json",
     cimdAllowedHosts: ["kiro.example.com"],
-    preRegisteredClientIds: [CLIENT_ID],
     kmsKeyId: "key-1",
   };
 }
