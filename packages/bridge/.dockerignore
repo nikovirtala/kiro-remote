@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/build
+**/cdk.out
+**/coverage
+**/.vite
+**/*.test.ts
+**/*.spec.ts
+.agents
+.mise-data
+.mise-cache
+.extralib
+.git
