@@ -132,12 +132,14 @@ describe("bridge image bundle", () => {
 
     // A build-time exec check must prove the non-root `bridge` user can run
     // kiro-cli AND reach kiro-cli-chat, so a future regression fails the image
-    // build loudly.
+    // build loudly. kiro-cli is a real binary (direct runuser exec), but the
+    // kiro-cli-chat reachability check must run via `runuser ... sh -c '...'`
+    // because `command -v` is a shell builtin -- `runuser -- command ...` would
+    // try to exec a program literally named `command` and fail.
     expect(dockerfile).toMatch(/runuser\s+-u\s+bridge\s+--\s+kiro-cli\s+--version/);
-    const provesChatReachable =
-      /runuser\s+-u\s+bridge\s+--\s+command\s+-v\s+kiro-cli-chat/.test(dockerfile) ||
-      /runuser\s+-u\s+bridge\s+--\s+test\s+-x\s+\/usr\/local\/bin\/kiro-cli-chat/.test(dockerfile);
-    expect(provesChatReachable).toBe(true);
+    expect(dockerfile).toMatch(
+      /runuser\s+-u\s+bridge\s+--\s+sh\s+-c\s+'[^']*command\s+-v\s+kiro-cli-chat/,
+    );
   });
 
   // This guards a FOURTH failure class: the kiro-cli install invocation itself.

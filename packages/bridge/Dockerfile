@@ -162,11 +162,14 @@ ENV HOME=/home/bridge \
 # and fail the image build loudly if a future change reintroduces the EACCES /
 # /root-only regression or drops kiro-cli-chat. `kiro-cli --version` is a
 # local, offline exec that needs no network or auth; kiro-cli-chat is asserted
-# executable (`test -x`) rather than run, since it takes ACP args, not
-# `--version`.
+# reachable+executable rather than run, since it takes ACP args, not
+# `--version`. The kiro-cli-chat check runs via `runuser ... sh -c '...'`
+# because `command -v` (and `test`) are shell builtins -- `runuser -- <args>`
+# exec's a binary directly and does NOT spawn a shell, so a bare
+# `runuser -u bridge -- command ...` would try to exec a program literally
+# named `command` and fail. kiro-cli is a real binary, so it stays a direct exec.
 RUN runuser -u bridge -- kiro-cli --version \
-    && runuser -u bridge -- command -v kiro-cli-chat \
-    && runuser -u bridge -- test -x /usr/local/bin/kiro-cli-chat
+    && runuser -u bridge -- sh -c 'command -v kiro-cli-chat >/dev/null 2>&1 && test -x "$(command -v kiro-cli-chat)"'
 
 USER bridge
 
