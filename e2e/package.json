@@ -1,0 +1,20 @@
+{
+  "name": "@kiro-remote/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "e2e": "node src/run.ts",
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check ."
+  },
+  "dependencies": {
+    "@kiro-remote/api": "workspace:*",
+    "@kiro-remote/core": "workspace:*",
+    "@kiro-remote/mcp": "workspace:*"
+  }
+}

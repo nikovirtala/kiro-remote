@@ -179,6 +179,18 @@ importers:
         specifier: ^5.1.0
         version: 5.1.0(@types/node@26.6.6)(vite@8.3.6(@types/node@26.6.6))
 
+  e2e:
+    dependencies:
+      '@kiro-remote/api':
+        specifier: workspace:*
+        version: link:../packages/api
+      '@kiro-remote/core':
+        specifier: workspace:*
+        version: link:../packages/core
+      '@kiro-remote/mcp':
+        specifier: workspace:*
+        version: link:../packages/mcp
+
   packages/api:
     dependencies:
       '@aws-lambda-powertools/logger':
