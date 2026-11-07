@@ -18,13 +18,16 @@
     "deploy": "cdk deploy --app \"node bin/app.ts\""
   },
   "dependencies": {
+    "@nikovirtala/kiro-remote-api": "workspace:*",
     "@nikovirtala/kiro-remote-auth": "workspace:*",
     "@nikovirtala/kiro-remote-core": "workspace:*",
+    "@nikovirtala/kiro-remote-mcp": "workspace:*",
     "aws-cdk-lib": "^2.275.0",
     "cdk-nag": "^3.0.2",
     "constructs": "^10.0.0"
   },
   "devDependencies": {
-    "aws-cdk": "^2.1148.0"
+    "aws-cdk": "^2.1148.0",
+    "esbuild": "^0.25.0"
   }
 }

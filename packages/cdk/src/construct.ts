@@ -334,8 +334,14 @@ export class KiroRemote extends Construct {
       MCP_RESOURCE: `${base}/mcp`,
       COGNITO_USER_POOL_ID: this.auth.userPool.userPoolId,
       COGNITO_CLIENT_ID: this.auth.facadeClient.userPoolClientId,
+      // The Cognito managed-login domain base URL. The API Lambda derives the
+      // OAuth token/revocation endpoints (<domain>/oauth2/token, /oauth2/revoke)
+      // from it for the facade's authorization-code / refresh / revoke calls.
+      COGNITO_DOMAIN: this.auth.managedLoginDomain.baseUrl(),
       CIMD_ALLOWED_HOSTS: cimdAllowedHosts.join(","),
       OAUTH_CODE_KMS_KEY_ID: this.oauthCodeKey.keyId,
+      // The launch allow-list the service layer enforces (owner/name globs).
+      ALLOWED_REPOS: props.allowedRepos.join(","),
     };
 
     // The main REST + /mcp Lambda.

@@ -51,6 +51,18 @@ mise exec -- pnpm synth
 The CDK app ([`packages/cdk/bin/app.ts`](../packages/cdk/bin/app.ts)) reads three
 context values, passed with `-c key=value`:
 
+> **Real-asset opt-in — `-c kiroCliVersion=<ver>`.** The default (no
+> `kiroCliVersion`) path ships both a placeholder bridge image and an inline
+> placeholder API Lambda, so `cdk synth`/`cdk deploy` run with **no Docker build
+> and no Node bundler** — ideal for CI/sandboxes. Passing `-c kiroCliVersion=<ver>`
+> is the single trigger that switches on the real production assets: the app
+> bundles the real API Lambda (`src/lambda/entry.ts`) in-process with esbuild
+> (no Docker) and passes it as `apiLambdaCode`, and the same flag is what you set
+> to build the real bridge image from the Dockerfile with that `KIRO_CLI_VERSION`.
+> Run the real-asset build on a machine with Docker (the bridge image needs it);
+> the API Lambda bundle itself is headless and needs only esbuild (installed as a
+> workspace dev dependency).
+
 | Context key           | Default                                             | Meaning                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `publicBaseUrl`       | `https://kiro.example.com` (synth placeholder only) | The canonical `https://<host>` **without** a trailing slash. Use a custom domain fronting the HTTP API, or the API Gateway default domain `https://<api-id>.execute-api.<region>.amazonaws.com`. Used verbatim for the RFC 9728 PRM, the RFC 8414 AS-metadata issuer, the Cognito resource identifier (`<host>/mcp`), and the CIMD allow-list, so for a real deploy it **must** be the real, reachable host. |

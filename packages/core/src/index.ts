@@ -17,6 +17,7 @@ export const PACKAGE_NAME = "@nikovirtala/kiro-remote-core";
 
 export * from "./auth/authenticate.ts";
 export * from "./auth/authorize.ts";
+export * from "./auth/cognito-verifier.ts";
 export * from "./config.ts";
 export * from "./domain.ts";
 export * from "./events/coalesce.ts";
@@ -35,4 +36,5 @@ export * from "./service/allowlist.ts";
 export * from "./service/commands.ts";
 export * from "./service/errors.ts";
 export * from "./service/index.ts";
+export * from "./service/sqs-queue.ts";
 export * from "./state/transition.ts";

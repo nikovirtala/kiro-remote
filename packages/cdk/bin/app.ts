@@ -10,6 +10,7 @@
  */
 
 import { App } from "aws-cdk-lib";
+import { buildApiLambdaCode } from "../src/api-asset.ts";
 import { KiroRemoteDnsStack } from "../src/dns-stack.ts";
 import { applyAwsSolutionsChecks } from "../src/nag.ts";
 import { KiroRemoteStack } from "../src/stack.ts";
@@ -33,6 +34,18 @@ const allowedRepos = Array.isArray(allowedReposCtx)
     : ["*/*"];
 
 const env = account && region ? { account, region } : undefined;
+
+// OPT-IN production-asset trigger. The real bridge image (FEAT-003) and the
+// real bundled API Lambda code are built ONLY when `-c kiroCliVersion=<ver>`
+// is passed. This single flag gates everything that needs a Docker build or a
+// Node bundler, so the default placeholder path (no flag) synthesizes with no
+// Docker and no bundler and all existing assertion tests stay green.
+const kiroCliVersion = app.node.tryGetContext("kiroCliVersion") as string | undefined;
+
+// Build the real API Lambda asset (esbuild, in-process, no Docker) only on the
+// opt-in path. When absent, apiLambdaCode stays undefined so the construct
+// falls back to its inline placeholder and synth needs no bundler.
+const apiLambdaCode = kiroCliVersion ? buildApiLambdaCode() : undefined;
 
 // DNS stack (optional, deployed FIRST): a Route 53 PUBLIC hosted zone for the
 // delegated subdomain. Enabled by passing `-c dnsZoneName=<zone>`. Deploy it,
@@ -81,6 +94,8 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     publicBaseUrl,
     cognitoDomainPrefix,
     allowedRepos,
+    ...(kiroCliVersion ? { kiroCliVersion } : {}),
+    ...(apiLambdaCode ? { apiLambdaCode } : {}),
     ...(customDomain ? { customDomain } : {}),
   },
 });

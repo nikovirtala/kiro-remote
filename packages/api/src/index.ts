@@ -28,6 +28,7 @@ export {
   parseEvent,
 } from "./http.ts";
 export { requireIdempotencyKey, withIdempotency } from "./idempotency.ts";
+export { type BuildContextOptions, buildContextFromEnv } from "./lambda/context-from-env.ts";
 export type {
   ClientCapabilities,
   ClientEvent,
