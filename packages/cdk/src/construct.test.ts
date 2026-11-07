@@ -12,7 +12,8 @@
  *     no-ingress / egress-443-only SG, and the VPC has no NAT gateway,
  *   - the task role is scoped to its own table/bucket/queue/secret,
  *   - KIRO_API_KEY is a Secrets Manager ECS `secrets` entry (not a plain env),
- *   - the WAF has two rate-based rules and is associated with the API,
+ *   - the HTTP API stage is throttled via native API Gateway rate limiting and
+ *     carries no WAFv2 web ACL (WAFv2 cannot attach to an HTTP API),
  *   - the Cognito pool has self-sign-up off + passwordless passkey-first sign-in and the resource
  *     server + facade client exist with the specified token lifetimes,
  *   - the region flows from stack props.
@@ -218,48 +219,17 @@ describe("KiroRemote", () => {
     expect(actions).not.toContain("*");
   });
 
-  test("the WAF has two rate-based rules on /oauth/ and /mcp and is associated with the API", () => {
-    template.hasResourceProperties("AWS::WAFv2::WebACL", {
-      Scope: "REGIONAL",
-      Rules: Match.arrayWith([
-        Match.objectLike({
-          Name: "RateLimitOAuth",
-          Statement: {
-            RateBasedStatement: Match.objectLike({
-              ScopeDownStatement: {
-                ByteMatchStatement: Match.objectLike({ SearchString: "/oauth/" }),
-              },
-            }),
-          },
-        }),
-        Match.objectLike({
-          Name: "RateLimitMcp",
-          Statement: {
-            RateBasedStatement: Match.objectLike({
-              ScopeDownStatement: {
-                ByteMatchStatement: Match.objectLike({ SearchString: "/mcp" }),
-              },
-            }),
-          },
-        }),
-      ]),
-    });
-    template.resourceCountIs("AWS::WAFv2::WebACLAssociation", 1);
-    // The association references the WebACL arn and a correctly-formed
-    // apigatewayv2 stage ARN. Because the apiId is a token the ResourceArn is
-    // an Fn::Join whose parts include the fixed ARN segments.
-    template.hasResourceProperties("AWS::WAFv2::WebACLAssociation", {
-      WebACLArn: Match.anyValue(),
-      ResourceArn: {
-        "Fn::Join": [
-          "",
-          Match.arrayWith([
-            Match.stringLikeRegexp("^arn:$"),
-            Match.stringLikeRegexp(":apigateway:.*::/apis/$"),
-            Match.stringLikeRegexp("^/stages/\\$default$"),
-          ]),
-        ],
-      },
+  test("the HTTP API stage is throttled (native API Gateway rate limiting; WAFv2 cannot attach to an HTTP API)", () => {
+    // WAFv2 can only associate with REST (v1) API stages, never an API Gateway
+    // v2 HTTP API, so there is no web ACL or association in the template.
+    template.resourceCountIs("AWS::WAFv2::WebACL", 0);
+    template.resourceCountIs("AWS::WAFv2::WebACLAssociation", 0);
+    // The rate-limiting intent is preserved with native stage-wide throttling.
+    template.hasResourceProperties("AWS::ApiGatewayV2::Stage", {
+      DefaultRouteSettings: Match.objectLike({
+        ThrottlingRateLimit: 50,
+        ThrottlingBurstLimit: 100,
+      }),
     });
   });
 

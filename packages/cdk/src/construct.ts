@@ -30,7 +30,7 @@
 
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
 import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
-import { DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
+import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import {
   Certificate,
@@ -70,7 +70,6 @@ import { ApiGatewayv2DomainProperties } from "aws-cdk-lib/aws-route53-targets";
 import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
 import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue } from "aws-cdk-lib/aws-sqs";
-import { CfnWebACL, CfnWebACLAssociation } from "aws-cdk-lib/aws-wafv2";
 import { Construct } from "constructs";
 
 /** Default CIMD-allowed host besides the facade's own host. */
@@ -233,8 +232,6 @@ export class KiroRemote extends Construct {
    * `regionalDomainName` is the CNAME target the operator points their DNS at.
    */
   readonly customDomainName?: DomainName;
-  /** The WAFv2 web ACL protecting the API. */
-  readonly webAcl: CfnWebACL;
   /** The OAUTH#CODE callback Lambda. */
   readonly callbackFn: LambdaFunction;
   /** The OAUTH#CODE token Lambda. */
@@ -488,86 +485,25 @@ export class KiroRemote extends Construct {
       integration,
     });
 
-    /* --------------------------------- WAF ------------------------------- */
+    /* --------------------------- Rate limiting --------------------------- */
 
-    this.webAcl = new CfnWebACL(this, "WebAcl", {
-      defaultAction: { allow: {} },
-      scope: "REGIONAL",
-      visibilityConfig: {
-        cloudWatchMetricsEnabled: true,
-        metricName: "kiroRemoteWebAcl",
-        sampledRequestsEnabled: true,
-      },
-      rules: [
-        {
-          name: "RateLimitOAuth",
-          priority: 0,
-          action: { block: {} },
-          statement: {
-            rateBasedStatement: {
-              limit: 300,
-              aggregateKeyType: "IP",
-              scopeDownStatement: {
-                byteMatchStatement: {
-                  fieldToMatch: { uriPath: {} },
-                  positionalConstraint: "STARTS_WITH",
-                  searchString: "/oauth/",
-                  textTransformations: [{ priority: 0, type: "NONE" }],
-                },
-              },
-            },
-          },
-          visibilityConfig: {
-            cloudWatchMetricsEnabled: true,
-            metricName: "rateLimitOAuth",
-            sampledRequestsEnabled: true,
-          },
-        },
-        {
-          name: "RateLimitMcp",
-          priority: 1,
-          action: { block: {} },
-          statement: {
-            rateBasedStatement: {
-              limit: 600,
-              aggregateKeyType: "IP",
-              scopeDownStatement: {
-                byteMatchStatement: {
-                  fieldToMatch: { uriPath: {} },
-                  positionalConstraint: "STARTS_WITH",
-                  searchString: "/mcp",
-                  textTransformations: [{ priority: 0, type: "NONE" }],
-                },
-              },
-            },
-          },
-          visibilityConfig: {
-            cloudWatchMetricsEnabled: true,
-            metricName: "rateLimitMcp",
-            sampledRequestsEnabled: true,
-          },
-        },
-      ],
-    });
-
-    // Associate the web ACL with the HTTP API's default stage. The WAFv2
-    // regional resource ARN for an API Gateway v2 (HTTP API) stage is
-    // `arn:<partition>:apigateway:<region>::/apis/<apiId>/stages/<stageName>`
-    // (no account id). Build it from the stack partition/region tokens so the
-    // separators are exactly right (formatArn mangled the slash-delimited path).
-    const s = Stack.of(this);
-    const stage = this.httpApi.defaultStage;
-    const stageName = stage?.stageName ?? "$default";
-    const stageArn = `arn:${s.partition}:apigateway:${s.region}::/apis/${this.httpApi.apiId}/stages/${stageName}`;
-    const association = new CfnWebACLAssociation(this, "WebAclAssociation", {
-      resourceArn: stageArn,
-      webAclArn: this.webAcl.attrArn,
-    });
-    association.node.addDependency(this.webAcl);
-    // The stage must exist before WAF tries to attach to its ARN.
-    if (stage) {
-      association.node.addDependency(stage);
-    }
+    // Native API Gateway v2 stage throttling on the HTTP API's default stage.
+    //
+    // WAFv2 cannot be associated with an API Gateway v2 (HTTP API) stage: the
+    // `AWS::WAFv2::WebACLAssociation` resource only supports REST (v1) API
+    // stages, not `/apis/<id>/stages/<stage>` HTTP API ARNs. We therefore
+    // preserve the rate-limiting intent with the API's built-in throttling.
+    //
+    // NOTE: these are STAGE-WIDE limits (steady-state requests/second + burst
+    // across all callers and routes), NOT the per-IP, per-path rate rules the
+    // previous WAFv2 web ACL enforced. True per-IP/path WAF rules require
+    // fronting the HTTP API with CloudFront + a WAFv2 web ACL, which is a
+    // documented future option.
+    const defaultStage = this.httpApi.defaultStage?.node.defaultChild as CfnStage;
+    defaultStage.defaultRouteSettings = {
+      throttlingRateLimit: 50,
+      throttlingBurstLimit: 100,
+    };
 
     /* --------------------------- Fargate bridge -------------------------- */
 

@@ -124,7 +124,7 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     {
       id: "AwsSolutions-COG3",
       reason:
-        "AdvancedSecurityMode is left at the feature-plan default for a single-tenant personal control plane; the facade API is WAF rate-limited.",
+        "AdvancedSecurityMode is left at the feature-plan default for a single-tenant personal control plane; the facade API uses native API Gateway stage throttling (WAFv2 cannot be associated with an API Gateway v2 HTTP API).",
     },
     // ECS: non-secret env vars are only resource names/limits; KIRO_API_KEY is
     // injected via ECS `secrets` from Secrets Manager, never a plain env var.

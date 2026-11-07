@@ -18,7 +18,7 @@ or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
 - **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs
   `kiro-cli` over the Agent Client Protocol.
 - **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS,
-  Cognito, WAF, the Fargate bridge, and the API.
+  Cognito, the Fargate bridge, and the API (with native stage throttling).
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a
   live end-to-end harness (`e2e`).
 
