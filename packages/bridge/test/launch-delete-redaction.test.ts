@@ -79,8 +79,13 @@ describe("headless launch fallback", () => {
     }));
     harness = await createHarness({
       newSessionId: "unused",
-      // No "cloud" execution target -> headless path.
-      initialize: initResult({ executionTargets: ["local"] }),
+      // Purely-local advertisement (no cloud/remote signal) -> headless path.
+      initialize: initResult({
+        executionTargets: ["local"],
+        sessionSources: ["local"],
+        listScopes: ["local"],
+        extensionMethods: [],
+      }),
       onPrompt: { response: { stopReason: "end_turn" } },
     });
     // Swap in a capturing headless runner.
@@ -99,6 +104,108 @@ describe("headless launch fallback", () => {
     expect(runner).toHaveBeenCalled();
     const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
     expect(launchPath?.dimensions?.path).toBe("headless");
+  });
+
+  test("chooses the ACP path from a non-literal cloud signal (sessionSources)", async () => {
+    harness = await createHarness({
+      newSessionId: "cloud-acp-signal",
+      // No "cloud" execution target at all, but a remote sessionSource -> ACP.
+      initialize: initResult({
+        executionTargets: [],
+        sessionSources: ["remote"],
+        listScopes: ["local"],
+        extensionMethods: [],
+      }),
+      onPrompt: { response: { stopReason: "end_turn" } },
+    });
+    await harness.server.start();
+    await harness.seedSession("ss");
+
+    await harness.server.intake.dispatch(launchCmd("ss"));
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("ss"))?.status === "idle",
+    );
+
+    const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
+    expect(launchPath?.dimensions?.path).toBe("acp");
+    const session = await harness.repo.getSession("ss");
+    expect(session?.kiroSessionId).toBe("cloud-acp-signal");
+  });
+
+  test("routes headless for a purely-local advertisement", async () => {
+    const runner = vi.fn(async () => ({
+      code: 0,
+      stdout: '{"type":"runFinished","sessionId":"cloud-local-9"}\n',
+      stderr: "",
+    }));
+    harness = await createHarness({
+      newSessionId: "unused",
+      initialize: initResult({
+        executionTargets: ["local"],
+        sessionSources: ["local"],
+        listScopes: ["local"],
+        extensionMethods: [],
+      }),
+      onPrompt: { response: { stopReason: "end_turn" } },
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: reach into the manager's runner.
+    (harness.server.manager as any).headlessRunner = runner;
+    await harness.server.start();
+    await harness.seedSession("sl");
+
+    await harness.server.intake.dispatch(launchCmd("sl"));
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sl"))?.status === "idle",
+    );
+
+    const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
+    expect(launchPath?.dimensions?.path).toBe("headless");
+    expect(runner).toHaveBeenCalled();
+  });
+
+  test("logs exitCode and scrubbed stdout/stderr on a headless failure", async () => {
+    // Runner returns output that carries no parseable session id AND a ksk_
+    // token: the failure must log exitCode + the raw (redacted) stdout/stderr,
+    // and the ksk_ token must never appear in the logs.
+    const runner = vi.fn(async () => ({
+      code: 3,
+      stdout: "no session here; leaked ksk_live_shouldnotappear token\n",
+      stderr: "boom",
+    }));
+    harness = await createHarness({
+      newSessionId: "unused",
+      initialize: initResult({
+        executionTargets: ["local"],
+        sessionSources: ["local"],
+        listScopes: ["local"],
+        extensionMethods: [],
+      }),
+      onPrompt: { response: { stopReason: "end_turn" } },
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: reach into the manager's runner.
+    (harness.server.manager as any).headlessRunner = runner;
+    await harness.server.start();
+    await harness.seedSession("sf");
+
+    // The launch throws (no parseable session id); swallow it and assert on logs.
+    await expect(harness.server.intake.dispatch(launchCmd("sf"))).rejects.toThrow(
+      "headless launch produced no cloud session id",
+    );
+    await waitFor(() =>
+      requireHarness(harness).logLines.some((l) => l.includes("headless_launch_failed")),
+    );
+
+    const failLine = harness.logLines.find((l) => l.includes("headless_launch_failed"));
+    expect(failLine).toBeDefined();
+    const record = JSON.parse(failLine as string) as Record<string, unknown>;
+    // exitCode survives redaction (it is NOT the sensitive `code` field).
+    expect(record.exitCode).toBe(3);
+    expect(record.code).toBeUndefined();
+    expect(typeof record.stderr).toBe("string");
+    // The ksk_ token never appears anywhere in the logs.
+    const joined = harness.logLines.join("\n");
+    expect(joined).not.toContain("ksk_live_shouldnotappear");
+    expect(joined).toContain("[REDACTED]");
   });
 
   test("the ACP cloud path conveys repos to session/new under _meta.kiro", async () => {
@@ -133,6 +240,11 @@ describe("headless launch fallback", () => {
   test("parseCloudSessionId reads the id from stream-json records", () => {
     expect(parseCloudSessionId('{"type":"runFinished","session_id":"abc-123"}')).toBe("abc-123");
     expect(parseCloudSessionId("not json\n")).toBeNull();
+    // Backwards-compatible nested id locations are also accepted.
+    expect(parseCloudSessionId('{"type":"runFinished","session":{"sessionId":"nested-1"}}')).toBe(
+      "nested-1",
+    );
+    expect(parseCloudSessionId('{"result":{"sessionId":"nested-2"}}')).toBe("nested-2");
   });
 });
 

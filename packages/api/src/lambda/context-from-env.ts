@@ -215,18 +215,7 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
       const caps = await repo.getCaps();
       // Same empty-capabilities fallback the REST getCapabilities route uses
       // when CONFIG#CAPS is absent (the bridge has not initialized yet).
-      return caps
-        ? deriveCapabilities(caps.initializeResult)
-        : {
-            extensionMethods: [],
-            sessionSources: [],
-            listScopes: [],
-            executionTargets: [],
-            configOptions: [],
-            modes: [],
-            models: [],
-            replayMarking: false,
-          };
+      return caps ? deriveCapabilities(caps.initializeResult) : deriveCapabilities({});
     },
     // CONFIG#CAPS is not populated until the bridge initializes, and the CLI
     // version is surfaced there; until then there is no version to report.

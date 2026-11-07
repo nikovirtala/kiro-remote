@@ -58,3 +58,76 @@ describe("capabilities() derivation", () => {
     expect(supportsModel(caps, "gpt-4")).toBe(false);
   });
 });
+
+describe("capabilities() cloudExecution derivation", () => {
+  it("is true when an execution target is literally 'cloud'", () => {
+    const caps = capabilities({
+      agentCapabilities: { _meta: { kiro: { executionTargets: ["cloud"] } } },
+    });
+    expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("is true when executionTargets are empty but a sessionSource is 'remote'", () => {
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: { kiro: { executionTargets: [], sessionSources: ["remote", "local"] } },
+      },
+    });
+    expect(caps.executionTargets).toEqual([]);
+    expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("is true when executionTargets are empty but a cloud/remote extensionMethod is present", () => {
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: {
+          kiro: { executionTargets: [], extensionMethods: ["_kiro/cloud/session/launch"] },
+        },
+      },
+    });
+    expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("is true when a listScope matches cloud/account", () => {
+    const caps = capabilities({
+      agentCapabilities: { _meta: { kiro: { executionTargets: [], listScopes: ["account"] } } },
+    });
+    expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("normalizes object-shaped executionTargets to string[] and derives cloud", () => {
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: {
+          kiro: {
+            executionTargets: [{ id: "cloud" }, { name: "local" }, { target: "remote" }],
+          },
+        },
+      },
+    });
+    expect(caps.executionTargets).toEqual(["cloud", "local", "remote"]);
+    expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("reads a top-level executionTargets when the kiro key is absent", () => {
+    const caps = capabilities({ executionTargets: ["cloud"] });
+    expect(caps.executionTargets).toEqual(["cloud"]);
+    expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("is false for a purely-local advertisement", () => {
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: {
+          kiro: {
+            executionTargets: ["local"],
+            sessionSources: ["local"],
+            listScopes: ["local"],
+            extensionMethods: ["_session/steer"],
+          },
+        },
+      },
+    });
+    expect(caps.cloudExecution).toBe(false);
+  });
+});

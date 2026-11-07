@@ -229,6 +229,12 @@ export class BridgeServer {
     // Handlers BEFORE any session; initialize() registers then negotiates.
     await this.gateway.initialize();
     this.health.markActivity();
+    // Log the RAW initialize result once so the real kiro-cli advertisement
+    // shape becomes visible after redeploy. Redaction scrubs any secret-bearing
+    // values; advertised capability keys are not secrets.
+    this.logger.info("bridge_initialize_result", {
+      initializeResult: this.gateway.initializeResult,
+    });
     this.logger.info("bridge_initialized", {
       extensionMethods: this.gateway.capabilities().extensionMethods,
     });

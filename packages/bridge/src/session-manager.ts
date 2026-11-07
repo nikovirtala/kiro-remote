@@ -304,7 +304,23 @@ export class SessionManager {
     const rt = this.runtimeFor(id);
     rt.launchStartedAt = this.now();
     const caps = this.gateway.capabilities();
-    const hasCloudTarget = caps.executionTargets.includes("cloud");
+    // Prefer the ACP cloud path whenever cloud/remote execution is genuinely
+    // advertised (derived resiliently in core, not from a single literal
+    // target). Headless stream-json is a true last resort.
+    const hasCloudTarget = caps.cloudExecution;
+    // Redaction-safe decision log: records the driving signals so the next live
+    // run shows exactly WHY a path was chosen. We log only non-secret capability
+    // shapes plus a COUNT of extension methods (method names are not secrets but
+    // we keep the line compact).
+    this.logger.info("launch_path_decision", {
+      sessionId: id,
+      path: hasCloudTarget ? "acp" : "headless",
+      cloudExecution: caps.cloudExecution,
+      executionTargets: caps.executionTargets,
+      sessionSources: caps.sessionSources,
+      listScopes: caps.listScopes,
+      extensionMethodCount: caps.extensionMethods.length,
+    });
 
     const inputs: SessionInputs = this.inputsFor({
       ...(args.mode ? { modeId: args.mode } : {}),

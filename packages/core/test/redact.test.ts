@@ -48,6 +48,15 @@ describe("redaction", () => {
     expect((out.nested as Record<string, unknown>).keep).toBe("visible");
   });
 
+  it("keeps `code` redacted but leaves numeric `exitCode` visible", () => {
+    // `code` is the OAuth authorization code and MUST stay protected.
+    // `exitCode` is the safe field name for a numeric child-process status: it
+    // is NOT in SENSITIVE_KEYS, so the value survives redaction.
+    const out = redact({ code: "auth-code-789", exitCode: 1 }) as Record<string, unknown>;
+    expect(out.code).toBe(REDACTED);
+    expect(out.exitCode).toBe(1);
+  });
+
   it("scrubs secrets embedded in free-form string fields", () => {
     const out = redact({ msg: "using ksk_topsecret value" }) as Record<string, string>;
     expect(out.msg).not.toContain("ksk_topsecret");

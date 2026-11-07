@@ -72,7 +72,13 @@ export function parseCloudSessionId(stdout: string): string | null {
     } catch {
       continue;
     }
-    const id = rec.sessionId ?? rec.session_id;
+    // Accept the top-level id fields and, backwards-compatibly, a trivially
+    // nested id (rec.session.sessionId / rec.result.sessionId) if present. The
+    // real stream-json shape is unknown, so we do not guess exotic locations;
+    // the improved failure logging is the main reliance for revealing it live.
+    const nestedSession = (rec.session as Record<string, unknown> | undefined)?.sessionId;
+    const nestedResult = (rec.result as Record<string, unknown> | undefined)?.sessionId;
+    const id = rec.sessionId ?? rec.session_id ?? nestedSession ?? nestedResult;
     const type = rec.type ?? rec.event;
     if (
       typeof id === "string" &&
@@ -110,11 +116,22 @@ export async function headlessLaunch(
     ],
     stdin: args.prompt,
   });
-  logger.info("headless_launch_done", { code: result.code });
+  // Log the numeric status under `exitCode`, NOT `code`: core redact() lists
+  // `code` in SENSITIVE_KEYS (the OAuth authorization code) and would scrub the
+  // value to [REDACTED]. stdout/stderr are still run through the pattern
+  // redactor, so any ksk_/bearer/OAuth-URL inside them stays scrubbed.
   const sessionId = parseCloudSessionId(result.stdout);
   if (!sessionId) {
+    // Surface the raw (pattern-redacted) child output so the live failure is
+    // diagnosable BEFORE we throw.
+    logger.warn("headless_launch_failed", {
+      exitCode: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
     throw new Error("headless launch produced no cloud session id");
   }
+  logger.info("headless_launch_done", { exitCode: result.code });
   return sessionId;
 }
 
@@ -128,7 +145,7 @@ export async function headlessDelete(
     command: KIRO_CLI,
     args: ["chat", "--delete-session", kiroSessionId],
   });
-  logger.info("headless_delete_done", { code: result.code });
+  logger.info("headless_delete_done", { exitCode: result.code });
   if (result.code !== 0 && result.code !== null) {
     throw new Error(`delete-session failed with exit code ${result.code}`);
   }
