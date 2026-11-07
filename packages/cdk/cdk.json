@@ -10,6 +10,8 @@
     "allowedRepos": "*/*",
     "customDomainName": "kiro-remote.nikovirtala.dev",
     "dnsZoneName": "kiro-remote.nikovirtala.dev",
+    "hostedZoneId": "Z00492973OD5EM79JPSQP",
+    "kiroCliVersion": "2.31.0",
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
