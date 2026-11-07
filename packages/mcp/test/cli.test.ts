@@ -32,6 +32,11 @@ const fakeRoundtrip: AuthorizationRoundtrip = async ({ authorizeUrl, state }) =>
   if (url.searchParams.get("code_challenge_method") !== "S256") {
     throw new Error("missing PKCE");
   }
+  // RFC 8707: the authorize request MUST carry the canonical MCP resource, or
+  // the facade rejects with invalid_target and the loopback never gets a code.
+  if (url.searchParams.get("resource") !== `${BASE}/mcp`) {
+    throw new Error("missing RFC 8707 resource");
+  }
   return { code: "auth-code-xyz", redirectUri: "http://127.0.0.1:54321/callback" };
 };
 

@@ -94,6 +94,9 @@ export async function login(deps: LoginDeps): Promise<LoginResult> {
   const cliMetadataUrl = `${base}/oauth/clients/cli.json`;
   const authorizeEndpoint = `${base}/oauth/authorize`;
   const tokenEndpoint = `${base}/oauth/token`;
+  // The RFC 8707 resource indicator: the RFC 9728 canonical MCP resource, which
+  // the facade's /oauth/authorize requires and matches against mcpResource.
+  const resource = `${base}/mcp`;
 
   // 1. CIMD document. client_id is the document URL itself.
   const cimdRes = await deps.fetch(cliMetadataUrl, {
@@ -124,6 +127,7 @@ export async function login(deps: LoginDeps): Promise<LoginResult> {
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
       scope: "openid",
+      resource,
     });
     return `${authorizeEndpoint}?${params.toString()}`;
   };
