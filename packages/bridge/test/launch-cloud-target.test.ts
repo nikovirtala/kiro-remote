@@ -105,15 +105,16 @@ describe("cloud-target launch (FEAT-002)", () => {
     const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
     expect(launchPath?.dimensions?.path).toBe("acp");
 
-    // session/new carried the cloud-sandbox/remote selection, both top-level and
-    // under _meta.kiro, with repos still riding alongside.
+    // session/new carried the cloud-sandbox/remote selection TOP-LEVEL ONLY
+    // (NOT under _meta.kiro, which is a strict schema), with repos still riding
+    // under _meta.kiro.
     const params = findNewSessionParams(harness.logLines);
     expect(params).not.toBeNull();
     const p = params as NewSessionParams;
     expect(p.executionTarget).toBe("cloud-sandbox");
     expect(p.sessionSource).toBe("remote");
-    expect(p._meta?.kiro?.executionTarget).toBe("cloud-sandbox");
-    expect(p._meta?.kiro?.sessionSource).toBe("remote");
+    expect(p._meta?.kiro?.executionTarget).toBeUndefined();
+    expect(p._meta?.kiro?.sessionSource).toBeUndefined();
     expect(p._meta?.kiro?.repos).toEqual(["octo/repo"]);
 
     // No loud failure fired on the cloud-capable path.

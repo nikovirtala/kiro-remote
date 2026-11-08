@@ -4,11 +4,13 @@
  *
  * The control plane must request a REAL cloud Space on session/new rather than
  * letting the agent default source='local' (which runs inside the bridge
- * container and never shows up in app.kiro.dev). Because the exact ACP V3
- * session/new field name/shape is NOT observable in-sandbox, the gateway sends
- * the selected executionTarget/sessionSource TOLERANTLY in BOTH plausible
- * locations: under `_meta.kiro` AND as top-level params. The redacted
- * acp_rpc_request log in transport.ts confirms the real field on live redeploy.
+ * container and never shows up in app.kiro.dev). The agent STRICTLY validates
+ * `_meta.kiro` and rejects unknown keys there (it failed session/new with
+ * "Invalid params: invalid _meta.kiro.executionTarget"), so the gateway sends
+ * the selected executionTarget/sessionSource as TOP-LEVEL params ONLY and NEVER
+ * under `_meta.kiro`. The accepted `_meta.kiro` keys stay (repos/modeId/...).
+ * The redacted acp_rpc_request log in transport.ts confirms whether the
+ * top-level field is accepted on live redeploy.
  *
  * We drive the gateway with a STUB transport (same capturing approach as
  * gateway-prompt-shape.test.ts) and assert the exact session/new params shape.
@@ -73,7 +75,7 @@ const BASE: SessionInputs = {
 };
 
 describe("AcpGateway.sessionParams cloud target (FEAT-002)", () => {
-  test("includes executionTarget/sessionSource both under _meta.kiro AND top-level on session/new", async () => {
+  test("includes executionTarget/sessionSource ONLY top-level, NOT under _meta.kiro, on session/new", async () => {
     const calls: Captured[] = [];
     const gw = makeGateway(calls);
     await gw.newSession({
@@ -84,14 +86,14 @@ describe("AcpGateway.sessionParams cloud target (FEAT-002)", () => {
     });
 
     const params = paramsOf(calls, "session/new");
-    // Top-level (tolerant) placement.
+    // Top-level placement.
     expect(params.executionTarget).toBe("cloud-sandbox");
     expect(params.sessionSource).toBe("remote");
-    // _meta.kiro placement.
+    // NOT under _meta.kiro (strict schema rejects unknown keys there).
     const kiro = kiroMeta(params);
-    expect(kiro.executionTarget).toBe("cloud-sandbox");
-    expect(kiro.sessionSource).toBe("remote");
-    // repos still ride alongside under _meta.kiro.
+    expect("executionTarget" in kiro).toBe(false);
+    expect("sessionSource" in kiro).toBe(false);
+    // repos still rides under _meta.kiro (accepted key).
     expect(kiro.repos).toEqual(["octo/repo"]);
     // Existing fields preserved.
     expect(params.cwd).toBe("/workspace/project");
@@ -99,7 +101,7 @@ describe("AcpGateway.sessionParams cloud target (FEAT-002)", () => {
     expect(params.mcpServers).toEqual([{ name: "example", command: "x" }]);
   });
 
-  test("repos still rides under _meta.kiro alongside the target/source", async () => {
+  test("repos (and modeId) still ride under _meta.kiro while target/source stay top-level", async () => {
     const calls: Captured[] = [];
     const gw = makeGateway(calls);
     await gw.newSession({
@@ -109,10 +111,16 @@ describe("AcpGateway.sessionParams cloud target (FEAT-002)", () => {
       executionTarget: "cloud-sandbox",
       sessionSource: "remote",
     });
-    const kiro = kiroMeta(paramsOf(calls, "session/new"));
+    const params = paramsOf(calls, "session/new");
+    const kiro = kiroMeta(params);
     expect(kiro.repos).toEqual(["octo/a", "octo/b"]);
     expect(kiro.modeId).toBe("vibe");
-    expect(kiro.executionTarget).toBe("cloud-sandbox");
+    // target/source are NOT under _meta.kiro.
+    expect("executionTarget" in kiro).toBe(false);
+    expect("sessionSource" in kiro).toBe(false);
+    // ...they are top-level.
+    expect(params.executionTarget).toBe("cloud-sandbox");
+    expect(params.sessionSource).toBe("remote");
   });
 
   test("omits target/source keys entirely when they are unset (no regression)", async () => {
@@ -141,7 +149,7 @@ describe("AcpGateway.sessionParams cloud target (FEAT-002)", () => {
     expect("sessionSource" in params).toBe(false);
   });
 
-  test("session/load carries the target/source tolerantly when present", async () => {
+  test("session/load carries the target/source top-level ONLY (not under _meta.kiro) when present", async () => {
     const calls: Captured[] = [];
     const gw = makeGateway(calls);
     await gw.loadSession("sess_x", {
@@ -154,9 +162,8 @@ describe("AcpGateway.sessionParams cloud target (FEAT-002)", () => {
     expect(params.sessionId).toBe("sess_x");
     expect(params.executionTarget).toBe("cloud-sandbox");
     expect(params.sessionSource).toBe("remote");
-    const kiro = kiroMeta(params);
-    expect(kiro.executionTarget).toBe("cloud-sandbox");
-    expect(kiro.sessionSource).toBe("remote");
+    // NOT under _meta.kiro -- in fact session/load sends no _meta.kiro at all.
+    expect("_meta" in params).toBe(false);
   });
 
   test("session/load omits target/source when unset", async () => {
