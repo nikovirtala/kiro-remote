@@ -57,6 +57,24 @@ describe("capabilities() derivation", () => {
     expect(supportsModel(caps, "claude-sonnet")).toBe(true);
     expect(supportsModel(caps, "gpt-4")).toBe(false);
   });
+
+  it("derives listScopes from the real kiro.sessionListScopes key", () => {
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: { kiro: { sessionListScopes: ["workspace", "user"] } },
+      },
+    });
+    expect(caps.listScopes).toEqual(["workspace", "user"]);
+  });
+
+  it("falls back to legacy kiro.listScopes when sessionListScopes is absent", () => {
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: { kiro: { listScopes: ["account"] } },
+      },
+    });
+    expect(caps.listScopes).toEqual(["account"]);
+  });
 });
 
 describe("capabilities() cloudExecution derivation", () => {
@@ -132,6 +150,25 @@ describe("capabilities() cloudExecution derivation", () => {
     const caps = capabilities({ executionTargets: ["cloud"] });
     expect(caps.executionTargets).toEqual(["cloud"]);
     expect(caps.cloudExecution).toBe(true);
+  });
+
+  it("is NOT a cloud signal when sessionListScopes is only workspace/user", () => {
+    // The real agent advertises sessionListScopes ['workspace','user']; neither
+    // entry matches /cloud|remote/, so on its own it must not flip cloudExecution.
+    const caps = capabilities({
+      agentCapabilities: {
+        _meta: {
+          kiro: {
+            executionTargets: [],
+            sessionSources: ["local"],
+            sessionListScopes: ["workspace", "user"],
+            extensionMethods: ["_session/steer"],
+          },
+        },
+      },
+    });
+    expect(caps.listScopes).toEqual(["workspace", "user"]);
+    expect(caps.cloudExecution).toBe(false);
   });
 
   it("is false for a purely-local advertisement", () => {

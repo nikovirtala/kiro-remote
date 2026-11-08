@@ -62,6 +62,12 @@ export interface InitializeResult {
       kiro?: {
         extensionMethods?: unknown;
         sessionSources?: unknown;
+        /**
+         * Advertised session/list scopes. The real kiro-cli v3 agent sends
+         * `sessionListScopes`; `listScopes` was an earlier guess kept for
+         * back-compat. {@link capabilities} prefers `sessionListScopes`.
+         */
+        sessionListScopes?: unknown;
         listScopes?: unknown;
         executionTargets?: unknown;
         replayMarking?: unknown;
@@ -151,7 +157,13 @@ export function capabilities(init: InitializeResult): Capabilities {
       : normalizeTargets(init.executionTargets);
   const extensionMethods = asStringArray(kiro.extensionMethods);
   const sessionSources = asStringArray(kiro.sessionSources);
-  const listScopes = asStringArray(kiro.listScopes);
+  // The real v3 agent advertises `sessionListScopes`; `listScopes` was an
+  // earlier guess. Prefer sessionListScopes when it yields a non-empty array,
+  // otherwise fall back to the legacy `listScopes` key. The derived field name
+  // stays `listScopes` so downstream consumers are unchanged.
+  const sessionListScopes = asStringArray(kiro.sessionListScopes);
+  const listScopes =
+    sessionListScopes.length > 0 ? sessionListScopes : asStringArray(kiro.listScopes);
 
   // Cloud/remote execution is derived from a faithful OR of genuine signals
   // (see the Capabilities.cloudExecution doc comment for why this is resilient
