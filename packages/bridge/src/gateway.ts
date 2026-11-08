@@ -277,18 +277,35 @@ export class AcpGateway implements KiroGateway {
     };
   }
 
+  /**
+   * Normalize prompt content into an ARRAY of content blocks. ACP V3's
+   * session/prompt (and _session/steer) expects `prompt` to be a LIST of
+   * content blocks, not a single block object -- sending the single object is
+   * what the live agent rejected with "Invalid params" (Bug B). We wrap a lone
+   * content-block object into a one-element array and pass an already-array
+   * through unchanged. Confirmed against the real shape via FEAT-002's raw-RPC
+   * request/error logs on the next live redeploy.
+   */
+  private toContentBlocks(content: unknown): unknown[] {
+    return Array.isArray(content) ? content : [content];
+  }
+
   async prompt(sessionId: string, content: unknown): Promise<{ stopReason?: string }> {
     // Settles ONLY when this response/error arrives -- NOT on a turn_end update.
     const result = await this.transport.request<{ stopReason?: string }>("session/prompt", {
       sessionId,
-      prompt: content,
+      prompt: this.toContentBlocks(content),
     });
     return { stopReason: result?.stopReason };
   }
 
   async steer(sessionId: string, content: unknown): Promise<void> {
-    // _session/steer keeps its `_session/` prefix in V3.
-    await this.transport.request("_session/steer", { sessionId, prompt: content });
+    // _session/steer keeps its `_session/` prefix in V3 and carries the same
+    // array-of-content-blocks prompt shape as session/prompt.
+    await this.transport.request("_session/steer", {
+      sessionId,
+      prompt: this.toContentBlocks(content),
+    });
   }
 
   async cancel(sessionId: string): Promise<void> {

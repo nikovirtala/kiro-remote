@@ -58,6 +58,14 @@ interface Scenario {
   };
   onLoad?: { messages?: ScriptedMessage[] };
   sendUnknownRequest?: boolean;
+  /**
+   * Bug B lock-in: when true, the agent replies to session/prompt with a
+   * JSON-RPC "Invalid params" error unless `prompt` is an ARRAY of content
+   * blocks (mirroring the live ACP V3 agent that rejected the single-object
+   * shape). Lets an integration test prove the fix by reaching idle only when
+   * the gateway sends an array.
+   */
+  requireArrayPrompt?: boolean;
   /** Delay (ms) before the prompt response resolves (to interleave messages). */
   promptDelayMs?: number;
   /** Hold the prompt response until a permission reply arrives from the client. */
@@ -169,6 +177,19 @@ rl.on("line", (line) => {
 
     case "session/prompt": {
       process.stderr.write(`${JSON.stringify({ fakeAgentPromptCalled: true })}\n`);
+      // Echo the received params so a test can assert the prompt shape (Bug B:
+      // ACP V3 expects `prompt` to be an ARRAY of content blocks).
+      process.stderr.write(`${JSON.stringify({ fakeAgentPromptParams: params })}\n`);
+      // Bug B: reject the single-object shape the live agent rejected. Only an
+      // array-of-content-blocks prompt is accepted when requireArrayPrompt.
+      if (scenario.requireArrayPrompt && !Array.isArray(params.prompt)) {
+        send({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32602, message: "Invalid params" },
+        });
+        return;
+      }
       // Bug A: the live agent always routes updates under its OWN fresh cloud id,
       // not the id the client prompted with. When reproducing that, ignore the
       // incoming sessionId and use the fresh id so adoption must happen.

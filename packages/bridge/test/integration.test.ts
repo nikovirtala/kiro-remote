@@ -161,6 +161,52 @@ describe("launch -> prompt -> turn settle", () => {
     expect(events.length).toBeGreaterThan(0);
   });
 
+  test("first turn runs when the agent REQUIRES an array-shaped prompt (Bug B)", async () => {
+    harness = await createHarness({
+      newSessionId: "cloud-arr",
+      initialize: initResult(),
+      // The agent rejects session/prompt with "Invalid params" unless `prompt`
+      // is an array of content blocks -- exactly what the live agent did.
+      requireArrayPrompt: true,
+      onPrompt: {
+        messages: [
+          {
+            kind: "notify",
+            method: "session/update",
+            params: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "hello" },
+            },
+          },
+        ],
+        response: { stopReason: "end_turn" },
+      },
+    });
+    await harness.server.start();
+    await harness.seedSession("sarr");
+
+    await harness.server.intake.dispatch(launchCmd("sarr"));
+
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sarr"))?.status === "idle",
+    );
+    const session = await harness.repo.getSession("sarr");
+    expect(session?.status).toBe("idle");
+
+    // The turn completed (the prompt was accepted, i.e. sent as an array).
+    const machine = harness.server.manager.machineState("sarr");
+    expect(machine?.turn).toBe("completed");
+
+    // Events reached the DynamoDB log, so the turn actually progressed.
+    const events = await harness.repo.queryEvents("sarr", 0, { limit: 100 });
+    expect(events.length).toBeGreaterThan(0);
+    expect(harness.metrics.sum("EventsWritten")).toBeGreaterThan(0);
+
+    // No prompt_error complaint (the array-shaped prompt was NOT rejected).
+    const promptErrors = harness.logLines.filter((l) => l.includes("prompt_error"));
+    expect(promptErrors).toEqual([]);
+  });
+
   test("a turn_end session_info_update does NOT settle the turn", async () => {
     harness = await createHarness({
       newSessionId: "cloud-2",

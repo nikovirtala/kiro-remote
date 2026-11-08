@@ -581,6 +581,9 @@ export class SessionManager {
     await this.persistSessionStatus(rt);
 
     try {
+      // Construct the single text content block; the gateway wraps it into the
+      // array of content blocks that ACP V3's session/prompt requires (Bug B),
+      // confirmed via FEAT-002's raw-RPC logs on redeploy.
       const res = await this.gateway.prompt(rt.kiroSessionId ?? id, {
         type: "text",
         text: prompt,
@@ -623,7 +626,9 @@ export class SessionManager {
       this.applyMachine(rt, { kind: "prompt.queued" });
       this.logger.info("steer_queued", { sessionId: id });
     }
-    // During an active turn, steering keeps the `_session/` prefix.
+    // During an active turn, steering keeps the `_session/` prefix. Pass the
+    // single text content block; the gateway wraps it into the array of content
+    // blocks ACP V3 requires (same shape as session/prompt, Bug B).
     await this.gateway.steer(rt.kiroSessionId ?? id, { type: "text", text: content });
   }
 
