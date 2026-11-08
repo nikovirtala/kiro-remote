@@ -38,6 +38,15 @@ Operator and user guides live under [`docs/`](./docs/):
 - [Trying the REST API](./docs/rest-api.md)
 - [Using the MCP server](./docs/mcp.md)
 
+## Getting help
+
+For bugs, questions, and feature requests, open a
+[GitHub issue](https://github.com/nikovirtala/kiro-remote/issues). For anything
+not suited to a public issue, email the maintainer at
+[niko.virtala@hey.com](mailto:niko.virtala@hey.com). Security-sensitive reports
+should go there privately rather than to a public issue; see
+[SECURITY.md](./SECURITY.md).
+
 ## Toolchain
 
 Node 26.13.0 and pnpm 12.18.0, pinned in [`.mise.toml`](./.mise.toml). TypeScript
