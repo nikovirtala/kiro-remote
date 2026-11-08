@@ -23,6 +23,15 @@ export interface FacadeResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+  /**
+   * OPTIONAL, NON-SECRET structured breadcrumb the pure handlers attach so the
+   * api adapter (which owns the logger) can emit a diagnostic log line without
+   * re-deriving the handler's internal branch decision. It NEVER carries a
+   * secret (no code, state, verifier, token, or OAuth endpoint URL) and the
+   * adapter strips it before converting to an HttpResponse. Still routed
+   * through core redact() by the observability facade as defence in depth.
+   */
+  logContext?: Record<string, string | number | boolean>;
 }
 
 /** Build a JSON response with the given status and object body. */

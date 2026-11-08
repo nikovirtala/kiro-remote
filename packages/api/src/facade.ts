@@ -27,6 +27,7 @@ import {
   handleRegister,
   handleRevoke,
   handleToken,
+  parseForm,
 } from "@nikovirtala/kiro-remote-auth";
 import type { ApiContext } from "./context.ts";
 import type { HttpRequest, HttpResponse } from "./http.ts";
@@ -48,6 +49,11 @@ export function isFacadePath(path: string): boolean {
   return FACADE_PATHS.has(path);
 }
 
+/**
+ * Convert the pure handler's {@link FacadeResponse} to the API's
+ * {@link HttpResponse}, DROPPING the optional non-secret `logContext`
+ * breadcrumb (it is for server-side logging only and never goes on the wire).
+ */
 function toFacadeResponse(r: FacadeResponse): HttpResponse {
   return { status: r.status, headers: r.headers, body: r.body };
 }
@@ -113,10 +119,16 @@ export async function dispatchFacade(
     return toFacadeResponse(handleCliClientMetadata(facade.config));
   }
   if (req.path === "/oauth/authorize" && req.method === "GET") {
-    return toFacadeResponse(await handleAuthorize(facadeReq, facade.authorize));
+    const facadeRes = await handleAuthorize(facadeReq, facade.authorize);
+    const res = toFacadeResponse(facadeRes);
+    ctx.obs.info("oauth_authorize", { status: res.status, ...(facadeRes.logContext ?? {}) });
+    logOauthRejection(ctx, "oauth_authorize_rejected", res);
+    return res;
   }
   if (req.path === "/oauth/callback" && req.method === "GET") {
-    const res = toFacadeResponse(await handleCallback(facadeReq, facade.callback));
+    const facadeRes = await handleCallback(facadeReq, facade.callback);
+    const res = toFacadeResponse(facadeRes);
+    ctx.obs.info("oauth_callback", { status: res.status, ...(facadeRes.logContext ?? {}) });
     logOauthRejection(ctx, "oauth_callback_rejected", res);
     return res;
   }
@@ -127,6 +139,15 @@ export async function dispatchFacade(
   }
   if (req.path === "/oauth/token" && req.method === "POST") {
     const res = toFacadeResponse(await handleToken(facadeReq, facade.token));
+    // grant_type is a non-secret OAuth parameter; success is derived from the
+    // status. We NEVER log the code, code_verifier, refresh_token, or the token
+    // set (all of which also route through redact() if they ever appeared).
+    const grantType = parseForm(req.body).grant_type ?? "";
+    ctx.obs.info("oauth_token", {
+      grant_type: grantType,
+      status: res.status,
+      success: res.status < 400,
+    });
     logOauthRejection(ctx, "oauth_token_rejected", res);
     return res;
   }

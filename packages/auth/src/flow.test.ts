@@ -1,6 +1,6 @@
 import { Repository, type RepositoryDeps } from "@nikovirtala/kiro-remote-core";
 import { beforeEach, describe, expect, test } from "vitest";
-import { type AuthorizeTxData, handleAuthorize } from "./authorize.ts";
+import { type AuthorizeTxData, effectiveUpstreamScope, handleAuthorize } from "./authorize.ts";
 import { handleCallback } from "./callback.ts";
 import { CimdFetcher } from "./cimd.ts";
 import {
@@ -131,6 +131,77 @@ describe("GET /oauth/authorize", () => {
     expect(data.clientCodeChallenge).toBe(clientChallenge);
     expect(data.redirectUri).toBe(REDIRECT_URI);
     expect(data.cognitoVerifier).toBe("facade-upstream-verifier");
+  });
+
+  const REQUIRED_SCOPES = [
+    "https://kiro.example.com/mcp/sessions:read",
+    "https://kiro.example.com/mcp/sessions:write",
+    "https://kiro.example.com/mcp/sessions:delete",
+  ];
+
+  function scopeOf(res: { headers: Record<string, string> }): string[] {
+    const scope = new URL(res.headers.location).searchParams.get("scope") ?? "";
+    return scope.split(" ").filter((s) => s.length > 0);
+  }
+
+  test("forwards openid + all three fully-qualified resource scopes when client asks only openid", async () => {
+    const q = baseQuery();
+    q.scope = "openid";
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    expect(res.status).toBe(302);
+    const scopes = scopeOf(res);
+    expect(scopes).toContain("openid");
+    for (const s of REQUIRED_SCOPES) {
+      expect(scopes).toContain(s);
+    }
+  });
+
+  test("forwards the full required scope set when the client sends NO scope param", async () => {
+    const q = baseQuery();
+    delete q.scope;
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    const scopes = scopeOf(res);
+    expect(scopes).toContain("openid");
+    for (const s of REQUIRED_SCOPES) {
+      expect(scopes).toContain(s);
+    }
+  });
+
+  test("forwards the full required scope set even when the client requests a subset", async () => {
+    const q = baseQuery();
+    q.scope = "sessions:read";
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    const scopes = scopeOf(res);
+    expect(scopes).toContain("openid");
+    for (const s of REQUIRED_SCOPES) {
+      expect(scopes).toContain(s);
+    }
+  });
+
+  test("only requests scopes within Cognito's AllowedOAuthScopes (openid + three qualified)", async () => {
+    const q = baseQuery();
+    q.scope = "openid offline_access profile sessions:read";
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    const scopes = scopeOf(res);
+    const allowed = new Set(["openid", ...REQUIRED_SCOPES]);
+    for (const s of scopes) {
+      expect(allowed.has(s)).toBe(true);
+    }
+    // And still carries every required resource scope.
+    for (const s of REQUIRED_SCOPES) {
+      expect(scopes).toContain(s);
+    }
+  });
+
+  test("stores the EFFECTIVE forwarded scope string in the OAUTH#TX item", async () => {
+    const q = baseQuery();
+    q.scope = "openid";
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    const forwarded = new URL(res.headers.location).searchParams.get("scope");
+    const tx = await repo.getOAuthTx("fixed-upstream-state");
+    const data = tx?.data as unknown as AuthorizeTxData;
+    expect(data.scope).toBe(forwarded);
+    expect(data.scope).toBe(effectiveUpstreamScope(config));
   });
 
   test("missing PKCE challenge redirects to the client with invalid_request", async () => {

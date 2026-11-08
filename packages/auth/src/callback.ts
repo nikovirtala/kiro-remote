@@ -46,16 +46,18 @@ export async function handleCallback(
   const q = req.query;
   const upstreamState = q.state;
   if (!upstreamState) {
-    return errorPageResponse(400, "invalid_request", "state is required");
+    return withBranch(
+      errorPageResponse(400, "invalid_request", "state is required"),
+      "missing_state",
+    );
   }
 
   const tx = await deps.repo.getOAuthTx(upstreamState);
   if (!tx) {
     // Expired or unknown transaction -> cannot trust any redirect target.
-    return errorPageResponse(
-      400,
-      "invalid_request",
-      "authorization transaction not found or expired",
+    return withBranch(
+      errorPageResponse(400, "invalid_request", "authorization transaction not found or expired"),
+      "tx_not_found",
     );
   }
   const data = tx.data as unknown as AuthorizeTxData;
@@ -71,12 +73,15 @@ export async function handleCallback(
     if (data.clientState) {
       params.state = data.clientState;
     }
-    return redirectResponse(appendQuery(data.redirectUri, params));
+    return withBranch(redirectResponse(appendQuery(data.redirectUri, params)), "upstream_error");
   }
 
   const code = q.code;
   if (!code) {
-    return errorPageResponse(400, "invalid_request", "code is required");
+    return withBranch(
+      errorPageResponse(400, "invalid_request", "code is required"),
+      "missing_code",
+    );
   }
 
   let tokenSet: Awaited<ReturnType<CognitoPort["exchangeCode"]>>;
@@ -95,7 +100,7 @@ export async function handleCallback(
     if (data.clientState) {
       params.state = data.clientState;
     }
-    return redirectResponse(appendQuery(data.redirectUri, params));
+    return withBranch(redirectResponse(appendQuery(data.redirectUri, params)), "exchange_failed");
   }
 
   const ourCode = (deps.generateCode ?? generateOpaqueToken)();
@@ -114,5 +119,15 @@ export async function handleCallback(
   if (data.clientState) {
     params.state = data.clientState;
   }
-  return redirectResponse(appendQuery(data.redirectUri, params));
+  return withBranch(redirectResponse(appendQuery(data.redirectUri, params)), "success");
+}
+
+/**
+ * Attach a NON-SECRET branch breadcrumb to a callback response so the api
+ * adapter can log WHICH control-flow path the pure handler took, without the
+ * handler needing a logger and without exposing any code/state/verifier/URL.
+ */
+function withBranch(res: FacadeResponse, branch: string): FacadeResponse {
+  res.logContext = { branch };
+  return res;
 }

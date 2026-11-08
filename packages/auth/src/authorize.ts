@@ -41,11 +41,37 @@ export interface AuthorizeTxData {
   redirectUri: string;
   clientState: string | null;
   clientCodeChallenge: string;
-  scope: string | null;
+  /**
+   * The EFFECTIVE upstream scope string actually sent to Cognito (the resolved
+   * set the facade forwarded), NOT the raw scope the downstream client asked
+   * for. See {@link effectiveUpstreamScope}.
+   */
+  scope: string;
   resource: string;
   /** The facade's OWN verifier used for the upstream Cognito code exchange. */
   cognitoVerifier: string;
   createdAt: number;
+}
+
+/**
+ * Compute the scope string the facade MUST forward to Cognito, independent of
+ * the (often minimal, e.g. just `openid`) scope the downstream client requests.
+ *
+ * The facade fronts exactly ONE resource server and the Cognito app client's
+ * AllowedOAuthScopes are exactly `openid` plus the three fully-qualified
+ * `${mcpResource}/${short}` resource scopes. The resource server
+ * (packages/core authenticate) rejects any /mcp call whose access token lacks
+ * those qualified scopes, so we ALWAYS request the full required set rather
+ * than forwarding the client's scope verbatim. Requesting a scope outside
+ * Cognito's AllowedOAuthScopes would make Cognito error, so we never add
+ * unknown scopes the client may have asked for -- we only ever request
+ * `openid` + the three qualified resource scopes, deduplicated and
+ * space-joined, `openid` first.
+ */
+export function effectiveUpstreamScope(config: FacadeConfig): string {
+  const base = config.mcpResource.replace(/\/+$/, "");
+  const scopes = ["openid", ...config.scopesSupported.map((s) => `${base}/${s}`)];
+  return [...new Set(scopes)].join(" ");
 }
 
 function appendQuery(uri: string, params: Record<string, string>): string {
@@ -132,12 +158,19 @@ export async function handleAuthorize(
   const cognitoState = (deps.generateState ?? generateOpaqueToken)();
   const cognitoVerifier = (deps.generateVerifier ?? generateCodeVerifier)();
 
+  // ALWAYS forward the full required resource-scope set (fully-qualified) +
+  // openid, regardless of the client's requested scope. A minimal client scope
+  // (e.g. just `openid`) would otherwise mint a token the resource server
+  // rejects for insufficient_scope.
+  const scope = effectiveUpstreamScope(deps.config);
+
   const txData: AuthorizeTxData = {
     clientId,
     redirectUri,
     clientState: state,
     clientCodeChallenge: codeChallenge,
-    scope: q.scope ?? null,
+    // Store the EFFECTIVE forwarded upstream scope (what we actually requested).
+    scope,
     resource,
     cognitoVerifier,
     createdAt: Date.now(),
@@ -146,7 +179,6 @@ export async function handleAuthorize(
   await deps.repo.putOAuthTx(cognitoState, txData as unknown as Record<string, unknown>);
   void txId;
 
-  const scope = q.scope ?? deps.config.scopesSupported.join(" ");
   const authorizeUrl = appendQuery(`${deps.config.cognitoDomain}/oauth2/authorize`, {
     response_type: "code",
     client_id: deps.config.cognitoClientId,
@@ -157,5 +189,39 @@ export async function handleAuthorize(
     code_challenge_method: "S256",
   });
 
-  return redirectResponse(authorizeUrl);
+  const res = redirectResponse(authorizeUrl);
+  // NON-SECRET breadcrumb for the api adapter: client kind/host, the raw scope
+  // the client asked for, the forwarded scope we resolved, whether `resource`
+  // was provided or defaulted, and the redirect_uri host. No code/state/URL.
+  res.logContext = {
+    branch: "redirect",
+    client_kind: clientIdKind(clientId),
+    requested_scope: q.scope ?? "",
+    forwarded_scope: scope,
+    resource,
+    resource_defaulted: q.resource === undefined || q.resource === "",
+    redirect_host: hostOf(redirectUri),
+  };
+  return res;
+}
+
+/**
+ * Classify a client_id for logging WITHOUT leaking a full OAuth URL: a CIMD
+ * client_id is an https URL -> log only `cimd:<host>`; anything else is a
+ * pre-registered or dynamically-registered id -> `prereg-or-dynamic`.
+ */
+function clientIdKind(clientId: string): string {
+  if (clientId.startsWith("https://")) {
+    return `cimd:${hostOf(clientId)}`;
+  }
+  return "prereg-or-dynamic";
+}
+
+/** The host of a URL, or "" when it is not parseable. */
+function hostOf(uri: string): string {
+  try {
+    return new URL(uri).host;
+  } catch {
+    return "";
+  }
 }
