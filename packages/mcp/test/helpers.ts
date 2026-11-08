@@ -173,7 +173,12 @@ export interface InProcHarness {
 }
 
 export function buildInProcess(
-  opts: { allowedRepos?: string[]; kiroCliVersion?: string | null; ids?: string[] } = {},
+  opts: {
+    allowedRepos?: string[];
+    kiroCliVersion?: string | null;
+    ids?: string[];
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
 ): InProcHarness {
   const ddb = new FakeDdb();
   const queue = new SpyQueue();
@@ -190,7 +195,13 @@ export function buildInProcess(
   const newId = () => idQueue.shift() ?? `id-${++idCounter}`;
 
   const client = new InProcessClient({
-    service: { repo, queue, allowedRepos: opts.allowedRepos ?? ["*/*"], newId },
+    service: {
+      repo,
+      queue,
+      allowedRepos: opts.allowedRepos ?? ["*/*"],
+      newId,
+      ...(opts.sleep ? { sleep: opts.sleep } : {}),
+    },
     repo,
     kiroCliVersion: async () => opts.kiroCliVersion ?? "1.2.3",
   });

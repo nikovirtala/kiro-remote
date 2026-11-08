@@ -270,6 +270,8 @@ export interface BuildOptions {
   extensionMethods?: string[];
   kiroCliVersion?: string | null;
   now?: () => number;
+  /** Injectable sleep for the events long-poll. */
+  sleep?: (ms: number) => Promise<void>;
   ids?: string[];
 }
 
@@ -315,6 +317,7 @@ export function buildHarness(opts: BuildOptions = {}): Harness {
       queue,
       allowedRepos: opts.allowedRepos ?? ["*/*"],
       ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.sleep ? { sleep: opts.sleep } : {}),
       newId,
     },
     repo,

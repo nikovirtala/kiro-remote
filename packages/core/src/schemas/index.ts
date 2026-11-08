@@ -9,6 +9,7 @@
  */
 
 import { z } from "zod";
+import { EVENTS_MAX_WAIT_SECONDS } from "../config.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Shared primitives                                                          */
@@ -79,7 +80,7 @@ export type CreateTurnInput = z.infer<typeof CreateTurnSchema>;
 /** GET /v1/sessions/{id}/events (query) */
 export const EventsQuerySchema = z.object({
   after: z.coerce.number().int().min(0).default(0),
-  wait: z.coerce.number().int().min(0).max(20).default(0),
+  wait: z.coerce.number().int().min(0).max(EVENTS_MAX_WAIT_SECONDS).default(0),
   types: z.array(z.string().min(1)).optional(),
 });
 export type EventsQuery = z.infer<typeof EventsQuerySchema>;

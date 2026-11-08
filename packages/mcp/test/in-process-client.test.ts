@@ -30,6 +30,24 @@ describe("InProcessClient (direct core service)", () => {
     expect(page.turnStatus).toBe("running");
   });
 
+  it("getEvents long-polls up to wait for the first event", async () => {
+    let sleeps = 0;
+    const h = buildInProcess({
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 3) {
+          h.seedEvent("s1", 6);
+        }
+      },
+    });
+    h.seedSession({ id: "s1", status: "running" });
+    h.seedEvent("s1", 5);
+    const page = await h.client.getEvents(principal(), "s1", { after: 5, wait: 20 });
+    expect(page.events.map((e) => e.seq)).toEqual([6]);
+    expect(page.nextCursor).toBe(6);
+    expect(sleeps).toBe(3);
+  });
+
   it("listPermissions filters by pending status", async () => {
     const h = buildInProcess();
     const id = h.seedSession({ id: "s1" });

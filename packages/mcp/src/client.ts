@@ -27,6 +27,7 @@ import {
   capabilities as deriveCapabilities,
   type Principal,
   type Repository,
+  readEvents,
   type ServiceDeps,
   adoptSession as svcAdopt,
   answerPermission as svcAnswer,
@@ -43,21 +44,6 @@ import {
 export type ToolClient = KiroRemoteClient;
 
 const ACTIVE_STATUSES = ["provisioning", "running", "idle", "awaiting_permission"];
-
-function deriveTurnStatus(sessionStatus: string): string | null {
-  switch (sessionStatus) {
-    case "running":
-      return "running";
-    case "awaiting_permission":
-      return "awaiting_permission";
-    case "idle":
-      return "idle";
-    case "provisioning":
-      return "provisioning";
-    default:
-      return null;
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /* In-process client (Streamable HTTP transport mounted in the API)           */
@@ -169,23 +155,9 @@ export class InProcessClient implements KiroRemoteClient {
     sessionId: string,
     args: { after: number; wait: number; types?: string[] },
   ): Promise<ClientEventsPage> {
-    // Ownership is enforced by reading the session first (hides existence on 404).
-    const session = await svcGetSession(this.service, principal, sessionId);
-    const events = await this.repo.queryEvents(sessionId, args.after, {
-      ...(args.types && args.types.length > 0 ? { types: args.types } : {}),
-    });
-    const rows = events.map((e) => ({
-      seq: e.seq,
-      sessionId,
-      turnId: e.turnId,
-      type: e.type,
-      rawType: e.rawType,
-      replay: e.replay,
-      ts: e.ts,
-      payload: e.payload,
-    }));
-    const nextCursor = rows.length > 0 ? rows[rows.length - 1].seq : args.after;
-    return { events: rows, nextCursor, turnStatus: deriveTurnStatus(session.status) };
+    // Same long-poll as GET /v1/sessions/{id}/events; ownership is enforced on
+    // every read (hides existence on 404).
+    return readEvents(this.service, principal, sessionId, args);
   }
 
   async listPermissions(

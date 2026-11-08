@@ -29,6 +29,7 @@ import {
   ListSessionsQuerySchema,
   launchSession,
   type Principal,
+  readEvents,
   sendPrompt,
   setConfig,
   getSession as svcGetSession,
@@ -156,29 +157,10 @@ export async function getEvents(
   principal: Principal,
 ): Promise<HttpResponse> {
   const query = EventsQuerySchema.parse(normalizeEventsQuery(req.query));
-  const session = await svcGetSession(ctx.service, principal, req.params.id);
-
-  const events = await ctx.repo.queryEvents(req.params.id, query.after, {
-    ...(query.types && query.types.length > 0 ? { types: query.types } : {}),
-  });
-
-  const views = events.map((e) => ({
-    seq: e.seq,
-    sessionId: req.params.id,
-    turnId: e.turnId,
-    type: e.type,
-    rawType: e.rawType,
-    replay: e.replay,
-    ts: e.ts,
-    payload: e.payload,
-  }));
-  const nextCursor = views.length > 0 ? views[views.length - 1].seq : query.after;
-
-  // turnStatus reflects the active turn's state so a long-poller knows when to
-  // stop. Derived from the session row (idle/awaiting => settled for the turn).
-  const turnStatus = deriveTurnStatus(session.status);
-
-  return jsonResponse(200, { events: views, nextCursor, turnStatus });
+  // Long-polls up to query.wait seconds; turnStatus comes from the session row
+  // so a long-poller knows when to stop.
+  const page = await readEvents(ctx.service, principal, req.params.id, query);
+  return jsonResponse(200, page);
 }
 
 export async function listPermissions(
@@ -337,19 +319,4 @@ function normalizeEventsQuery(query: Record<string, string>): Record<string, unk
     out.types = query.types.split(",").filter(Boolean);
   }
   return out;
-}
-
-function deriveTurnStatus(sessionStatus: string): string | null {
-  switch (sessionStatus) {
-    case "running":
-      return "running";
-    case "awaiting_permission":
-      return "awaiting_permission";
-    case "idle":
-      return "idle";
-    case "provisioning":
-      return "provisioning";
-    default:
-      return null;
-  }
 }

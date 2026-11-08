@@ -45,5 +45,14 @@ export const OAUTH_CIMD_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 /** TTL for per-subject idempotency keys, in milliseconds. */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Maximum `wait` (seconds) for an events long-poll. The API Lambda times out at
+ * 29s and the HTTP API integration at 30s, so a 20s poll leaves headroom.
+ */
+export const EVENTS_MAX_WAIT_SECONDS = 20;
+
+/** How often an events long-poll re-reads the log while it waits, in milliseconds. */
+export const EVENTS_POLL_INTERVAL_MS = 1000;
+
 /** Event-cursor sequence numbers are stored zero-padded to this width. */
 export const EVENT_SEQ_WIDTH = 12;

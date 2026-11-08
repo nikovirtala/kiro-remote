@@ -15,11 +15,11 @@
 import { ulid } from "ulid";
 import type { Principal } from "../auth/authenticate.ts";
 import { authorize } from "../auth/authorize.ts";
-import { MAX_CLOUD_SESSIONS } from "../config.ts";
+import { EVENTS_MAX_WAIT_SECONDS, EVENTS_POLL_INTERVAL_MS, MAX_CLOUD_SESSIONS } from "../config.ts";
 import { sessionPk } from "../repo/keys.ts";
 import type { Repository } from "../repo/repository.ts";
 import type { SessionMetaItem } from "../repo/types.ts";
-import type { SessionView, TurnView } from "../schemas/index.ts";
+import type { EventView, SessionView, TurnView } from "../schemas/index.ts";
 import { matchesAllowList } from "./allowlist.ts";
 import type { CommandQueue } from "./commands.ts";
 import {
@@ -38,6 +38,8 @@ export interface ServiceDeps {
   now?: () => number;
   /** Injectable id generator for determinism in tests. */
   newId?: () => string;
+  /** Injectable sleep used by the events long-poll, so tests need not wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const ACTIVE_STATUSES = new Set(["provisioning", "running", "idle", "awaiting_permission"]);
@@ -368,4 +370,81 @@ export async function listSessions(
     views = views.filter((s) => s.status === args.status);
   }
   return { sessions: views, ...(cursor ? { cursor } : {}) };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Events long-poll                                                           */
+/* -------------------------------------------------------------------------- */
+
+/** Map a session status to the turnStatus reported alongside an events page. */
+export function deriveTurnStatus(sessionStatus: string): string | null {
+  switch (sessionStatus) {
+    case "running":
+    case "awaiting_permission":
+    case "idle":
+    case "provisioning":
+      return sessionStatus;
+    default:
+      return null;
+  }
+}
+
+/** One page of the event log plus the long-poll cursor state. */
+export interface EventsPage {
+  events: EventView[];
+  nextCursor: number;
+  turnStatus: string | null;
+}
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Read a session's events with seq > `after`, long-polling up to `wait`
+ * seconds (clamped to {@link EVENTS_MAX_WAIT_SECONDS}) for the first one.
+ *
+ * Returns as soon as at least one event is available. Otherwise it re-reads
+ * every {@link EVENTS_POLL_INTERVAL_MS} until the deadline and then returns an
+ * empty page with `nextCursor` unchanged. `wait` = 0 is a single read.
+ *
+ * The session row is re-read on every iteration, so `turnStatus` is current
+ * and a session deleted mid-wait surfaces as {@link SessionNotFoundError}.
+ * The poll keeps waiting whatever the session status is (an idle session can
+ * still receive events from a prompt the bridge has not picked up yet).
+ */
+export async function readEvents(
+  deps: ServiceDeps,
+  principal: Principal,
+  sessionId: string,
+  args: { after: number; wait: number; types?: string[] },
+): Promise<EventsPage> {
+  authorize(principal, "read");
+  const now = (): number => deps.now?.() ?? Date.now();
+  const sleep = deps.sleep ?? defaultSleep;
+  const waitMs = Math.min(Math.max(args.wait, 0), EVENTS_MAX_WAIT_SECONDS) * 1000;
+  const deadline = now() + waitMs;
+  // Bound the iterations too, so a clock that does not advance cannot spin forever.
+  const maxSleeps = Math.ceil(waitMs / EVENTS_POLL_INTERVAL_MS);
+  const types = args.types && args.types.length > 0 ? { types: args.types } : {};
+
+  for (let sleeps = 0; ; sleeps++) {
+    const session = await loadOwned(deps, principal, sessionId);
+    const items = await deps.repo.queryEvents(sessionId, args.after, types);
+    const remaining = deadline - now();
+    if (items.length > 0 || remaining <= 0 || sleeps >= maxSleeps) {
+      const events: EventView[] = items.map((e) => ({
+        seq: e.seq,
+        sessionId,
+        turnId: e.turnId,
+        type: e.type,
+        rawType: e.rawType,
+        replay: e.replay,
+        ts: e.ts,
+        payload: e.payload,
+      }));
+      const nextCursor = events.length > 0 ? events[events.length - 1].seq : args.after;
+      return { events, nextCursor, turnStatus: deriveTurnStatus(session.status) };
+    }
+    await sleep(Math.min(EVENTS_POLL_INTERVAL_MS, remaining));
+  }
 }

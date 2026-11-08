@@ -349,6 +349,56 @@ describe("GET /v1/sessions/{id}/events (long-poll)", () => {
     expect(body.events).toHaveLength(1);
     expect(body.events[0].seq).toBe(3);
   });
+
+  test("wait long-polls until an event arrives", async () => {
+    let sleeps = 0;
+    const h = buildHarness({
+      sleep: async () => {
+        sleeps++;
+        if (sleeps === 2) {
+          h.ddb.put({
+            PK: "SESSION#s1",
+            SK: `EVT#${String(1).padStart(12, "0")}`,
+            seq: 1,
+            turnId: "t1",
+            ts: "2024-01-01T00:00:00.000Z",
+            type: "message.chunk",
+            rawType: "agent_message_chunk",
+            replay: false,
+            payload: { text: "x" },
+            ttl: 0,
+          });
+        }
+      },
+    });
+    h.seedSession({ id: "s1", status: "running" });
+    const res = await route(h.ctx, {
+      ...req({ method: "GET", path: "/v1/sessions/s1/events", query: { after: "0", wait: "20" } }),
+      headers: authHeader(mintToken({})),
+    });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.events.map((e: { seq: number }) => e.seq)).toEqual([1]);
+    expect(body.nextCursor).toBe(1);
+    expect(sleeps).toBe(2);
+  });
+
+  test("wait=0 reads once without sleeping", async () => {
+    let sleeps = 0;
+    const h = buildHarness({
+      sleep: async () => {
+        sleeps++;
+      },
+    });
+    h.seedSession({ id: "s1", status: "idle" });
+    const res = await route(h.ctx, {
+      ...req({ method: "GET", path: "/v1/sessions/s1/events", query: { after: "4" } }),
+      headers: authHeader(mintToken({})),
+    });
+    const body = JSON.parse(res.body);
+    expect(body).toEqual({ events: [], nextCursor: 4, turnStatus: "idle" });
+    expect(sleeps).toBe(0);
+  });
 });
 
 describe("POST /v1/sessions/{id}/cancel", () => {
