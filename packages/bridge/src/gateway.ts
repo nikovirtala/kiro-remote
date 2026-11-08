@@ -247,9 +247,6 @@ export class AcpGateway implements KiroGateway {
 
   async loadSession(sessionId: string, inputs: SessionInputs): Promise<GatewaySession> {
     // Handlers must already be registered (start() does so); re-send inputs.
-    // Re-assert the cloud target/source as TOP-LEVEL params only (NOT under
-    // _meta.kiro, which is a strict schema that rejects unknown keys) -- see
-    // sessionParams for the full rationale.
     const result = await this.transport.request<unknown>("session/load", {
       sessionId,
       cwd: inputs.cwd,
@@ -257,9 +254,6 @@ export class AcpGateway implements KiroGateway {
         ? { additionalDirectories: inputs.additionalDirectories }
         : {}),
       mcpServers: inputs.mcpServers ?? [],
-      // Top-level placement -- see sessionParams for why.
-      ...(inputs.executionTarget ? { executionTarget: inputs.executionTarget } : {}),
-      ...(inputs.sessionSource ? { sessionSource: inputs.sessionSource } : {}),
     });
     // Honor a nested id if the load response carries one; otherwise fall back to
     // the requested id (do not depend on the load response repeating it).
@@ -271,27 +265,17 @@ export class AcpGateway implements KiroGateway {
     if (inputs.modeId) kiro.modeId = inputs.modeId;
     if (inputs.modelId) kiro.modelId = inputs.modelId;
     if (inputs.effortLevel) kiro.effortLevel = inputs.effortLevel;
-    // Target repos for the cloud execution target ride under _meta.kiro.
+    // Target repos ride under _meta.kiro (the accepted Kiro-aware key). The
+    // cloud launch no longer goes through session/new -- chat --cloud is the
+    // only cloud path -- so no executionTarget/sessionSource is sent here (the
+    // live agent rejected those params and ACP cannot drive a cloud session).
     if (inputs.repos && inputs.repos.length > 0) kiro.repos = inputs.repos;
-    // Cloud execution target / session source select a real cloud Space (vs the
-    // default source='local' in-container session). These are sent TOP-LEVEL
-    // ONLY: `_meta.kiro` is a STRICT schema that rejects unknown keys, so the
-    // live agent fails session/new with "Invalid params: invalid
-    // _meta.kiro.executionTarget" when target/source are placed there -- they
-    // must NOT go under _meta.kiro (only repos/modeId/modelId/effortLevel may).
-    // Top-level is our current best guess for the real wire field; the redacted
-    // acp_rpc_request/acp_rpc_response logs in transport.ts confirm whether the
-    // agent accepts it on the next live redeploy, and the KIRO_EXECUTION_TARGET
-    // / KIRO_SESSION_SOURCE env overrides adjust the string without a code
-    // change.
     return {
       cwd: inputs.cwd,
       ...(inputs.additionalDirectories
         ? { additionalDirectories: inputs.additionalDirectories }
         : {}),
       mcpServers: inputs.mcpServers ?? [],
-      ...(inputs.executionTarget ? { executionTarget: inputs.executionTarget } : {}),
-      ...(inputs.sessionSource ? { sessionSource: inputs.sessionSource } : {}),
       ...(Object.keys(kiro).length > 0 ? { _meta: { kiro } } : {}),
     };
   }

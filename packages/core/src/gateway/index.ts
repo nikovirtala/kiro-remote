@@ -20,28 +20,10 @@ export interface SessionInputs {
    * session/new under `_meta.kiro.repos` alongside modeId/modelId/effortLevel
    * (the V3 migration guide shows Kiro-aware initial values travel there; it
    * does not name a dedicated top-level repos field, so this is the most
-   * faithful documented placement). The headless fallback passes the same
-   * repos via the `--repo` flag.
+   * faithful documented placement). The chat --cloud launch path passes the
+   * same repos via the `--repo` flag.
    */
   repos?: string[];
-  /**
-   * The selected cloud EXECUTION TARGET sent on session/new so the agent
-   * provisions a real cloud Space (visible in app.kiro.dev) instead of
-   * defaulting to source='local' and running inside the bridge container.
-   * Resolved from the advertisement (or an env override) by
-   * {@link resolveCloudTarget}. Sent TOLERANTLY in both plausible locations
-   * (under `_meta.kiro.executionTarget` and as a top-level param) because the
-   * real ACP V3 field name/shape is not observable in-sandbox; the exact field
-   * is confirmed via the redacted raw-RPC logs on the next live redeploy.
-   */
-  executionTarget?: string;
-  /**
-   * The selected SESSION SOURCE (e.g. 'remote') sent on session/new alongside
-   * {@link executionTarget}, for the same reason and with the same tolerant
-   * placement (`_meta.kiro.sessionSource` and a top-level param); the real v3
-   * field name is confirmed via live raw-RPC logs.
-   */
-  sessionSource?: string;
 }
 
 /** Result of creating or loading a session. */

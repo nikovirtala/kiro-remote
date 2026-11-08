@@ -1,22 +1,20 @@
 /**
- * Integration tests for the FEAT-002 cloud-target launch behavior, driven
- * through the FAKE scripted ACP agent (a real child process).
+ * Integration tests for the chat-only cloud LAUNCH path (FEAT-002), driven
+ * through the injectable HeadlessRunner fake (NO real binary).
  *
- * (1) A cloud-capable advertisement (executionTargets:['local','cloud-sandbox'],
- *     sessionSources:['local','remote']) must make SessionManager.launch issue
- *     session/new carrying the selected cloud-sandbox/remote target -- so the
- *     agent provisions a real Space in app.kiro.dev instead of a local
- *     in-container session. We assert the shape from the params the fake agent
- *     echoes on stderr (`fakeAgentNewSessionParams`).
- * (2) A purely-local advertisement (executionTargets:['local'],
- *     sessionSources:['local'] -> cloudExecution false) must fail LOUDLY: the
- *     session ends `failed`, the CloudTargetUnavailable metric + error log fire,
- *     and NO local session is created or prompted (no session/new, no prompt).
+ * Cloud sessions are provisioned AND driven entirely by `kiro-cli chat --cloud`
+ * subprocesses (chat-only == cloud-only, for now). A launch runs
+ * `chat --cloud --repo ... --no-interactive "<prompt>"`; the real cloud session
+ * id is parsed from the plain-text `[cloud] session <uuid>` line; the assistant
+ * text + tool activity are persisted as events; the session reaches `idle`.
+ *
+ * A launch that emits NO `[cloud] session` line (or exits non-zero) fails
+ * LOUDLY: status `failed`, the CloudLaunchFailed metric, and an error log.
  */
 
 import type { Command } from "@nikovirtala/kiro-remote-core";
-import { afterEach, describe, expect, test } from "vitest";
-import { createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -39,60 +37,23 @@ function launchCmd(sessionId: string): Command {
   };
 }
 
-interface NewSessionParams {
-  cwd?: string;
-  executionTarget?: string;
-  sessionSource?: string;
-  _meta?: { kiro?: { executionTarget?: string; sessionSource?: string; repos?: string[] } };
-}
+const CLOUD_ID = "08047063-f7b4-4ce5-b79a-2aea9a7a1d29";
 
-/**
- * The fake agent writes `{"fakeAgentNewSessionParams": <session/new params>}`
- * to stderr; the transport surfaces each stderr chunk under an `acp_stderr` log
- * record whose `line` field carries the raw text. Dig the params back out.
- */
-function findNewSessionParams(logLines: string[]): NewSessionParams | null {
-  for (const raw of logLines) {
-    let outer: { msg?: string; line?: string };
-    try {
-      outer = JSON.parse(raw) as { msg?: string; line?: string };
-    } catch {
-      continue;
-    }
-    if (outer.msg !== "acp_stderr" || typeof outer.line !== "string") {
-      continue;
-    }
-    for (const chunk of outer.line.split("\n")) {
-      const trimmed = chunk.trim();
-      if (!trimmed.includes("fakeAgentNewSessionParams")) {
-        continue;
-      }
-      try {
-        const parsed = JSON.parse(trimmed) as {
-          fakeAgentNewSessionParams?: NewSessionParams;
-        };
-        if (parsed.fakeAgentNewSessionParams) {
-          return parsed.fakeAgentNewSessionParams;
-        }
-      } catch {
-        // partial chunk; keep scanning.
-      }
-    }
-  }
-  return null;
-}
-
-describe("cloud-target launch (FEAT-002)", () => {
-  test("a cloud-capable advertisement sends session/new with cloud-sandbox/remote selected", async () => {
-    harness = await createHarness({
-      newSessionId: "sess_cloud-1",
-      // The live-shaped advertisement: both local and cloud-sandbox/remote.
-      initialize: initResult({
-        executionTargets: ["local", "cloud-sandbox"],
-        sessionSources: ["local", "remote"],
+describe("chat-only cloud launch (FEAT-002)", () => {
+  test("provisions via chat --cloud, parses the cloud id, persists events, reaches idle", async () => {
+    const runner = vi.fn(async () => ({
+      code: 0,
+      stdout: cloudStdout({
+        cloudSessionId: CLOUD_ID,
+        tools: [{ title: "fs_read /workspace/README.md", status: "Completed" }],
+        assistant: "Here is the answer.",
       }),
-      onPrompt: { response: { stopReason: "end_turn" } },
-    });
+      stderr: "",
+    }));
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
     await harness.server.start();
     await harness.seedSession("sc");
 
@@ -101,37 +62,47 @@ describe("cloud-target launch (FEAT-002)", () => {
       async () => (await requireHarness(harness).repo.getSession("sc"))?.status === "idle",
     );
 
-    // ACP cloud path was taken.
+    // The runner was invoked with the chat --cloud launch argv.
+    expect(runner).toHaveBeenCalledTimes(1);
+    const spec = runner.mock.calls[0][0] as { command: string; args: string[] };
+    expect(spec.command).toBe("kiro-cli");
+    expect(spec.args).toEqual([
+      "chat",
+      "--cloud",
+      "--repo",
+      "octo/repo",
+      "--no-interactive",
+      "do the thing",
+    ]);
+
+    // The real cloud id (from the `[cloud] session <uuid>` line) was persisted.
+    const session = await harness.repo.getSession("sc");
+    expect(session?.status).toBe("idle");
+    expect(session?.kiroSessionId).toBe(CLOUD_ID);
+
+    // The launch path metric records "headless" (the chat --cloud subprocess).
     const launchPath = harness.metrics.data.find((d) => d.name === "LaunchPath");
-    expect(launchPath?.dimensions?.path).toBe("acp");
+    expect(launchPath?.dimensions?.path).toBe("headless");
+    expect(harness.metrics.sum("SessionsLaunched")).toBe(1);
 
-    // session/new carried the cloud-sandbox/remote selection TOP-LEVEL ONLY
-    // (NOT under _meta.kiro, which is a strict schema), with repos still riding
-    // under _meta.kiro.
-    const params = findNewSessionParams(harness.logLines);
-    expect(params).not.toBeNull();
-    const p = params as NewSessionParams;
-    expect(p.executionTarget).toBe("cloud-sandbox");
-    expect(p.sessionSource).toBe("remote");
-    expect(p._meta?.kiro?.executionTarget).toBeUndefined();
-    expect(p._meta?.kiro?.sessionSource).toBeUndefined();
-    expect(p._meta?.kiro?.repos).toEqual(["octo/repo"]);
-
-    // No loud failure fired on the cloud-capable path.
-    expect(harness.metrics.sum("CloudTargetUnavailable")).toBe(0);
+    // The assistant text + tool activity were persisted as events.
+    const events = await harness.repo.queryEvents("sc", 0, { limit: 100 });
+    const types = events.map((e) => e.type);
+    expect(types).toContain("message.chunk");
+    expect(types).toContain("tool.call");
+    expect(types).toContain("tool.update");
   });
 
-  test("a purely-local advertisement fails LOUDLY: no session/new, no prompt, status failed", async () => {
-    harness = await createHarness({
-      newSessionId: "unused",
-      initialize: initResult({
-        executionTargets: ["local"],
-        sessionSources: ["local"],
-        listScopes: ["local"],
-        extensionMethods: [],
-      }),
-      onPrompt: { response: { stopReason: "end_turn" } },
-    });
+  test("fails LOUDLY when no `[cloud] session` line appears", async () => {
+    const runner = vi.fn(async () => ({
+      code: 0,
+      stdout: "[INFO] starting\n[sandbox] done\nno session was created\n",
+      stderr: "",
+    }));
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
     await harness.server.start();
     await harness.seedSession("sfail");
 
@@ -144,46 +115,32 @@ describe("cloud-target launch (FEAT-002)", () => {
     expect(session?.status).toBe("failed");
     expect(session?.kiroSessionId).toBeNull();
 
-    // Loud failure: metric + error log fired.
-    expect(harness.metrics.sum("CloudTargetUnavailable")).toBe(1);
-    expect(harness.logLines.some((l) => l.includes("cloud_target_unavailable"))).toBe(true);
-
-    // NO local session was created and NO prompt was dispatched: the fake agent
-    // never saw session/new or session/prompt.
-    expect(findNewSessionParams(harness.logLines)).toBeNull();
-    expect(harness.logLines.some((l) => l.includes("fakeAgentPromptCalled"))).toBe(false);
+    // Loud failure: metric + error log fired; no SessionsLaunched / LaunchPath.
+    expect(harness.metrics.sum("CloudLaunchFailed")).toBe(1);
+    expect(harness.logLines.some((l) => l.includes("cloud_launch_failed"))).toBe(true);
     expect(harness.metrics.sum("SessionsLaunched")).toBe(0);
-    // No launch-path metric is emitted on the loud-failure path.
     expect(harness.metrics.data.find((d) => d.name === "LaunchPath")).toBeUndefined();
   });
 
-  test("an env override forces the execution target/session source on session/new", async () => {
-    harness = await createHarness({
-      newSessionId: "sess_cloud-override",
-      initialize: initResult({
-        executionTargets: ["local", "cloud-sandbox"],
-        sessionSources: ["local", "remote"],
-      }),
-      onPrompt: { response: { stopReason: "end_turn" } },
-    });
-    // Apply the override the way ServeConfig threads it into the manager.
-    // biome-ignore lint/suspicious/noExplicitAny: set the private override for the test.
-    (harness.server.manager as any).cloudTargetOverride = {
-      executionTarget: "cloud-vm",
-      sessionSource: "cloud",
-    };
+  test("fails LOUDLY when the chat --cloud subprocess exits non-zero", async () => {
+    const runner = vi.fn(async () => ({
+      code: 1,
+      stdout: cloudStdout({ cloudSessionId: CLOUD_ID }),
+      stderr: "boom",
+    }));
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
     await harness.server.start();
-    await harness.seedSession("sov");
+    await harness.seedSession("snz");
 
-    await harness.server.intake.dispatch(launchCmd("sov"));
+    await harness.server.intake.dispatch(launchCmd("snz"));
     await waitFor(
-      async () => (await requireHarness(harness).repo.getSession("sov"))?.status === "idle",
+      async () => (await requireHarness(harness).repo.getSession("snz"))?.status === "failed",
     );
 
-    const params = findNewSessionParams(harness.logLines);
-    expect(params).not.toBeNull();
-    const p = params as NewSessionParams;
-    expect(p.executionTarget).toBe("cloud-vm");
-    expect(p.sessionSource).toBe("cloud");
+    expect(harness.metrics.sum("CloudLaunchFailed")).toBe(1);
+    expect(harness.logLines.some((l) => l.includes("cloud_launch_failed"))).toBe(true);
   });
 });

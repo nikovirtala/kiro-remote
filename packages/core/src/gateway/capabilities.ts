@@ -187,62 +187,6 @@ export function capabilities(init: InitializeResult): Capabilities {
   };
 }
 
-/**
- * The cloud execution target / session source selected for session/new.
- *
- * A `null` field means nothing suitable was advertised AND no override was
- * supplied, so the caller must decide (FEAT-002 fails the launch LOUDLY rather
- * than silently creating an invisible local session).
- */
-export interface ResolvedCloudTarget {
-  executionTarget: string | null;
-  sessionSource: string | null;
-}
-
-/**
- * Pick the cloud execution target + remote session source to request on
- * session/new so the agent provisions a real cloud Space (visible in
- * app.kiro.dev) instead of defaulting to source='local' and running inside the
- * bridge container.
- *
- * Selection is STRING-DRIVEN off the live advertisement, never a single
- * hardcoded literal: the exact ACP V3 session/new field name/shape is NOT
- * observable in this sandbox (kiro.dev/docs is JS-rendered and exposes no wire
- * shape; Docker + real kiro-cli are unavailable), so we match the advertised
- * strings and let the next live redeploy confirm the wire shape via the
- * redacted acp_rpc_request logs in transport.ts. The choice is:
- *  - an explicit override always wins (set via KIRO_EXECUTION_TARGET /
- *    KIRO_SESSION_SOURCE so the strings are correctable without a code change);
- *  - otherwise the execution target is the advertised entry matching
- *    /cloud|remote/i, preferring an exact 'cloud-sandbox' when present;
- *  - otherwise the session source is the advertised entry matching
- *    /remote|cloud/i, preferring an exact 'remote' when present;
- *  - `null` for a field when nothing suitable is advertised and no override was
- *    given.
- */
-export function resolveCloudTarget(
-  caps: Capabilities,
-  overrides?: { executionTarget?: string; sessionSource?: string },
-): ResolvedCloudTarget {
-  const pick = (values: readonly string[], match: RegExp, preferred: string): string | null => {
-    const exact = values.find((v) => v === preferred);
-    if (exact) {
-      return exact;
-    }
-    return values.find((v) => match.test(v)) ?? null;
-  };
-
-  const executionTarget =
-    overrides?.executionTarget ?? pick(caps.executionTargets, /cloud|remote/i, "cloud-sandbox");
-  const sessionSource =
-    overrides?.sessionSource ?? pick(caps.sessionSources, /remote|cloud/i, "remote");
-
-  return {
-    executionTarget: executionTarget ?? null,
-    sessionSource: sessionSource ?? null,
-  };
-}
-
 /** True when the given extension method was advertised by the running server. */
 export function hasExtensionMethod(caps: Capabilities, method: string): boolean {
   return caps.extensionMethods.includes(method);

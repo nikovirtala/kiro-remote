@@ -393,6 +393,71 @@ bridge CLI.
 at runtime. The `kiro-cli` child process is spawned as a runtime PATH binary via
 `child_process`, so it is neither bundled nor externalized.
 
+### How the bridge drives cloud sessions (chat-only == cloud-only)
+
+The bridge provisions **and** drives cloud sessions **entirely** through
+`kiro-cli chat --cloud` subprocesses. There is no ACP cloud-session path:
+chat-only is the only cloud path for now.
+
+- **Launch (first turn).** `POST /v1/sessions` enqueues a `launch` command; the
+  bridge runs
+  `kiro-cli chat --cloud --repo <r> [--repo <r2> …] --no-interactive "<prompt>"`.
+  The subprocess output is **plain text** (there is no JSON/stream-json output
+  mode for `--cloud`): interleaved `[INFO] …`, `[cloud] session <uuid>`,
+  `[tool] …`, `[tool] status: Completed`, `[sandbox] …` lines, then the
+  assistant's free-text answer. The bridge parses the **real cloud session id**
+  from the `[cloud] session <uuid>` line, persists the assistant text + tool
+  activity as normalized events (so `GET /v1/sessions/{id}/events` returns the
+  turn), and drives the session to `idle`.
+- **Loud failure.** If the subprocess emits **no** `[cloud] session` line, or it
+  exits **non-zero**, the bridge drives the session to `failed`, logs
+  `cloud_launch_failed`, and emits the `CloudLaunchFailed` metric. It never
+  leaves a silent/idle session.
+- **Follow-up turns.** A `POST /v1/sessions/{id}/turns` on an idle cloud session
+  runs `kiro-cli chat --cloud --resume-id <cloudSessionId> --no-interactive
+  "<prompt>"` (the CLI help documents `--resume-id <SESSION_ID>`, "Resume a
+  specific conversation by session ID"), targeting the **same** cloud id, and
+  persists its output as events the same way.
+- **Delete.** `kiro-cli chat --delete-session <cloudSessionId>` (unchanged).
+
+**Why not ACP?** The ACP child (`kiro-cli acp --agent-engine=v3`) **cannot drive
+a cloud session**. Confirmed empirically: `initialize` + `session/load` +
+`session/prompt` against a real cloud id
+(`08047063-f7b4-4ce5-b79a-2aea9a7a1d29`) returns
+`{"error":{"code":-32000,"message":"Session '08047063-…' not found"}}` on
+`session/prompt`. The earlier `session/new` `executionTarget`/`sessionSource`
+approach was likewise rejected by the live agent and has been reverted. The ACP
+child remains only for non-cloud concerns (capability negotiation, session
+discovery, reconnect/adopt); it never launches or prompts a cloud session.
+
+**Permissions.** `--no-interactive` governs tool-permission behavior on the chat
+path: the subprocess auto-proceeds or refuses rather than prompting. The
+interactive ACP `answerPermission` flow does **not** apply to `chat --cloud`, so
+the bridge does not wire ACP permissions into the chat path. (`kiro-cli chat
+--help` was not re-checkable in the build sandbox for an explicit
+auto-approve/trust flag; if a future `--trust-all-tools`-style flag is confirmed
+it can be added, otherwise the documented `--no-interactive` behavior stands.)
+
+**Operational guarantees (preserved).** The `chat --cloud` subprocess is long
+(~30–40 s), so the bridge runs it as **background work**: `launch()` returns
+promptly and intake deletes the SQS message **on dispatch**, so a slow
+subprocess never head-of-line-blocks other sessions (ack-on-dispatch). A
+**redelivered** launch is idempotent — it never spawns a second `chat --cloud`
+or a second Space. All subprocess stdout/stderr is routed through the redacting
+logger, so a `ksk_`/`KIRO_API_KEY`/bearer token never appears in logs; the
+numeric exit is logged under `exitCode` (not `code`, which core `redact()`
+scrubs as the OAuth code).
+
+**Redeploy scope.** This behavior lives entirely in the **bridge image**
+(`packages/bridge`). No CDK/infrastructure change is required — redeploy the
+bridge image only. After redeploy, watch the live bridge logs for
+`launch_path_decision` (path `headless`), `session_launched`
+(`kiroSessionId=<uuid>`), and the absence of `cloud_launch_failed`; and confirm
+the new session appears as a Space in **app.kiro.dev**. A `cloud_launch_failed`
+log + `CloudLaunchFailed` metric means the subprocess did not emit a
+`[cloud] session` line (or exited non-zero) — inspect the redacted
+`headless_launch_failed` record for the child output.
+
 `bin/app.ts` wires this image automatically on the real-asset path: passing
 `-c kiroCliVersion=<ver>` makes the app set the construct's `bridgeImage` prop to
 a `fromAsset` build of the repo root (the build context is the repo root because

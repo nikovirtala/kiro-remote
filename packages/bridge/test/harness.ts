@@ -6,6 +6,7 @@
 import { fileURLToPath } from "node:url";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { Repository, type SessionMetaItem, sessionPk } from "@nikovirtala/kiro-remote-core";
+import type { HeadlessRunner } from "../src/headless.ts";
 import { createLogger } from "../src/logger.ts";
 import { CollectingMetricSink } from "../src/metrics.ts";
 import { BridgeServer } from "../src/serve.ts";
@@ -26,6 +27,51 @@ export interface Harness {
   stop(): Promise<void>;
 }
 
+/** Options for the harness. `headlessRunner` overrides the default cloud fake. */
+export interface HarnessOptions {
+  /** Scenario for the fake ACP agent (advertisement, replay, prompt scripting). */
+  scenario?: unknown;
+  /** Override the injectable headless runner (the chat --cloud subprocess fake). */
+  headlessRunner?: HeadlessRunner;
+}
+
+/**
+ * Build plain-text `kiro-cli chat --cloud` stdout: interleaved log lines plus a
+ * `[cloud] session <uuid>` line, tool activity, and the assistant's free-text
+ * answer -- exactly the shape the real --cloud output has (there is NO
+ * stream-json for --cloud).
+ */
+export function cloudStdout(opts: {
+  cloudSessionId: string;
+  tools?: { title: string; status?: string }[];
+  assistant?: string;
+}): string {
+  const lines: string[] = [
+    "[INFO] starting cloud session",
+    `[cloud] session ${opts.cloudSessionId}`,
+  ];
+  for (const t of opts.tools ?? []) {
+    lines.push(`[tool] ${t.title}`);
+    if (t.status) {
+      lines.push(`[tool] status: ${t.status}`);
+    }
+  }
+  lines.push("[sandbox] done");
+  if (opts.assistant) {
+    lines.push(opts.assistant);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** A headless runner that returns a fixed plain-text cloud result for every call. */
+export function cloudRunner(opts: {
+  cloudSessionId: string;
+  tools?: { title: string; status?: string }[];
+  assistant?: string;
+}): HeadlessRunner {
+  return async () => ({ code: 0, stdout: cloudStdout(opts), stderr: "" });
+}
+
 /** Build a spawn fn that launches the fake agent with a scenario env. */
 function fakeAgentSpawn(scenario: unknown): SpawnFn {
   return (spec) =>
@@ -36,7 +82,10 @@ function fakeAgentSpawn(scenario: unknown): SpawnFn {
     });
 }
 
-export async function createHarness(scenario: unknown): Promise<Harness> {
+export async function createHarness(
+  scenario: unknown,
+  headlessRunner?: HeadlessRunner,
+): Promise<Harness> {
   const ddb = new FakeDocClient();
   const s3 = new FakeS3Client();
   const sqs = new FakeSqsClient();
@@ -50,6 +99,20 @@ export async function createHarness(scenario: unknown): Promise<Harness> {
 
   const docClient = ddb as unknown as DynamoDBDocumentClient;
 
+  // Default headless (chat --cloud) runner: emit valid plain-text cloud output
+  // so a launch provisions + reaches idle. The cloud session id defaults to the
+  // scenario's `newSessionId` (tests already set a recognizable value) with a
+  // UUID fallback. Tests that need specific output pass their own runner.
+  const sc = (scenario ?? {}) as { newSessionId?: string };
+  const defaultCloudId = sc.newSessionId ?? "08047063-f7b4-4ce5-b79a-2aea9a7a1d29";
+  const runner =
+    headlessRunner ??
+    cloudRunner({
+      cloudSessionId: defaultCloudId,
+      tools: [{ title: "fs_read /workspace", status: "Completed" }],
+      assistant: "done",
+    });
+
   const server = await BridgeServer.create({
     config: {
       tableName: "kiro-remote-test",
@@ -59,8 +122,6 @@ export async function createHarness(scenario: unknown): Promise<Harness> {
       additionalDirectories: ["/workspace/shared"],
       mcpServers: [{ name: "example", command: "x" }],
       region: "us-east-1",
-      // Keep the Bug A late-adoption settling short so tests stay fast.
-      cloudIdSettleMs: 200,
     },
     ddb: docClient,
     // biome-ignore lint/suspicious/noExplicitAny: injecting fake S3/SQS clients.
@@ -68,7 +129,7 @@ export async function createHarness(scenario: unknown): Promise<Harness> {
     // biome-ignore lint/suspicious/noExplicitAny: injecting fake S3/SQS clients.
     sqs: sqs as any,
     spawnFn: fakeAgentSpawn(scenario),
-    headlessRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    headlessRunner: runner,
     logger,
     metricSink: metrics,
     env: {},

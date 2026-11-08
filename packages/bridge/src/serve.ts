@@ -45,20 +45,6 @@ export interface ServeConfig {
   additionalDirectories?: string[];
   mcpServers?: unknown[];
   region?: string;
-  /** Bounded wait (ms) for late cloud-id adoption before the first prompt. */
-  cloudIdSettleMs?: number;
-  /**
-   * Optional override for the cloud execution target requested on session/new
-   * (env KIRO_EXECUTION_TARGET). When unset the advertised cloud-sandbox/remote
-   * string is derived from the initialize result; the override lets the real
-   * ACP V3 string be corrected after a live redeploy WITHOUT a code change.
-   */
-  executionTarget?: string;
-  /**
-   * Optional override for the session source requested on session/new (env
-   * KIRO_SESSION_SOURCE). Same rationale as {@link executionTarget}.
-   */
-  sessionSource?: string;
   /**
    * Bounded wait (ms) on SIGTERM shutdown for in-flight background turn
    * settlement to finish persisting before the transport is stopped. A hard cap
@@ -195,21 +181,6 @@ export class BridgeServer {
         ? { additionalDirectories: deps.config.additionalDirectories }
         : {}),
       ...(deps.config.mcpServers ? { mcpServers: deps.config.mcpServers } : {}),
-      ...(deps.config.cloudIdSettleMs !== undefined
-        ? { cloudIdSettleMs: deps.config.cloudIdSettleMs }
-        : {}),
-      ...(deps.config.executionTarget !== undefined || deps.config.sessionSource !== undefined
-        ? {
-            cloudTargetOverride: {
-              ...(deps.config.executionTarget !== undefined
-                ? { executionTarget: deps.config.executionTarget }
-                : {}),
-              ...(deps.config.sessionSource !== undefined
-                ? { sessionSource: deps.config.sessionSource }
-                : {}),
-            },
-          }
-        : {}),
       now,
     });
 

@@ -1,6 +1,24 @@
-import type { Command } from "@nikovirtala/kiro-remote-core";
-import { afterEach, describe, expect, test } from "vitest";
-import { createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+/**
+ * Permission + follow-up-turn behavior under the chat-only cloud path
+ * (FEAT-002).
+ *
+ * The interactive ACP permission flow (session/request_permission ->
+ * answerPermission) does NOT apply to `kiro-cli chat --cloud`: `--no-interactive`
+ * governs tool-permission behavior inside the subprocess (it auto-proceeds or
+ * refuses rather than prompting). So the cloud path never parks a turn on an
+ * ACP permission. These tests cover what remains valid:
+ *  - the gateway's pending-permission hold/resolve/expire primitives (used by
+ *    any future non-cloud ACP concern, e.g. an adopted session);
+ *  - a follow-up turn on an idle cloud session routes to a NEW chat --cloud
+ *    --resume-id subprocess (NOT the ACP gateway.prompt path).
+ */
+
+import type { Command, PermissionAnswer } from "@nikovirtala/kiro-remote-core";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { AcpGateway } from "../src/gateway.ts";
+import { createLogger } from "../src/logger.ts";
+import type { StdioJsonRpcTransport } from "../src/transport.ts";
+import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult, SHELL_PERMISSION_PARAMS } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -12,211 +30,128 @@ afterEach(async () => {
   }
 });
 
-function launchCmd(sessionId: string): Command {
-  return {
-    kind: "launch",
-    sub: "user-sub-1",
-    sessionId,
-    commandId: `cmd-${Math.random().toString(36).slice(2)}`,
-    prompt: "run the tests",
-    repos: ["octo/repo"],
+const CLOUD_ID = "08047063-f7b4-4ce5-b79a-2aea9a7a1d29";
+
+/** A stub transport that captures handlers + outgoing requests. */
+function stubTransport(): {
+  transport: StdioJsonRpcTransport;
+  requestHandlers: Map<string, (params: unknown) => unknown>;
+} {
+  const requestHandlers = new Map<string, (params: unknown) => unknown>();
+  const t = {
+    onNotification: () => {},
+    onRequest: (method: string, handler: (params: unknown) => unknown) => {
+      requestHandlers.set(method, handler);
+    },
+    request: async () => ({}),
   };
+  return { transport: t as unknown as StdioJsonRpcTransport, requestHandlers };
 }
 
-describe("permissions", () => {
-  test("stored verbatim, answered by optionId, consent returned for allow_always", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-p",
-      initialize: initResult(),
-      waitForPermissionReply: true,
-      onPrompt: {
-        messages: [
-          {
-            kind: "request",
-            method: "session/request_permission",
-            params: SHELL_PERMISSION_PARAMS,
-          },
-        ],
-        response: { stopReason: "end_turn" },
-      },
-    });
-    await harness.server.start();
-    await harness.seedSession("sp");
+function makeGateway(): {
+  gw: AcpGateway;
+  requestHandlers: Map<string, (params: unknown) => unknown>;
+  permissionRequested: { sessionId: string; requestId: string }[];
+} {
+  const { transport, requestHandlers } = stubTransport();
+  const permissionRequested: { sessionId: string; requestId: string }[] = [];
+  const gw = new AcpGateway({
+    transport,
+    logger: createLogger({ sink: () => {}, level: "debug" }),
+    hooks: {
+      onSessionUpdate: () => {},
+      onPermissionRequested: (sessionId, requestId) =>
+        permissionRequested.push({ sessionId, requestId }),
+      onAgentNotification: () => {},
+    },
+  });
+  gw.registerHandlers();
+  return { gw, requestHandlers, permissionRequested };
+}
 
-    await harness.server.intake.dispatch(launchCmd("sp"));
+describe("gateway permission primitives", () => {
+  test("a held-open request is resolved by optionId with canonical consent", async () => {
+    const { gw, requestHandlers, permissionRequested } = makeGateway();
+    const handler = requestHandlers.get("session/request_permission");
+    expect(handler).toBeDefined();
 
-    // The permission request lands and is stored verbatim + awaiting_permission.
-    await waitFor(
-      async () => (await requireHarness(harness).repo.getPermission("sp", "perm-1")) !== null,
-    );
-    const perm = await harness.repo.getPermission("sp", "perm-1");
-    expect(perm?.status).toBe("pending");
-    // options[] stored VERBATIM (all four, exact ids/kinds, no synthesis).
-    expect(perm?.options).toEqual(SHELL_PERMISSION_PARAMS.options);
-    expect(harness.server.manager.machineState("sp")?.session).toBe("awaiting_permission");
+    // The agent asks for permission; the gateway holds the reply open.
+    const replyPromise = handler?.(SHELL_PERMISSION_PARAMS) as Promise<{
+      outcome: unknown;
+      _meta?: unknown;
+    }>;
+    expect(permissionRequested).toEqual([{ sessionId: "", requestId: "perm-1" }]);
+    expect(gw.pendingPermissions.has("perm-1")).toBe(true);
 
-    // Answer with an allow_always option + canonical consent.
-    const consent = {
-      scope: "workspace",
-      resource: "npm run *",
-      workspaceRoot: "/workspace/project",
-    };
-    await harness.server.intake.dispatch({
-      kind: "answerPermission",
-      sub: "user-sub-1",
-      sessionId: "sp",
-      commandId: "cmd-answer",
-      requestId: "perm-1",
+    const answer: PermissionAnswer = {
       optionId: "always-accept",
-      consent,
-    });
+      consent: { scope: "workspace", resource: "npm run *", workspaceRoot: "/workspace/project" },
+    };
+    expect(gw.resolvePermission("perm-1", answer)).toBe(true);
 
-    // The agent received the exact optionId and consent (via stderr echo check
-    // is indirect; assert the stored answer + that the turn resolves). The turn
-    // now settles off the dispatch path, so await the background settlement.
-    await harness.server.manager.awaitTurnSettled("sp");
-    const answered = await harness.repo.getPermission("sp", "perm-1");
-    expect(answered?.status).toBe("answered");
-    expect(answered?.answer).toEqual({ optionId: "always-accept", consent });
-    expect(harness.server.manager.machineState("sp")?.turn).toBe("completed");
-    expect(harness.metrics.sum("PermissionWait")).toBeGreaterThanOrEqual(0);
+    const reply = await replyPromise;
+    expect(reply.outcome).toEqual({ outcome: "selected", optionId: "always-accept" });
+    expect(reply._meta).toEqual({ kiro: { consent: answer.consent } });
+    expect(gw.pendingPermissions.has("perm-1")).toBe(false);
   });
 
-  test("a pending permission can be expired, leaving it to Kiro", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-pe",
-      initialize: initResult(),
-      waitForPermissionReply: true,
-      onPrompt: {
-        messages: [
-          {
-            kind: "request",
-            method: "session/request_permission",
-            params: SHELL_PERMISSION_PARAMS,
-          },
-        ],
-        response: { stopReason: "end_turn" },
-      },
-    });
-    await harness.server.start();
-    await harness.seedSession("spe");
-    void harness.server.intake.dispatch(launchCmd("spe"));
-    await waitFor(() => requireHarness(harness).server.gateway.pendingPermissions.has("perm-1"));
-    // Expiring drops our hold (the request falls back to Kiro / next client).
-    expect(harness.server.gateway.expirePermission("perm-1")).toBe(true);
-    expect(harness.server.gateway.pendingPermissions.has("perm-1")).toBe(false);
+  test("a pending permission can be expired, leaving it to Kiro", () => {
+    const { gw, requestHandlers } = makeGateway();
+    const handler = requestHandlers.get("session/request_permission");
+    void (handler?.(SHELL_PERMISSION_PARAMS) as Promise<unknown>);
+    expect(gw.pendingPermissions.has("perm-1")).toBe(true);
+    expect(gw.expirePermission("perm-1")).toBe(true);
+    expect(gw.pendingPermissions.has("perm-1")).toBe(false);
+  });
+
+  test("answerPermission for an unknown requestId soft-fails (no throw/hang)", async () => {
+    const { gw } = makeGateway();
+    const resolved = await gw.answerPermission("s", "nope", { optionId: "accept" });
+    expect(resolved).toBe(false);
   });
 });
 
-describe("steer and cancel", () => {
-  test("steer mid-turn keeps the _session/ prefix and does not start a new turn", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-st",
-      initialize: initResult(),
-      onPrompt: { waitForSteer: true, response: { stopReason: "end_turn" } },
-    });
+describe("follow-up turn routing (chat-only cloud)", () => {
+  test("a prompt on an idle cloud session resumes via chat --cloud --resume-id", async () => {
+    const runner = vi.fn(async () => ({
+      code: 0,
+      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
+      stderr: "",
+    }));
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
     await harness.server.start();
-    await harness.seedSession("sst");
+    await harness.seedSession("st");
 
-    await harness.server.intake.dispatch(launchCmd("sst"));
+    await harness.server.intake.dispatch({
+      kind: "launch",
+      sub: "user-sub-1",
+      sessionId: "st",
+      commandId: "cmd-launch",
+      prompt: "first",
+      repos: ["octo/repo"],
+    } as Command);
     await waitFor(
-      () => requireHarness(harness).server.manager.machineState("sst")?.turn === "running",
+      async () => (await requireHarness(harness).repo.getSession("st"))?.status === "idle",
     );
 
-    // A follow-up during the active turn steers (whenBusy=steer); the fake
-    // agent releases the prompt once steered.
     await harness.server.intake.dispatch({
       kind: "prompt",
       sub: "user-sub-1",
-      sessionId: "sst",
-      commandId: "cmd-steer",
+      sessionId: "st",
+      commandId: "cmd-turn-2",
       turnId: "t-2",
-      prompt: "also do this",
+      prompt: "second",
       whenBusy: "steer",
-    });
+    } as Command);
+    await harness.server.manager.awaitTurnSettled("st");
 
-    await harness.server.manager.awaitTurnSettled("sst");
-    expect(harness.server.manager.machineState("sst")?.turn).toBe("completed");
-  });
-
-  test("whenBusy=reject does not steer during an active turn", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-rj",
-      initialize: initResult(),
-      onPrompt: { waitForSteer: true, response: { stopReason: "end_turn" } },
-    });
-    await harness.server.start();
-    await harness.seedSession("srj");
-    await harness.server.intake.dispatch(launchCmd("srj"));
-    await waitFor(
-      () => requireHarness(harness).server.manager.machineState("srj")?.turn === "running",
-    );
-
-    await harness.server.intake.dispatch({
-      kind: "prompt",
-      sub: "user-sub-1",
-      sessionId: "srj",
-      commandId: "cmd-reject",
-      turnId: "t-3",
-      prompt: "nope",
-      whenBusy: "reject",
-    });
-    const rejected = harness.logLines.some((l) => l.includes("steer_rejected"));
-    expect(rejected).toBe(true);
-
-    // Release the original turn via a real steer so the test can settle.
-    await harness.server.manager.steer("srj", "release", "steer");
-    await harness.server.manager.awaitTurnSettled("srj");
-  });
-
-  test("cancel requests cancellation and waits for the prompt response", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-cx",
-      initialize: initResult(),
-      onPrompt: { waitForSteer: true, response: { stopReason: "cancelled" } },
-    });
-    await harness.server.start();
-    await harness.seedSession("scx");
-    await harness.server.intake.dispatch(launchCmd("scx"));
-    await waitFor(
-      () => requireHarness(harness).server.manager.machineState("scx")?.turn === "running",
-    );
-
-    await harness.server.intake.dispatch({
-      kind: "cancel",
-      sub: "user-sub-1",
-      sessionId: "scx",
-      commandId: "cmd-cancel",
-    });
-    await harness.server.manager.awaitTurnSettled("scx");
-    // The turn settles as cancelled ONLY after the prompt response arrives.
-    expect(harness.server.manager.machineState("scx")?.turn).toBe("cancelled");
-  });
-});
-
-describe("unknown agent-to-client request", () => {
-  test("is answered with a JSON-RPC error (never hangs)", async () => {
-    const stderrLines: string[] = [];
-    harness = await createHarness({
-      newSessionId: "cloud-u",
-      initialize: initResult(),
-      sendUnknownRequest: true,
-      onPrompt: { response: { stopReason: "end_turn" } },
-    });
-    // Capture the fake agent's stderr to confirm it got a -32601 error back.
-    harness.server.transport.onNotification("__noop__", () => undefined);
-    await harness.server.start();
-    await harness.seedSession("su");
-    await harness.server.intake.dispatch(launchCmd("su"));
-    await waitFor(
-      async () => (await requireHarness(harness).repo.getSession("su"))?.status === "idle",
-    );
-
-    // The turn still completed despite the unknown request (no hang).
-    expect(harness.server.manager.machineState("su")?.turn).toBe("completed");
-    // The unknown request was logged as answered with an error.
-    const loggedUnknown = harness.logLines.some((l) => l.includes("acp_unknown_request"));
-    expect(loggedUnknown).toBe(true);
-    void stderrLines;
+    expect(runner).toHaveBeenCalledTimes(2);
+    const spec = runner.mock.calls[1][0] as { args: string[] };
+    expect(spec.args).toContain("--resume-id");
+    expect(spec.args).toContain(CLOUD_ID);
+    expect((await harness.repo.getSession("st"))?.status).toBe("idle");
   });
 });
