@@ -121,6 +121,23 @@ export interface OAuthCimdItem {
   ttl: number;
 }
 
+/**
+ * A dynamically-registered OAuth client (RFC 7591). Unlike OAUTH#TX/CODE/CIMD
+ * items these are PERMANENT: there is deliberately NO `ttl` field, so a
+ * registered client never expires.
+ */
+export interface RegisteredClientItem {
+  PK: string; // CLIENT#<client_id>
+  SK: "A";
+  clientId: string;
+  clientName: string | null;
+  redirectUris: string[];
+  grantTypes: string[];
+  responseTypes: string[];
+  tokenEndpointAuthMethod: string;
+  createdAt: number;
+}
+
 export interface IdempotencyItem {
   PK: string; // IDEMP#<sub>#<key>
   SK: "A";

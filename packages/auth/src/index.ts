@@ -27,5 +27,6 @@ export * from "./construct.ts";
 export * from "./kms.ts";
 export * from "./metadata.ts";
 export * from "./pkce.ts";
+export * from "./register.ts";
 export * from "./token.ts";
 export * from "./types.ts";

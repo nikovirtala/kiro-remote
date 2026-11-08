@@ -8,7 +8,11 @@
  * network or any AWS SDK transport.
  */
 
-import type { FacadeConfig } from "@nikovirtala/kiro-remote-auth";
+import type {
+  DynamicClientStore,
+  FacadeConfig,
+  ResolvedDynamicClient,
+} from "@nikovirtala/kiro-remote-auth";
 import type {
   AccessTokenClaims,
   Command,
@@ -233,6 +237,19 @@ export function facadeConfig(): FacadeConfig {
   };
 }
 
+/* --------------------------- Dynamic client store -------------------------- */
+
+/** An in-memory {@link DynamicClientStore} for the facade register tests. */
+export class InMemoryDynamicClientStore implements DynamicClientStore {
+  readonly items = new Map<string, ResolvedDynamicClient>();
+  async getClient(clientId: string): Promise<ResolvedDynamicClient | null> {
+    return this.items.get(clientId) ?? null;
+  }
+  async putClient(client: ResolvedDynamicClient): Promise<void> {
+    this.items.set(client.clientId, client);
+  }
+}
+
 /* ------------------------------ Context builder ---------------------------- */
 
 export interface Harness {
@@ -281,6 +298,10 @@ export function buildHarness(opts: BuildOptions = {}): Harness {
     token: {} as any,
     // biome-ignore lint/suspicious/noExplicitAny: filled per-test when needed.
     revoke: {} as any,
+    register: {
+      config: facadeConfig(),
+      store: new InMemoryDynamicClientStore(),
+    },
   };
 
   const ctx: ApiContext = {

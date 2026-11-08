@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { isFacadePath } from "../src/facade.ts";
 import type { HttpRequest } from "../src/http.ts";
 import type { McpTransportHandler } from "../src/mcp-seam.ts";
 import { route } from "../src/router.ts";
@@ -80,5 +81,27 @@ describe("facade endpoints are mounted unauthenticated", () => {
     const res = await route(h.ctx, req({ method: "GET", path: "/oauth/clients/cli.json" }));
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body).client_id).toBe("https://kiro.example.com/oauth/clients/cli.json");
+  });
+
+  test("POST /oauth/register registers a client unauthenticated (RFC 7591)", async () => {
+    const h = buildHarness();
+    const res = await route(
+      h.ctx,
+      req({
+        method: "POST",
+        path: "/oauth/register",
+        body: JSON.stringify({ redirect_uris: ["https://app.example.com/cb"] }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const body = JSON.parse(res.body);
+    expect(typeof body.client_id).toBe("string");
+    expect(body.client_id.startsWith("mcp_")).toBe(true);
+    expect(body.token_endpoint_auth_method).toBe("none");
+    expect("client_secret" in body).toBe(false);
+  });
+
+  test("isFacadePath('/oauth/register') is true", () => {
+    expect(isFacadePath("/oauth/register")).toBe(true);
   });
 });

@@ -30,6 +30,7 @@ import {
 import {
   CAPS_SK,
   CONFIG_PK,
+  clientPk,
   eventSk,
   idempotencyPk,
   META_SK,
@@ -53,6 +54,7 @@ import type {
   OAuthCodeItem,
   OAuthTxItem,
   PermItem,
+  RegisteredClientItem,
   S3Pointer,
   SessionMetaItem,
   TurnItem,
@@ -490,6 +492,31 @@ export class Repository {
       }),
     );
     return (res.Item as OAuthCimdItem | undefined) ?? null;
+  }
+
+  /* ---------------------- Dynamic client registration -------------------- */
+
+  /**
+   * Persist a dynamically-registered OAuth client (RFC 7591). The
+   * `attribute_not_exists(PK)` condition guarantees a re-used `client_id` can
+   * never overwrite an existing registration. The CLIENT# item is PERMANENT
+   * (no TTL): registered clients do not expire.
+   */
+  async putClient(item: RegisteredClientItem): Promise<void> {
+    await this.ddb.send(
+      new PutCommand({
+        TableName: this.table,
+        Item: item,
+        ConditionExpression: "attribute_not_exists(PK)",
+      }),
+    );
+  }
+
+  async getClient(clientId: string): Promise<RegisteredClientItem | null> {
+    const res = await this.ddb.send(
+      new GetCommand({ TableName: this.table, Key: { PK: clientPk(clientId), SK: SINGLETON_SK } }),
+    );
+    return (res.Item as RegisteredClientItem | undefined) ?? null;
   }
 
   /* ----------------------------- Idempotency ----------------------------- */

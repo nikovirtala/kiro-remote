@@ -11,6 +11,7 @@ import type {
   AuthorizeDeps,
   CallbackDeps,
   FacadeConfig,
+  RegisterDeps,
   RevokeDeps,
   TokenDeps,
 } from "@nikovirtala/kiro-remote-auth";
@@ -31,6 +32,7 @@ export interface FacadeDeps {
   callback: CallbackDeps;
   token: TokenDeps;
   revoke: RevokeDeps;
+  register: RegisterDeps;
 }
 
 /** Everything the API handler depends on. */

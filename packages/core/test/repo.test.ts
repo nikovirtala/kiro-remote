@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   ConcurrentModificationError,
   capabilities as deriveCapabilities,
+  type RegisteredClientItem,
   Repository,
   type SessionMetaItem,
 } from "../src/index.ts";
@@ -252,5 +253,53 @@ describe("repository: OAuth code deleted on first use", () => {
     expect(first?.clientId).toBe("c");
     const second = await r.consumeOAuthCode("hash");
     expect(second).toBeNull();
+  });
+});
+
+describe("repository: dynamically-registered CLIENT# item (RFC 7591, permanent)", () => {
+  function clientItem(clientId: string): RegisteredClientItem {
+    return {
+      PK: `CLIENT#${clientId}`,
+      SK: "A",
+      clientId,
+      clientName: "Example MCP Client",
+      redirectUris: ["https://app.example.com/cb", "http://127.0.0.1/callback"],
+      grantTypes: ["authorization_code", "refresh_token"],
+      responseTypes: ["code"],
+      tokenEndpointAuthMethod: "none",
+      createdAt: 1_700_000_000_000,
+    };
+  }
+
+  it("round-trips a registered client via putClient/getClient", async () => {
+    const { r } = repo();
+    const item = clientItem("mcp_abc123");
+    await r.putClient(item);
+    const got = await r.getClient("mcp_abc123");
+    expect(got?.clientId).toBe("mcp_abc123");
+    expect(got?.clientName).toBe("Example MCP Client");
+    expect(got?.redirectUris).toEqual(["https://app.example.com/cb", "http://127.0.0.1/callback"]);
+    expect(got?.grantTypes).toEqual(["authorization_code", "refresh_token"]);
+    expect(got?.responseTypes).toEqual(["code"]);
+    expect(got?.tokenEndpointAuthMethod).toBe("none");
+    expect(got?.createdAt).toBe(1_700_000_000_000);
+    // Registered clients are PERMANENT: no TTL is stored.
+    expect("ttl" in (got as Record<string, unknown>)).toBe(false);
+  });
+
+  it("returns null for an unknown client_id", async () => {
+    const { r } = repo();
+    expect(await r.getClient("mcp_missing")).toBeNull();
+  });
+
+  it("rejects a second putClient with the same client_id (create-once)", async () => {
+    const { r } = repo();
+    await r.putClient(clientItem("mcp_dup"));
+    await expect(r.putClient(clientItem("mcp_dup"))).rejects.toMatchObject({
+      name: "ConditionalCheckFailedException",
+    });
+    // The first registration still persists unchanged.
+    const got = await r.getClient("mcp_dup");
+    expect(got?.clientId).toBe("mcp_dup");
   });
 });

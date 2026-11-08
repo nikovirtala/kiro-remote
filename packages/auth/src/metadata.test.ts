@@ -64,8 +64,8 @@ describe("RFC 8414 authorization-server-metadata", () => {
     expect(doc.authorization_response_iss_parameter_supported).toBe(true);
   });
 
-  test("has NO registration_endpoint", () => {
-    expect("registration_endpoint" in doc).toBe(false);
+  test("advertises the RFC 7591 registration_endpoint", () => {
+    expect(doc.registration_endpoint).toBe("https://kiro.example.com/oauth/register");
   });
 
   test("handler returns JSON with no-store", () => {

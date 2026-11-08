@@ -92,6 +92,47 @@ describe("dispatchFacade logs OAuth 4xx rejections", () => {
     expect(warns.find((w) => w.message === "oauth_token_rejected")).toBeUndefined();
   });
 
+  test("warns oauth_register_rejected on a register 4xx (missing redirect_uris)", async () => {
+    const h = buildHarness();
+    const { obs, warns } = spyObs();
+    h.ctx.obs = obs;
+
+    const res = await dispatchFacade(h.ctx, {
+      method: "POST",
+      path: "/oauth/register",
+      query: {},
+      headers: {},
+      params: {},
+      host: "kiro.example.com",
+      body: JSON.stringify({ client_name: "no redirect uris" }),
+    });
+
+    expect(res?.status).toBe(400);
+    const rejected = warns.find((w) => w.message === "oauth_register_rejected");
+    expect(rejected).toBeDefined();
+    expect(rejected?.attrs?.status).toBe(400);
+    expect(rejected?.attrs?.error).toBe("invalid_redirect_uri");
+  });
+
+  test("does NOT warn on a 2xx register response", async () => {
+    const h = buildHarness();
+    const { obs, warns } = spyObs();
+    h.ctx.obs = obs;
+
+    const res = await dispatchFacade(h.ctx, {
+      method: "POST",
+      path: "/oauth/register",
+      query: {},
+      headers: {},
+      params: {},
+      host: "kiro.example.com",
+      body: JSON.stringify({ redirect_uris: ["https://app.example.com/cb"] }),
+    });
+
+    expect(res?.status).toBe(201);
+    expect(warns.find((w) => w.message === "oauth_register_rejected")).toBeUndefined();
+  });
+
   test("uses the injected obs.warn spy (sanity)", async () => {
     const h = buildHarness();
     const warn = vi.fn();

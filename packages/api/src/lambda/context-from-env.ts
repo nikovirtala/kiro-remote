@@ -28,9 +28,11 @@ import {
   CimdFetcher,
   ClientResolver,
   CognitoAdapter,
+  type DynamicClientStore,
   type FacadeConfig,
   KmsAdapter,
   type PreRegisteredClient,
+  type ResolvedDynamicClient,
 } from "@nikovirtala/kiro-remote-auth";
 import {
   CognitoTokenVerifier,
@@ -184,11 +186,51 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
   });
   const kmsAdapter = new KmsAdapter({ client: kms, keyId: kmsKeyId });
   const cimd = new CimdFetcher({ allowedHosts: cimdAllowedHosts });
+  // The repo-backed DynamicClientStore adapter bridges the pure auth port to
+  // the core Repository's CLIENT# item (RFC 7591). It maps between the auth
+  // ResolvedDynamicClient shape and the core RegisteredClientItem (PK/SK
+  // stripped). The API Lambda's existing grantReadWriteData on the table
+  // already covers CLIENT# items -- no new AWS client or IAM grant is needed.
+  const dynamicClients: DynamicClientStore = {
+    async getClient(clientId: string): Promise<ResolvedDynamicClient | null> {
+      const item = await repo.getClient(clientId);
+      if (!item) {
+        return null;
+      }
+      return {
+        clientId: item.clientId,
+        clientName: item.clientName,
+        redirectUris: item.redirectUris,
+        grantTypes: item.grantTypes,
+        responseTypes: item.responseTypes,
+        tokenEndpointAuthMethod: item.tokenEndpointAuthMethod,
+        createdAt: item.createdAt,
+      };
+    },
+    async putClient(client: ResolvedDynamicClient): Promise<void> {
+      await repo.putClient({
+        PK: `CLIENT#${client.clientId}`,
+        SK: "A",
+        clientId: client.clientId,
+        clientName: client.clientName,
+        redirectUris: client.redirectUris,
+        grantTypes: client.grantTypes,
+        responseTypes: client.responseTypes,
+        tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
+        createdAt: client.createdAt,
+      });
+    },
+  };
   // Pre-registered (non-CIMD) clients provisioned by the construct's
   // `preRegisteredClients` prop are propagated here via PREREGISTERED_CLIENTS
   // (id + name + exact redirect URIs) so they can complete /oauth/authorize.
-  // CIMD URL clients are still resolved dynamically under the SSRF guard.
-  const clients = new ClientResolver({ cimd, preRegistered: preRegisteredClients });
+  // CIMD URL clients are still resolved dynamically under the SSRF guard, and
+  // RFC 7591 dynamically-registered clients are resolved via the store.
+  const clients = new ClientResolver({
+    cimd,
+    preRegistered: preRegisteredClients,
+    dynamic: dynamicClients,
+  });
 
   const facade: FacadeDeps = {
     config: facadeConfig,
@@ -196,6 +238,7 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
     callback: { config: facadeConfig, repo, cognito, kms: kmsAdapter },
     token: { repo, cognito, kms: kmsAdapter },
     revoke: { cognito },
+    register: { config: facadeConfig, store: dynamicClients },
   };
 
   const ctx: ApiContext = {

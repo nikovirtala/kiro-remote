@@ -18,6 +18,7 @@ export const MODELS_SK = "MODELS";
 export const oauthTxPk = (id: string): string => `OAUTH#TX#${id}`;
 export const oauthCodePk = (sha256Code: string): string => `OAUTH#CODE#${sha256Code}`;
 export const oauthCimdPk = (sha256ClientId: string): string => `OAUTH#CIMD#${sha256ClientId}`;
+export const clientPk = (clientId: string): string => `CLIENT#${clientId}`;
 export const SINGLETON_SK = "A";
 
 export const idempotencyPk = (sub: string, key: string): string => `IDEMP#${sub}#${key}`;

@@ -8,6 +8,7 @@
  *   GET  /.well-known/oauth-authorization-server
  *   GET  /oauth/authorize
  *   GET  /oauth/callback
+ *   POST /oauth/register
  *   POST /oauth/token
  *   POST /oauth/revoke
  *   GET  /oauth/clients/cli.json
@@ -23,6 +24,7 @@ import {
   handleCallback,
   handleCliClientMetadata,
   handleProtectedResourceMetadata,
+  handleRegister,
   handleRevoke,
   handleToken,
 } from "@nikovirtala/kiro-remote-auth";
@@ -35,6 +37,7 @@ const FACADE_PATHS = new Set([
   "/.well-known/oauth-authorization-server",
   "/oauth/authorize",
   "/oauth/callback",
+  "/oauth/register",
   "/oauth/token",
   "/oauth/revoke",
   "/oauth/clients/cli.json",
@@ -115,6 +118,11 @@ export async function dispatchFacade(
   if (req.path === "/oauth/callback" && req.method === "GET") {
     const res = toFacadeResponse(await handleCallback(facadeReq, facade.callback));
     logOauthRejection(ctx, "oauth_callback_rejected", res);
+    return res;
+  }
+  if (req.path === "/oauth/register" && req.method === "POST") {
+    const res = toFacadeResponse(await handleRegister(facadeReq, facade.register));
+    logOauthRejection(ctx, "oauth_register_rejected", res);
     return res;
   }
   if (req.path === "/oauth/token" && req.method === "POST") {

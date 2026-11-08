@@ -36,6 +36,7 @@ export interface AuthorizationServerMetadata {
   code_challenge_methods_supported: string[];
   token_endpoint_auth_methods_supported: string[];
   revocation_endpoint_auth_methods_supported: string[];
+  registration_endpoint: string;
   scopes_supported: string[];
   client_id_metadata_document_supported: boolean;
   authorization_response_iss_parameter_supported: boolean;
@@ -59,6 +60,7 @@ export function authorizationServerMetadata(config: FacadeConfig): Authorization
     authorization_endpoint: ep.authorizationEndpoint,
     token_endpoint: ep.tokenEndpoint,
     revocation_endpoint: ep.revocationEndpoint,
+    registration_endpoint: `${ep.issuer}/oauth/register`,
     jwks_uri: config.cognitoJwksUri,
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],

@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { type AuthorizeTxData, handleAuthorize } from "./authorize.ts";
 import { handleCallback } from "./callback.ts";
 import { CimdFetcher } from "./cimd.ts";
-import { ClientResolver, redirectUriAllowed } from "./clients.ts";
+import {
+  ClientResolver,
+  type DynamicClientStore,
+  type ResolvedDynamicClient,
+  redirectUriAllowed,
+} from "./clients.ts";
 import type { FacadeConfig } from "./config.ts";
 import { generateCodeVerifier, s256Challenge, sha256Hex } from "./pkce.ts";
 import { FakeCognito, FakeDdbClient, FakeKms, FakeS3Client } from "./test-helpers.ts";
@@ -532,5 +537,75 @@ describe("POST /oauth/revoke", () => {
 
   test("parseForm handles empty bodies", () => {
     expect(parseForm(undefined)).toEqual({});
+  });
+});
+
+describe("ClientResolver dynamic-store lookup (RFC 7591)", () => {
+  function dynamicStore(client: ResolvedDynamicClient | null): DynamicClientStore {
+    const map = new Map<string, ResolvedDynamicClient>();
+    if (client) {
+      map.set(client.clientId, client);
+    }
+    return {
+      async getClient(id) {
+        return map.get(id) ?? null;
+      },
+      async putClient(c) {
+        map.set(c.clientId, c);
+      },
+    };
+  }
+
+  const dynClient: ResolvedDynamicClient = {
+    clientId: "mcp_dyn123",
+    clientName: "Dynamic MCP Client",
+    redirectUris: ["https://dyn.example.com/cb"],
+    grantTypes: ["authorization_code", "refresh_token"],
+    responseTypes: ["code"],
+    tokenEndpointAuthMethod: "none",
+    createdAt: 1_700_000_000_000,
+  };
+
+  function resolverWithDynamic(client: ResolvedDynamicClient | null): ClientResolver {
+    return new ClientResolver({
+      cimd: cimdFetcherFor(CIMD_DOC),
+      preRegistered: [
+        { clientId: "preclient", clientName: "Pre", redirectUris: ["https://pre.example/cb"] },
+      ],
+      dynamic: dynamicStore(client),
+    });
+  }
+
+  test("resolves a dynamically-registered mcp_ client and its redirect_uris", async () => {
+    const resolved = await resolverWithDynamic(dynClient).resolve("mcp_dyn123");
+    expect(resolved.clientId).toBe("mcp_dyn123");
+    expect(resolved.clientName).toBe("Dynamic MCP Client");
+    expect(resolved.redirectUris).toEqual(["https://dyn.example.com/cb"]);
+    expect(resolved.isCimd).toBe(false);
+  });
+
+  test("still resolves a CIMD (https://) client ahead of the dynamic store", async () => {
+    const resolved = await resolverWithDynamic(dynClient).resolve(CLIENT_ID);
+    expect(resolved.isCimd).toBe(true);
+    expect(resolved.redirectUris).toEqual([REDIRECT_URI]);
+  });
+
+  test("still resolves a pre-registered client ahead of the dynamic store", async () => {
+    const resolved = await resolverWithDynamic(dynClient).resolve("preclient");
+    expect(resolved.isCimd).toBe(false);
+    expect(resolved.redirectUris).toEqual(["https://pre.example/cb"]);
+  });
+
+  test("falls back to clientId as clientName when the stored name is null", async () => {
+    const resolved = await resolverWithDynamic({ ...dynClient, clientName: null }).resolve(
+      "mcp_dyn123",
+    );
+    expect(resolved.clientName).toBe("mcp_dyn123");
+  });
+
+  test("throws invalid_client when the dynamic store misses too", async () => {
+    await expect(resolverWithDynamic(null).resolve("mcp_missing")).rejects.toThrow(
+      "unknown client_id",
+    );
   });
 });
