@@ -66,6 +66,22 @@ interface SessionRuntime {
   launchStartedAt: number;
   /** Pending permission requestId -> arrival time (for PermissionWait). */
   permissionStartedAt: Map<string, number>;
+  /**
+   * True once this runtime has issued its launch (session/new or headless) so a
+   * redelivered launch command is a logged no-op rather than a second cloud
+   * session / second first-turn (SQS at-least-once + visibility-timeout
+   * redelivery). Set as soon as launch() begins issuing the launch path.
+   */
+  launched: boolean;
+  /**
+   * The in-flight background turn settlement promise (the part of a turn that
+   * runs AFTER the session/prompt has been dispatched: awaiting the prompt
+   * response, draining updates, flushing coalesced chunks, and persisting the
+   * final status). Null when no turn is settling. Tracked so shutdown/tests can
+   * await the turn actually completing even though the SQS ack happened on
+   * dispatch, not on settlement.
+   */
+  settling: Promise<void> | null;
 }
 
 export interface SessionManagerDeps {
@@ -169,6 +185,8 @@ export class SessionManager {
         firstEventAt: null,
         launchStartedAt: this.now(),
         permissionStartedAt: new Map(),
+        launched: false,
+        settling: null,
       };
       this.runtimes.set(id, rt);
     }
@@ -398,6 +416,20 @@ export class SessionManager {
     args: { prompt: string; repos: string[]; mode?: string; model?: string; effort?: string },
   ): Promise<{ path: LaunchPath; kiroSessionId: string }> {
     const rt = this.runtimeFor(id);
+
+    // Idempotency: a redelivered launch (SQS at-least-once, or a visibility-
+    // timeout redelivery that raced the ack) must NOT issue a second session/new
+    // / create a second cloud session / start a second first-turn. Treat it as a
+    // logged success so the message is still deleted and the FIFO group unblocks.
+    if (await this.launchAlreadyIssued(id, rt)) {
+      this.logger.info("launch_idempotent_skip", { sessionId: id });
+      return { path: "acp", kiroSessionId: rt.kiroSessionId ?? "" };
+    }
+    // Mark launched up front so a redelivery that arrives WHILE this launch is
+    // still issuing session/new is also deduped (the in-memory runtime is the
+    // authoritative guard; the durable row catches the runtime-reset case).
+    rt.launched = true;
+
     rt.launchStartedAt = this.now();
     const caps = this.gateway.capabilities();
     // Prefer the ACP cloud path whenever cloud/remote execution is genuinely
@@ -491,10 +523,35 @@ export class SessionManager {
       await this.settleCloudId(rt);
     }
 
-    // The launch command carries the first prompt; send it now (idle -> running).
+    // The launch command carries the first prompt; DISPATCH it now (idle ->
+    // running) but do NOT await the turn settling. prompt() returns once
+    // session/prompt has been sent and the turn is tracked as a background task;
+    // settlement (prompt.response -> drainUpdates/flush/persist) continues via
+    // the gateway hooks + the background settle promise. This is the deadlock
+    // fix: launch() returns promptly so intake deletes the SQS message, which
+    // unblocks the FIFO group so a later answerPermission in the same group is
+    // delivered and can resolve the held-open permission request.
     await this.prompt(id, args.prompt);
 
     return { path, kiroSessionId: rt.kiroSessionId ?? kiroSessionId };
+  }
+
+  /**
+   * Decide whether a launch for this session has ALREADY been issued, so a
+   * redelivery is a no-op. True when either the in-memory runtime has already
+   * launched (still-present case) OR the durable session row is past
+   * 'provisioning' / already carries a kiroSessionId (runtime-reset case, e.g.
+   * after a bridge restart where the row survived but the runtime map did not).
+   */
+  private async launchAlreadyIssued(id: string, rt: SessionRuntime): Promise<boolean> {
+    if (rt.launched || rt.kiroSessionId !== null || rt.awaitingCloudId) {
+      return true;
+    }
+    const item = await this.repo.getSession(id);
+    if (!item) {
+      return false;
+    }
+    return item.status !== "provisioning" || item.kiroSessionId !== null;
   }
 
   /** Default bounded wait (ms) for the real cloud id to be adopted post-launch. */
@@ -572,6 +629,17 @@ export class SessionManager {
 
   /* --------------------------- prompt / steer / cancel ---------------------- */
 
+  /**
+   * Start a turn. The session/prompt request is DISPATCHED (sent to the agent)
+   * and the machine moves idle -> running + persists; this method then returns
+   * WITHOUT waiting for the turn to settle. The settlement -- awaiting the
+   * prompt response (the ONLY settler), draining updates, flushing coalesced
+   * chunks, and persisting the final status -- runs as a background task tracked
+   * on rt.settling. This is what lets intake ack (delete) the launch/prompt SQS
+   * message on dispatch rather than on settlement, so a later answerPermission
+   * in the same FIFO group is delivered while this turn is parked on a
+   * permission. The turn still settles ONLY on the prompt response.
+   */
   async prompt(id: string, prompt: string, turnId?: string): Promise<void> {
     const rt = this.runtimeFor(id);
     const tid = turnId ?? ulid();
@@ -580,14 +648,36 @@ export class SessionManager {
     this.applyMachine(rt, { kind: "prompt.sent" });
     await this.persistSessionStatus(rt);
 
+    // Dispatch the request NOW. transport.request() writes the session/prompt
+    // line synchronously before returning its promise, so by the time this call
+    // returns the prompt is on the wire. Construct the single text content
+    // block; the gateway wraps it into the array of content blocks ACP V3's
+    // session/prompt requires (Bug B).
+    const responsePromise = this.gateway.prompt(rt.kiroSessionId ?? id, {
+      type: "text",
+      text: prompt,
+    });
+
+    // Settle in the background: the prompt response is the sole settler.
+    rt.settling = this.settleTurn(rt, id, responsePromise);
+  }
+
+  /**
+   * Await the prompt response and run turn settlement. Runs OFF the dispatch
+   * path (as a background task started by {@link prompt}); never throws (a
+   * failed prompt settles the turn as errored). Preserves exactly the behavior
+   * that used to live in prompt()'s finally: TurnDuration metric, drainUpdates
+   * (so late cloud-id adoption lands before the status write persists
+   * kiroSessionId), coalescer.flushAll, clearing activeTurnId, and the final
+   * persistSessionStatus.
+   */
+  private async settleTurn(
+    rt: SessionRuntime,
+    id: string,
+    responsePromise: Promise<{ stopReason?: string }>,
+  ): Promise<void> {
     try {
-      // Construct the single text content block; the gateway wraps it into the
-      // array of content blocks that ACP V3's session/prompt requires (Bug B),
-      // confirmed via FEAT-002's raw-RPC logs on redeploy.
-      const res = await this.gateway.prompt(rt.kiroSessionId ?? id, {
-        type: "text",
-        text: prompt,
-      });
+      const res = await responsePromise;
       // The ONLY settler. turn_end updates do NOT reach here.
       this.applyMachine(rt, { kind: "prompt.response", stopReason: res.stopReason });
     } catch (err) {
@@ -607,6 +697,18 @@ export class SessionManager {
       rt.activeTurnId = null;
       rt.turnStartedAt = null;
       await this.persistSessionStatus(rt);
+      rt.settling = null;
+    }
+  }
+
+  /**
+   * Resolve once the session's in-flight background turn (if any) has settled.
+   * Used by tests to await a turn that completes off the dispatch path.
+   */
+  async awaitTurnSettled(id: string): Promise<void> {
+    const rt = this.runtimes.get(id);
+    while (rt?.settling) {
+      await rt.settling;
     }
   }
 
@@ -684,7 +786,15 @@ export class SessionManager {
   async answerPermission(id: string, requestId: string, answer: PermissionAnswer): Promise<void> {
     const rt = this.runtimeFor(id);
     // Resolve the held-open agent request with the chosen optionId + consent.
-    await this.gateway.answerPermission(id, requestId, answer);
+    // A false return means there was no pending in-memory request (e.g. the
+    // bridge restarted and lost pendingPermissions, or the requestId is
+    // unknown). That is a clean, logged no-op -- do NOT hang, throw, or force a
+    // machine transition / PERM-row write that would not match reality.
+    const resolved = await this.gateway.answerPermission(id, requestId, answer);
+    if (!resolved) {
+      this.logger.info("permission_answer_soft_fail", { sessionId: id, requestId });
+      return;
+    }
     await this.repo.answerPermission(id, requestId, {
       optionId: answer.optionId,
       ...(answer.consent ? { consent: answer.consent } : {}),

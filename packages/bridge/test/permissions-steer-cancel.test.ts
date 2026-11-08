@@ -43,7 +43,7 @@ describe("permissions", () => {
     await harness.server.start();
     await harness.seedSession("sp");
 
-    const dispatch = harness.server.intake.dispatch(launchCmd("sp"));
+    await harness.server.intake.dispatch(launchCmd("sp"));
 
     // The permission request lands and is stored verbatim + awaiting_permission.
     await waitFor(
@@ -72,8 +72,9 @@ describe("permissions", () => {
     });
 
     // The agent received the exact optionId and consent (via stderr echo check
-    // is indirect; assert the stored answer + that the turn resolves).
-    await dispatch;
+    // is indirect; assert the stored answer + that the turn resolves). The turn
+    // now settles off the dispatch path, so await the background settlement.
+    await harness.server.manager.awaitTurnSettled("sp");
     const answered = await harness.repo.getPermission("sp", "perm-1");
     expect(answered?.status).toBe("answered");
     expect(answered?.answer).toEqual({ optionId: "always-accept", consent });
@@ -117,7 +118,7 @@ describe("steer and cancel", () => {
     await harness.server.start();
     await harness.seedSession("sst");
 
-    const dispatch = harness.server.intake.dispatch(launchCmd("sst"));
+    await harness.server.intake.dispatch(launchCmd("sst"));
     await waitFor(
       () => requireHarness(harness).server.manager.machineState("sst")?.turn === "running",
     );
@@ -134,7 +135,7 @@ describe("steer and cancel", () => {
       whenBusy: "steer",
     });
 
-    await dispatch;
+    await harness.server.manager.awaitTurnSettled("sst");
     expect(harness.server.manager.machineState("sst")?.turn).toBe("completed");
   });
 
@@ -146,7 +147,7 @@ describe("steer and cancel", () => {
     });
     await harness.server.start();
     await harness.seedSession("srj");
-    const dispatch = harness.server.intake.dispatch(launchCmd("srj"));
+    await harness.server.intake.dispatch(launchCmd("srj"));
     await waitFor(
       () => requireHarness(harness).server.manager.machineState("srj")?.turn === "running",
     );
@@ -165,7 +166,7 @@ describe("steer and cancel", () => {
 
     // Release the original turn via a real steer so the test can settle.
     await harness.server.manager.steer("srj", "release", "steer");
-    await dispatch;
+    await harness.server.manager.awaitTurnSettled("srj");
   });
 
   test("cancel requests cancellation and waits for the prompt response", async () => {
@@ -176,7 +177,7 @@ describe("steer and cancel", () => {
     });
     await harness.server.start();
     await harness.seedSession("scx");
-    const dispatch = harness.server.intake.dispatch(launchCmd("scx"));
+    await harness.server.intake.dispatch(launchCmd("scx"));
     await waitFor(
       () => requireHarness(harness).server.manager.machineState("scx")?.turn === "running",
     );
@@ -187,7 +188,7 @@ describe("steer and cancel", () => {
       sessionId: "scx",
       commandId: "cmd-cancel",
     });
-    await dispatch;
+    await harness.server.manager.awaitTurnSettled("scx");
     // The turn settles as cancelled ONLY after the prompt response arrives.
     expect(harness.server.manager.machineState("scx")?.turn).toBe("cancelled");
   });

@@ -320,15 +320,24 @@ export class AcpGateway implements KiroGateway {
     await this.transport.request("session/set_mode", { sessionId, modeId });
   }
 
+  /**
+   * Answer a held-open permission request by its chosen optionId. Returns true
+   * when a pending request was resolved, false when there was none (e.g. the
+   * in-memory pendingPermissions map was cleared by a bridge restart, or the
+   * requestId is unknown). A false return is a soft signal, NOT an error: the
+   * caller treats it as a logged no-op so the answer command never hangs or
+   * throws.
+   */
   async answerPermission(
     _sessionId: string,
     requestId: string,
     answer: PermissionAnswer,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const resolved = this.resolvePermission(requestId, answer);
     if (!resolved) {
       this.logger.warn("permission_answer_no_pending", { requestId });
     }
+    return resolved;
   }
 
   /** session/list using an advertised scope, for discovery/adopt. */

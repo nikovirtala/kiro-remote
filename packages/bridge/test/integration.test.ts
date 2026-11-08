@@ -220,7 +220,7 @@ describe("launch -> prompt -> turn settle", () => {
     await harness.server.start();
     await harness.seedSession("s2");
 
-    const dispatch = harness.server.intake.dispatch(launchCmd("s2"));
+    await harness.server.intake.dispatch(launchCmd("s2"));
 
     // While the prompt response is delayed, after the turn_end update lands the
     // machine MUST still be running (turn not settled by turn_end).
@@ -231,7 +231,8 @@ describe("launch -> prompt -> turn settle", () => {
     expect(midState?.turn).toBe("running");
     expect(midState?.session).toBe("running");
 
-    await dispatch;
+    // The turn now settles off the dispatch path; await the background settle.
+    await harness.server.manager.awaitTurnSettled("s2");
     // Now the prompt response has arrived and settled the turn.
     const finalState = harness.server.manager.machineState("s2");
     expect(finalState?.turn).toBe("completed");

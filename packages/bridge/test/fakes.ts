@@ -169,10 +169,29 @@ export class FakeS3Client {
   }
 }
 
-/** SQS fake: an in-memory FIFO queue preserving enqueue order. */
+/**
+ * SQS fake: an in-memory FIFO queue that models per-group HEAD-OF-LINE BLOCKING.
+ *
+ * Real SQS FIFO guarantees ordered, exactly-once-in-flight delivery PER message
+ * group: once a message in a group has been received (returned by Receive) and
+ * is not yet deleted, SQS will NOT deliver any later message in that SAME group
+ * until the in-flight one is deleted (or its visibility timeout expires).
+ * Delivery across DIFFERENT groups is independent.
+ *
+ * The previous fake ignored this and returned later same-group messages even
+ * while an earlier one was still in-flight, which hid the real permission
+ * deadlock (a launch parked on a permission stayed in-flight, and the
+ * answerPermission that would release it is in the SAME group, so it is
+ * head-of-line blocked and never delivered). Modeling the blocking here is what
+ * lets a test reproduce -- and prove the fix for -- that deadlock.
+ */
 export class FakeSqsClient {
   private messages: { Body: string; ReceiptHandle: string; groupId: string }[] = [];
   private nextHandle = 1;
+  /** Groups with an outstanding (received-but-not-deleted) message. */
+  private readonly inFlightGroups = new Set<string>();
+  /** ReceiptHandle -> groupId for the currently in-flight message of each group. */
+  private readonly inFlightByHandle = new Map<string, string>();
 
   /** Test helper: enqueue a command body with its group id (sessionId). */
   enqueue(body: unknown, groupId: string): void {
@@ -192,7 +211,24 @@ export class FakeSqsClient {
     const name = command.constructor?.name;
     if (name === "ReceiveMessageCommand") {
       const max = command.input.MaxNumberOfMessages ?? 1;
-      const batch = this.messages.slice(0, max);
+      const batch: typeof this.messages = [];
+      // Deliver at most one message per group (FIFO: the next undelivered
+      // message of a group is only eligible when that group has nothing
+      // in-flight), in enqueue order, up to the batch size.
+      const claimedGroups = new Set<string>();
+      for (const m of this.messages) {
+        if (batch.length >= max) {
+          break;
+        }
+        if (this.inFlightGroups.has(m.groupId) || claimedGroups.has(m.groupId)) {
+          // Group is head-of-line blocked (or already contributed this batch).
+          continue;
+        }
+        claimedGroups.add(m.groupId);
+        this.inFlightGroups.add(m.groupId);
+        this.inFlightByHandle.set(m.ReceiptHandle, m.groupId);
+        batch.push(m);
+      }
       return {
         Messages: batch.map((m) => ({
           Body: m.Body,
@@ -202,7 +238,14 @@ export class FakeSqsClient {
       };
     }
     if (name === "DeleteMessageCommand") {
-      this.messages = this.messages.filter((m) => m.ReceiptHandle !== command.input.ReceiptHandle);
+      const handle = command.input.ReceiptHandle;
+      this.messages = this.messages.filter((m) => m.ReceiptHandle !== handle);
+      // Releasing the in-flight message unblocks its group for later messages.
+      const groupId = this.inFlightByHandle.get(handle);
+      if (groupId !== undefined) {
+        this.inFlightByHandle.delete(handle);
+        this.inFlightGroups.delete(groupId);
+      }
       return {};
     }
     throw new Error(`FakeSqsClient: unsupported command ${name}`);

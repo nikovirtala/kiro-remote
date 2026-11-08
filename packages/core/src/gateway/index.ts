@@ -78,8 +78,18 @@ export interface KiroGateway {
   /** Change the active mode. */
   setMode(sessionId: string, modeId: string): Promise<void>;
 
-  /** Answer a pending permission request, matched by requestId/toolCallId. */
-  answerPermission(sessionId: string, requestId: string, answer: PermissionAnswer): Promise<void>;
+  /**
+   * Answer a pending permission request, matched by requestId/toolCallId.
+   * Resolves to true when a held-open request was resolved, false when there
+   * was no pending request (e.g. a bridge restart cleared the in-memory state,
+   * or the requestId is unknown). A false result is a soft signal, NOT an
+   * error: callers treat it as a logged no-op so the answer never hangs/throws.
+   */
+  answerPermission(
+    sessionId: string,
+    requestId: string,
+    answer: PermissionAnswer,
+  ): Promise<boolean>;
 }
 
 export * from "./capabilities.ts";
