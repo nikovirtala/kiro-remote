@@ -161,6 +161,10 @@ export class StdioJsonRpcTransport {
   request<T = unknown>(method: string, params?: unknown): Promise<T> {
     const id = this.nextId++;
     const line = JSON.stringify({ jsonrpc: JSONRPC_VERSION, id, method, params });
+    // Raw-RPC observability: the structured params are passed straight through
+    // the logger so redact() scrubs ksk_/bearer/JWT/OAuth URLs. This reveals
+    // the exact session/new and session/prompt request shapes on live redeploy.
+    this.logger.debug("acp_rpc_request", { id, method, params });
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, {
         resolve: (r) => resolve(r as T),
@@ -172,6 +176,8 @@ export class StdioJsonRpcTransport {
 
   /** Send a JSON-RPC notification (no id, no response expected). */
   notify(method: string, params?: unknown): void {
+    // Raw-RPC observability (redacted by the logger like every other field).
+    this.logger.debug("acp_rpc_notify", { method, params });
     this.write(JSON.stringify({ jsonrpc: JSONRPC_VERSION, method, params }));
   }
 
@@ -243,6 +249,14 @@ export class StdioJsonRpcTransport {
     this.pending.delete(id);
     if (msg.error) {
       const e = msg.error as { code?: number; message?: string; data?: unknown };
+      // Raw-RPC observability: reveals the precise Invalid params error data for
+      // session/prompt. Routed through the logger so `data` is redacted.
+      this.logger.debug("acp_rpc_response_error", {
+        id,
+        code: e.code,
+        message: e.message,
+        data: e.data,
+      });
       pending.reject(
         new JsonRpcResponseError(
           e.code ?? JSONRPC_INTERNAL_ERROR,
@@ -252,6 +266,9 @@ export class StdioJsonRpcTransport {
       );
       return;
     }
+    // Raw-RPC observability: reveals where the real sess_ id lives in the
+    // session/new result. Routed through the logger so `result` is redacted.
+    this.logger.debug("acp_rpc_response", { id, result: msg.result });
     pending.resolve(msg.result);
   }
 
