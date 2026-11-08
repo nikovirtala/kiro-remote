@@ -52,7 +52,7 @@ function textEvent(seq: number, text: string, turnId: string | null = "t1") {
 const P: Principal = { sub: "user-1", clientId: "c", scopes: ["sessions:read"] };
 
 describe("kiro_wait_for_events", () => {
-  it("clamps the underlying long-poll wait to at most 25s", async () => {
+  it("clamps the underlying long-poll wait to the REST API maximum (20s)", async () => {
     let seenWait = -1;
     const client = stubClient({
       events: { events: [], nextCursor: 0, turnStatus: "idle" },
@@ -62,7 +62,7 @@ describe("kiro_wait_for_events", () => {
     });
     await collectEvents(client, P, { sessionId: "s1", after: 0 });
     expect(seenWait).toBe(MAX_WAIT_SECONDS);
-    expect(MAX_WAIT_SECONDS).toBe(25);
+    expect(MAX_WAIT_SECONDS).toBe(20);
   });
 
   it("returns at most 30 events and reports how many were dropped", async () => {

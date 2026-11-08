@@ -213,7 +213,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   {
     name: "kiro_wait_for_events",
     description:
-      "Long-poll a session's event log (at most 25s). Returns at most 30 events and 8000 chars of text, reports truncation, and includes nextCursor, turnStatus, and the pending-permission count so an agent can poll cheaply.",
+      "Long-poll a session's event log (at most 20s). Returns at most 30 events and 8000 chars of text, reports truncation, and includes nextCursor, turnStatus, and the pending-permission count so an agent can poll cheaply.",
     action: "read",
     inputZod: WaitForEventsSchema,
     annotations: { title: "Wait For Events", readOnlyHint: true, openWorldHint: false },

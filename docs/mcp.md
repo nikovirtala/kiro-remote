@@ -115,7 +115,7 @@ Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 
 ### `kiro_wait_for_events` limits
 
-The poller is tuned so an agent can poll cheaply: it waits at most **25 seconds**,
+The poller is tuned so an agent can poll cheaply: it waits at most **20 seconds**,
 returns at most **30 events** and **8000 characters** of text (reporting any
 truncation), and includes `nextCursor`, `turnStatus`, and the pending-permission
 count.

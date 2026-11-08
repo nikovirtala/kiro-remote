@@ -21,8 +21,12 @@ import type { ClientEvent, ClientPermission } from "@nikovirtala/kiro-remote-api
 import type { Principal } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 
-/** Hard cap on how long kiro_wait_for_events blocks. */
-export const MAX_WAIT_SECONDS = 25;
+/**
+ * Hard cap on how long kiro_wait_for_events blocks. Must not exceed the REST
+ * API's `wait` maximum (EventsQuerySchema, 20s, kept under API Gateway's 29s
+ * integration timeout); a larger value makes every HTTP-transport poll a 400.
+ */
+export const MAX_WAIT_SECONDS = 20;
 /** Hard cap on events returned by kiro_wait_for_events. */
 export const MAX_EVENTS = 30;
 /** Hard cap on characters of extracted text returned by kiro_wait_for_events. */
