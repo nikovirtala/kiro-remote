@@ -86,6 +86,14 @@ interface SessionRuntime {
    * dispatch, not on settlement.
    */
   settling: Promise<void> | null;
+  /**
+   * Follow-up turn ids this runtime has already accepted, so a redelivered
+   * `prompt` command (SQS at-least-once) does NOT spawn a second
+   * `chat --cloud --resume-id` turn and, if it lands mid-turn, is NOT
+   * reinterpreted as a steer. A turn id is recorded the moment prompt() accepts
+   * it and never removed (idempotency, not a queue).
+   */
+  issuedTurns: Set<string>;
 }
 
 export interface SessionManagerDeps {
@@ -181,6 +189,7 @@ export class SessionManager {
         permissionStartedAt: new Map(),
         launched: false,
         settling: null,
+        issuedTurns: new Set(),
       };
       this.runtimes.set(id, rt);
     }
@@ -611,6 +620,20 @@ export class SessionManager {
   async prompt(id: string, prompt: string, turnId?: string): Promise<void> {
     const rt = this.runtimeFor(id);
     const tid = turnId ?? ulid();
+
+    // Idempotency: a redelivered `prompt` command (SQS at-least-once, or a
+    // visibility-timeout redelivery) must NOT spawn a second
+    // `chat --cloud --resume-id` turn. When a turn id is supplied (the command
+    // carries one) and we have already accepted it, this is a logged no-op --
+    // never a duplicate resume subprocess and never a mid-turn re-dispatch. A
+    // dedupe is only meaningful with a stable turn id from the command; a bare
+    // prompt with no id is always a fresh turn.
+    if (turnId !== undefined && rt.issuedTurns.has(turnId)) {
+      this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
+      return;
+    }
+    rt.issuedTurns.add(tid);
+
     rt.activeTurnId = tid;
     rt.turnStartedAt = this.now();
     this.applyMachine(rt, { kind: "prompt.sent" });
@@ -642,7 +665,26 @@ export class SessionManager {
       await this.persistTurnResult(rt, result);
       this.applyMachine(rt, { kind: "prompt.response", stopReason: "end_turn" });
     } catch (err) {
-      this.logger.warn("prompt_error", { sessionId: id, error: String(err) });
+      // LOUD FAILURE, mirroring the launch path: a failed follow-up resume must
+      // NOT be dropped on a warn alone (a client polling events would see the
+      // session flip back to idle with no answer and no signal the turn failed).
+      // Emit a failure metric AND persist a client-visible turn.failed event so
+      // GET /v1/sessions/{id}/events surfaces the failure.
+      this.metrics.count("CloudTurnFailed");
+      this.logger.error("cloud_turn_failed", { sessionId: id, error: String(err) });
+      await this.writeEvent(
+        rt,
+        {
+          type: "turn.failed",
+          sessionId: rt.id,
+          turnId: rt.activeTurnId,
+          replay: false,
+          rawType: "turn_failed",
+          failureReason: "error",
+          payload: { source: "chat-cloud", error: String(err) },
+        },
+        this.now(),
+      );
       this.applyMachine(rt, { kind: "prompt.error" });
     } finally {
       if (rt.turnStartedAt !== null) {
@@ -701,12 +743,29 @@ export class SessionManager {
     }
   }
 
-  async steer(id: string, content: string, whenBusy: "steer" | "queue" | "reject"): Promise<void> {
+  async steer(
+    id: string,
+    content: string,
+    whenBusy: "steer" | "queue" | "reject",
+    turnId?: string,
+  ): Promise<void> {
     const rt = this.runtimeFor(id);
+
+    // Idempotency for a redelivered `prompt` command (which routes through
+    // steer): if this turn id was already accepted, it is a logged no-op --
+    // never a duplicate resume turn and never a mid-turn re-dispatch as a steer.
+    // The guard runs BEFORE the busy check so a redelivery that lands mid-turn
+    // is not reinterpreted as a steer. Checked here (not only in prompt()) so it
+    // also covers the just-settled-into-idle case.
+    if (turnId !== undefined && rt.issuedTurns.has(turnId)) {
+      this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
+      return;
+    }
+
     const busy = rt.machine.turn === "running";
     if (!busy) {
       // Idle session: a follow-up is a new prompt (_message/send -> session/prompt).
-      await this.prompt(id, content);
+      await this.prompt(id, content, turnId);
       return;
     }
     if (whenBusy === "reject") {
@@ -717,10 +776,16 @@ export class SessionManager {
       this.applyMachine(rt, { kind: "prompt.queued" });
       this.logger.info("steer_queued", { sessionId: id });
     }
-    // During an active turn, steering keeps the `_session/` prefix. Pass the
-    // single text content block; the gateway wraps it into the array of content
-    // blocks ACP V3 requires (same shape as session/prompt, Bug B).
-    await this.gateway.steer(rt.kiroSessionId ?? id, { type: "text", text: content });
+    // Mid-turn steering is NOT supported on a cloud session. A cloud turn runs
+    // in a detached `chat --cloud --resume-id` subprocess, and ACP cannot drive
+    // a cloud session (session/load+prompt against a real cloud id returns
+    // `Session not found`), so issuing gateway.steer here would silently no-op.
+    // Reject LOUDLY with a clear error instead of firing a doomed ACP request;
+    // the user should wait for the turn to settle, then send a new prompt.
+    this.logger.warn("steer_unsupported_cloud", { sessionId: id });
+    throw new Error(
+      "mid-turn steering is not supported for cloud sessions; wait for the turn to complete, then send a new prompt",
+    );
   }
 
   async cancel(id: string): Promise<void> {
@@ -729,10 +794,17 @@ export class SessionManager {
       this.logger.info("cancel_no_active_turn", { sessionId: id });
       return;
     }
-    this.applyMachine(rt, { kind: "cancel.requested" });
-    // session/cancel then WAIT for the prompt response (the prompt() promise is
-    // what marks the turn settled). We only request cancellation here.
-    await this.gateway.cancel(rt.kiroSessionId ?? id);
+    // Cancellation is NOT supported for a cloud turn. The turn runs in a
+    // detached `chat --cloud` subprocess and ACP cannot drive a cloud session
+    // (session/load+cancel against a real cloud id returns `Session not found`),
+    // so issuing gateway.cancel would silently no-op while the subprocess runs
+    // to completion. Reject LOUDLY rather than firing a doomed ACP request and
+    // DO NOT mutate the machine (a swallowed cancel must not fake a cancelling
+    // state); the turn settles on its own subprocess result.
+    this.logger.warn("cancel_unsupported_cloud", { sessionId: id });
+    throw new Error(
+      "cancellation is not supported for cloud sessions; the in-flight turn will run to completion",
+    );
   }
 
   /* --------------------------------- config -------------------------------- */

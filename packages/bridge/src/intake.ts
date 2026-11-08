@@ -138,8 +138,15 @@ export class CommandIntake {
         });
         return;
       case "prompt":
-        // During an active turn a follow-up is steering; whenBusy honored.
-        await this.manager.steer(command.sessionId, command.prompt, command.whenBusy);
+        // During an active turn a follow-up is steering; whenBusy honored. The
+        // command's turnId is forwarded so a redelivered prompt is deduped (and
+        // not double-run as a second resume turn).
+        await this.manager.steer(
+          command.sessionId,
+          command.prompt,
+          command.whenBusy,
+          command.turnId,
+        );
         return;
       case "steer":
         await this.manager.steer(command.sessionId, command.content, "steer");

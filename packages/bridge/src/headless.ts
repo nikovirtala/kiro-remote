@@ -233,7 +233,10 @@ export async function headlessResume(
   // A resume already knows its cloud id; the `[cloud] session` line may not be
   // re-emitted, so fall back to the resumed id when parsing finds none.
   const parsed = parseCloudOutput(result.stdout);
-  if (result.code !== 0 && result.code !== null) {
+  // Only code === 0 is success. A null exit code (signal-killed, e.g. OOM mid
+  // turn) is a TRUNCATED turn, not a quiet success -- fail loudly so settleResume
+  // surfaces a turn.failed event + metric rather than persisting a partial answer.
+  if (result.code !== 0) {
     logger.warn("headless_resume_failed", {
       exitCode: result.code,
       stdout: result.stdout,
@@ -259,7 +262,12 @@ export async function headlessResume(
  */
 function finishTurn(logger: Logger, result: HeadlessResult, tag: string): HeadlessTurnResult {
   const parsed = parseCloudOutput(result.stdout);
-  const failedExit = result.code !== 0 && result.code !== null;
+  // A clean turn exits 0. Treat BOTH a non-zero exit AND a null exit code
+  // (process killed by a signal with no code -- e.g. OOM/SIGKILL mid-turn) as a
+  // failure: a signal-killed subprocess that happened to have already printed a
+  // `[cloud] session` line produced a TRUNCATED turn, and accepting it would
+  // persist a partial answer as complete. Only code === 0 is success.
+  const failedExit = result.code !== 0;
   if (!parsed.cloudSessionId || failedExit) {
     // Surface the raw (pattern-redacted) child output so the live failure is
     // diagnosable BEFORE we throw.

@@ -410,14 +410,31 @@ chat-only is the only cloud path for now.
   activity as normalized events (so `GET /v1/sessions/{id}/events` returns the
   turn), and drives the session to `idle`.
 - **Loud failure.** If the subprocess emits **no** `[cloud] session` line, or it
-  exits **non-zero**, the bridge drives the session to `failed`, logs
-  `cloud_launch_failed`, and emits the `CloudLaunchFailed` metric. It never
-  leaves a silent/idle session.
+  exits **non-zero** (and a `null` exit code — signal-killed, e.g. OOM mid-turn —
+  counts as a failure, **not** a truncated success), the bridge drives the
+  session to `failed`, logs `cloud_launch_failed`, and emits the
+  `CloudLaunchFailed` metric. It never leaves a silent/idle session.
 - **Follow-up turns.** A `POST /v1/sessions/{id}/turns` on an idle cloud session
   runs `kiro-cli chat --cloud --resume-id <cloudSessionId> --no-interactive
   "<prompt>"` (the CLI help documents `--resume-id <SESSION_ID>`, "Resume a
   specific conversation by session ID"), targeting the **same** cloud id, and
-  persists its output as events the same way.
+  persists its output as events the same way. A follow-up is **idempotent** on
+  its `turnId`: a redelivered `prompt` command (SQS at-least-once) is a logged
+  no-op (`prompt_idempotent_skip`), never a second resume turn and never a
+  mid-turn re-dispatch. A **failed** resume turn is just as loud as a failed
+  launch: it emits the `CloudTurnFailed` metric, logs `cloud_turn_failed`, and
+  persists a client-visible `turn.failed` event before the session returns to
+  `idle` — so a client polling events sees the failure, not a silent missing
+  answer.
+- **Mid-turn steer / cancel are rejected (not silently dropped).** Because a
+  cloud turn runs in a detached `chat --cloud` subprocess and ACP cannot drive a
+  cloud session, there is no way to steer or cancel a cloud turn in flight.
+  Rather than issuing a doomed ACP `_session/steer`/`session/cancel` that the
+  agent silently ignores, the bridge **rejects** a mid-turn steer or a cancel on
+  a cloud session with a clear error (`steer_unsupported_cloud` /
+  `cancel_unsupported_cloud`); the in-flight turn runs to completion, then the
+  caller can send a new prompt. (An idle-session "steer" is still just a new
+  prompt turn, unchanged.)
 - **Delete.** `kiro-cli chat --delete-session <cloudSessionId>` (unchanged).
 
 **Why not ACP?** The ACP child (`kiro-cli acp --agent-engine=v3`) **cannot drive

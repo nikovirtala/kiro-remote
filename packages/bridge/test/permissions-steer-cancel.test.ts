@@ -154,4 +154,173 @@ describe("follow-up turn routing (chat-only cloud)", () => {
     expect(spec.args).toContain(CLOUD_ID);
     expect((await harness.repo.getSession("st"))?.status).toBe("idle");
   });
+
+  test("a failed follow-up resume surfaces a metric + turn.failed event (not a quiet drop)", async () => {
+    // First call (launch) succeeds; the second call (resume) exits non-zero.
+    let call = 0;
+    const runner = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          code: 0,
+          stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
+          stderr: "",
+        };
+      }
+      return { code: 1, stdout: cloudStdout({ cloudSessionId: CLOUD_ID }), stderr: "resume boom" };
+    });
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
+    await harness.server.start();
+    await harness.seedSession("sf");
+
+    await harness.server.intake.dispatch({
+      kind: "launch",
+      sub: "user-sub-1",
+      sessionId: "sf",
+      commandId: "cmd-launch",
+      prompt: "first",
+      repos: ["octo/repo"],
+    } as Command);
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sf"))?.status === "idle",
+    );
+
+    await harness.server.intake.dispatch({
+      kind: "prompt",
+      sub: "user-sub-1",
+      sessionId: "sf",
+      commandId: "cmd-turn-2",
+      turnId: "t-2",
+      prompt: "second",
+      whenBusy: "steer",
+    } as Command);
+    await harness.server.manager.awaitTurnSettled("sf");
+
+    // LOUD: a turn-failure metric fired AND an error log line appeared.
+    expect(harness.metrics.sum("CloudTurnFailed")).toBe(1);
+    expect(harness.logLines.some((l) => l.includes("cloud_turn_failed"))).toBe(true);
+
+    // A client-visible turn.failed event was persisted (not just a status flip).
+    const events = await harness.repo.queryEvents("sf", 0, { limit: 100 });
+    expect(events.map((e) => e.type)).toContain("turn.failed");
+
+    // The session returns to idle (recoverable) rather than hanging in running.
+    expect((await harness.repo.getSession("sf"))?.status).toBe("idle");
+  });
+
+  test("a redelivered follow-up prompt (same turnId) does NOT run a second resume", async () => {
+    const runner = vi.fn(async () => ({
+      code: 0,
+      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
+      stderr: "",
+    }));
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
+    await harness.server.start();
+    await harness.seedSession("sr");
+
+    await harness.server.intake.dispatch({
+      kind: "launch",
+      sub: "user-sub-1",
+      sessionId: "sr",
+      commandId: "cmd-launch",
+      prompt: "first",
+      repos: ["octo/repo"],
+    } as Command);
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sr"))?.status === "idle",
+    );
+
+    const promptCmd = {
+      kind: "prompt",
+      sub: "user-sub-1",
+      sessionId: "sr",
+      commandId: "cmd-turn-2",
+      turnId: "t-2",
+      prompt: "second",
+      whenBusy: "steer",
+    } as Command;
+
+    await harness.server.intake.dispatch(promptCmd);
+    await harness.server.manager.awaitTurnSettled("sr");
+    // Redeliver the IDENTICAL prompt command (SQS at-least-once).
+    await harness.server.intake.dispatch(promptCmd);
+    await harness.server.manager.awaitTurnSettled("sr");
+
+    // Runner fired exactly twice: once for launch, once for the single resume
+    // turn -- the redelivery was a logged no-op, not a second resume.
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(harness.logLines.some((l) => l.includes("prompt_idempotent_skip"))).toBe(true);
+  });
+
+  test("mid-turn steer and cancel on a cloud session reject loudly (no doomed ACP call)", async () => {
+    // A gated runner keeps the follow-up resume turn RUNNING so we can steer/
+    // cancel mid-turn before it settles.
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let call = 0;
+    const runner = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        // Launch completes immediately so the session reaches idle.
+        return {
+          code: 0,
+          stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
+          stderr: "",
+        };
+      }
+      // The resume turn parks on the gate -> the turn stays running.
+      await gate;
+      return {
+        code: 0,
+        stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "late" }),
+        stderr: "",
+      };
+    });
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
+    await harness.server.start();
+    await harness.seedSession("sm");
+
+    await harness.server.intake.dispatch({
+      kind: "launch",
+      sub: "user-sub-1",
+      sessionId: "sm",
+      commandId: "cmd-launch",
+      prompt: "first",
+      repos: ["octo/repo"],
+    } as Command);
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sm"))?.status === "idle",
+    );
+
+    // Start a follow-up turn that parks on the gate -> the turn is RUNNING.
+    await requireHarness(harness).server.manager.prompt("sm", "mid", "t-mid");
+    expect(requireHarness(harness).server.manager.machineState("sm")?.turn).toBe("running");
+
+    // Mid-turn steer rejects loudly rather than issuing a doomed ACP steer.
+    await expect(
+      requireHarness(harness).server.manager.steer("sm", "interrupt", "steer"),
+    ).rejects.toThrow(/not supported for cloud/);
+    // Mid-turn cancel rejects loudly rather than issuing a doomed ACP cancel.
+    await expect(requireHarness(harness).server.manager.cancel("sm")).rejects.toThrow(
+      /not supported for cloud/,
+    );
+
+    // The turn is still running (a swallowed cancel must not fake a state change).
+    expect(requireHarness(harness).server.manager.machineState("sm")?.turn).toBe("running");
+
+    // Let the background resume turn settle so shutdown is clean.
+    release?.();
+    await requireHarness(harness).server.manager.awaitTurnSettled("sm");
+  });
 });

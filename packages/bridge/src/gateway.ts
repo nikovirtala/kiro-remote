@@ -240,6 +240,16 @@ export class AcpGateway implements KiroGateway {
     );
   }
 
+  /**
+   * ACP `session/new` primitive. RETAINED (not called by the cloud flow): the
+   * chat-only cloud path provisions via `kiro-cli chat --cloud`, and `adopt`
+   * reconnects an existing id via `loadSession`, so nothing in the cloud flow
+   * calls this. It is kept because AcpGateway is a general ACP V3 client (not a
+   * cloud-only helper) and its tolerant `extractSessionId` fallback chain is the
+   * surface a future non-cloud ACP caller would use; that extraction is covered
+   * by gateway-session-id.test.ts, which asserts the null/fallback cases that
+   * loadSession's `|| sessionId` default would otherwise mask.
+   */
   async newSession(inputs: SessionInputs): Promise<GatewaySession> {
     const result = await this.transport.request<unknown>("session/new", this.sessionParams(inputs));
     return { sessionId: this.extractSessionId(result) };
@@ -302,6 +312,11 @@ export class AcpGateway implements KiroGateway {
     return { stopReason: result?.stopReason };
   }
 
+  // steer/cancel are the ACP `_session/steer` / `session/cancel` primitives.
+  // RETAINED but NOT used by the cloud flow: a cloud turn runs in a detached
+  // `chat --cloud` subprocess and ACP cannot drive a cloud session, so
+  // SessionManager rejects mid-turn steer/cancel on a cloud session rather than
+  // issuing these. They remain for any non-cloud ACP use of this general client.
   async steer(sessionId: string, content: unknown): Promise<void> {
     // _session/steer keeps its `_session/` prefix in V3 and carries the same
     // array-of-content-blocks prompt shape as session/prompt.

@@ -93,6 +93,36 @@ describe("launch idempotency", () => {
   });
 });
 
+describe("signal-killed launch (code === null) is a failure, not a truncated success", () => {
+  test("a null exit code with a [cloud] line still fails LOUDLY", async () => {
+    // A process killed by a signal reports code === null. Even though it printed
+    // a `[cloud] session <uuid>` line, the turn is TRUNCATED -- it must fail, not
+    // be persisted as a complete turn at idle.
+    const runner = vi.fn(async () => ({
+      code: null,
+      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "partial answer" }),
+      stderr: "Killed",
+    }));
+    harness = await createHarness(
+      { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
+      runner,
+    );
+    await harness.server.start();
+    await harness.seedSession("skill");
+
+    await harness.server.intake.dispatch(launchCmd("skill"));
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("skill"))?.status === "failed",
+    );
+
+    const session = await harness.repo.getSession("skill");
+    expect(session?.status).toBe("failed");
+    expect(harness.metrics.sum("CloudLaunchFailed")).toBe(1);
+    expect(harness.metrics.sum("SessionsLaunched")).toBe(0);
+    expect(harness.logLines.some((l) => l.includes("cloud_launch_failed"))).toBe(true);
+  });
+});
+
 describe("follow-up turns via --resume-id", () => {
   test("a prompt on an idle cloud session resumes the SAME cloud id", async () => {
     const runner = vi.fn(async () => ({
