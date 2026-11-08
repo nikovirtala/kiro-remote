@@ -141,6 +141,9 @@ export class AcpGateway implements KiroGateway {
     };
     surface("_kiro/mcp/status");
     surface("_kiro/error/rate_limit");
+    // _kiro/sessions/changed may carry the REAL cloud session id (Bug A). Surface
+    // it so SessionManager can adopt that id for a launched-but-unmapped session.
+    surface("_kiro/sessions/changed");
 
     this.handlersRegistered = true;
   }
@@ -199,17 +202,52 @@ export class AcpGateway implements KiroGateway {
     return this._capabilities;
   }
 
-  async newSession(inputs: SessionInputs): Promise<GatewaySession> {
-    const result = await this.transport.request<{ sessionId?: string }>(
-      "session/new",
-      this.sessionParams(inputs),
+  /**
+   * Tolerantly extract the cloud session id from a session/new or session/load
+   * result. The exact shape of the real ACP V3 response is NOT observable in
+   * the sandbox (Docker + kiro-cli unavailable), so we read the first non-empty
+   * string id from every plausible location the real agent might use:
+   *   - top-level `result.sessionId`
+   *   - `result.session.sessionId` / `result.session.id`
+   *   - `result._meta.kiro.sessionId` / `result._meta.kiro.id`
+   *   - `result.id`
+   * Returns '' when none is present (NEVER throws) so SessionManager's
+   * session/update-driven late adoption can still recover the real id. FEAT-002's
+   * raw-RPC debug logs reveal the actual shape on the next live redeploy.
+   */
+  private extractSessionId(result: unknown): string {
+    if (!isRecord(result)) {
+      return "";
+    }
+    const firstString = (...vals: unknown[]): string => {
+      for (const v of vals) {
+        if (typeof v === "string" && v.length > 0) {
+          return v;
+        }
+      }
+      return "";
+    };
+    const session = isRecord(result.session) ? result.session : {};
+    const meta = isRecord(result._meta) ? result._meta : {};
+    const kiro = isRecord(meta.kiro) ? meta.kiro : {};
+    return firstString(
+      result.sessionId,
+      session.sessionId,
+      session.id,
+      kiro.sessionId,
+      kiro.id,
+      result.id,
     );
-    return { sessionId: String(result?.sessionId ?? "") };
+  }
+
+  async newSession(inputs: SessionInputs): Promise<GatewaySession> {
+    const result = await this.transport.request<unknown>("session/new", this.sessionParams(inputs));
+    return { sessionId: this.extractSessionId(result) };
   }
 
   async loadSession(sessionId: string, inputs: SessionInputs): Promise<GatewaySession> {
     // Handlers must already be registered (start() does so); re-send inputs.
-    const result = await this.transport.request<{ sessionId?: string }>("session/load", {
+    const result = await this.transport.request<unknown>("session/load", {
       sessionId,
       cwd: inputs.cwd,
       ...(inputs.additionalDirectories
@@ -217,8 +255,9 @@ export class AcpGateway implements KiroGateway {
         : {}),
       mcpServers: inputs.mcpServers ?? [],
     });
-    // Keep the requested id; do not depend on the load response repeating it.
-    return { sessionId: String(result?.sessionId ?? sessionId) };
+    // Honor a nested id if the load response carries one; otherwise fall back to
+    // the requested id (do not depend on the load response repeating it).
+    return { sessionId: this.extractSessionId(result) || sessionId };
   }
 
   private sessionParams(inputs: SessionInputs): Record<string, unknown> {

@@ -45,6 +45,8 @@ export interface ServeConfig {
   additionalDirectories?: string[];
   mcpServers?: unknown[];
   region?: string;
+  /** Bounded wait (ms) for late cloud-id adoption before the first prompt. */
+  cloudIdSettleMs?: number;
 }
 
 export interface ServeDeps {
@@ -174,6 +176,9 @@ export class BridgeServer {
         ? { additionalDirectories: deps.config.additionalDirectories }
         : {}),
       ...(deps.config.mcpServers ? { mcpServers: deps.config.mcpServers } : {}),
+      ...(deps.config.cloudIdSettleMs !== undefined
+        ? { cloudIdSettleMs: deps.config.cloudIdSettleMs }
+        : {}),
       now,
     });
 

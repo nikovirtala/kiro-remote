@@ -38,6 +38,17 @@ interface ScriptedMessage {
 interface Scenario {
   initialize: Record<string, unknown>;
   newSessionId?: string;
+  /**
+   * Bug A reproduction: when true, session/new returns NO sessionId (empty
+   * result) and the agent instead routes all session/update + _kiro/sessions/
+   * changed under `freshCloudId` (a fresh sess_<uuid>), exactly like the live
+   * agent that never echoes the id session/new is keyed on.
+   */
+  emptyNewSessionId?: boolean;
+  /** The fresh cloud id the agent routes updates under when emptyNewSessionId. */
+  freshCloudId?: string;
+  /** Emit a _kiro/sessions/changed notification (carrying the id) on session/new. */
+  emitSessionsChangedOnNew?: boolean;
   onPrompt?: {
     messages?: ScriptedMessage[];
     emitTurnEndBeforeResponse?: boolean;
@@ -124,12 +135,28 @@ rl.on("line", (line) => {
       send({ jsonrpc: "2.0", id, result: scenario.initialize });
       return;
 
-    case "session/new":
+    case "session/new": {
       // Echo the received params so a test can assert what the client sent
       // (cwd/additionalDirectories/mcpServers/_meta.kiro incl. repos).
       process.stderr.write(`${JSON.stringify({ fakeAgentNewSessionParams: params })}\n`);
+      if (scenario.emptyNewSessionId) {
+        // Bug A: the live agent does NOT return a usable id on session/new. It
+        // picks a fresh cloud id and routes everything under it. Our control
+        // plane must adopt that id from the first update / sessions/changed.
+        lastSessionId = scenario.freshCloudId ?? "sess_fresh-cloud-1";
+        send({ jsonrpc: "2.0", id, result: {} });
+        if (scenario.emitSessionsChangedOnNew) {
+          send({
+            jsonrpc: "2.0",
+            method: "_kiro/sessions/changed",
+            params: { sessions: [{ sessionId: lastSessionId }] },
+          });
+        }
+        return;
+      }
       send({ jsonrpc: "2.0", id, result: { sessionId: lastSessionId } });
       return;
+    }
 
     case "session/load":
       lastSessionId = String(params.sessionId ?? lastSessionId);
@@ -142,7 +169,12 @@ rl.on("line", (line) => {
 
     case "session/prompt": {
       process.stderr.write(`${JSON.stringify({ fakeAgentPromptCalled: true })}\n`);
-      const sid = String(params.sessionId ?? lastSessionId);
+      // Bug A: the live agent always routes updates under its OWN fresh cloud id,
+      // not the id the client prompted with. When reproducing that, ignore the
+      // incoming sessionId and use the fresh id so adoption must happen.
+      const sid = scenario.emptyNewSessionId
+        ? lastSessionId
+        : String(params.sessionId ?? lastSessionId);
       const onPrompt = scenario.onPrompt ?? {};
       if (onPrompt.messages) {
         emitScripted(onPrompt.messages, sid);

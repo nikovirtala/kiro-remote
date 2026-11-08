@@ -44,6 +44,20 @@ interface SessionRuntime {
   deduper: ReplayDeduper;
   inputs: SessionInputs;
   kiroSessionId: string | null;
+  /**
+   * True while this runtime launched via the ACP path but session/new did NOT
+   * return a usable cloud id, so we are waiting for the FIRST session/update
+   * (or _kiro/sessions/changed) to reveal the real sess_ id (Bug A). Cleared
+   * once a real id is adopted. The headless path and adopt() know the id up
+   * front, so this stays false for them.
+   */
+  awaitingCloudId: boolean;
+  /**
+   * Resolves once the real cloud id has been adopted (used by launch() to settle
+   * the id with a bounded wait before sending the first prompt). Null when not
+   * awaiting.
+   */
+  cloudIdResolve: (() => void) | null;
   /** The in-flight turn id, or null. */
   activeTurnId: string | null;
   /** Timing for metrics. */
@@ -67,6 +81,12 @@ export interface SessionManagerDeps {
   /** MCP server definitions (V3 does NOT persist these; re-sent on load). */
   mcpServers?: unknown[];
   now?: () => number;
+  /**
+   * Bounded wait (ms) for the real cloud id to be adopted before the first
+   * prompt when session/new returned no id (Bug A). Defaults to a few seconds;
+   * tests shrink it to keep the suite fast.
+   */
+  cloudIdSettleMs?: number;
 }
 
 function stateOf(item: SessionMetaItem): MachineState {
@@ -92,6 +112,7 @@ export class SessionManager {
   private readonly additionalDirectories?: string[];
   private readonly mcpServers: unknown[];
   private readonly now: () => number;
+  private readonly cloudIdSettleMs: number;
 
   private readonly runtimes = new Map<string, SessionRuntime>();
   /** Maps the cloud (Kiro) session id back to our session id for update routing. */
@@ -115,6 +136,7 @@ export class SessionManager {
     this.additionalDirectories = deps.additionalDirectories;
     this.mcpServers = deps.mcpServers ?? [];
     this.now = deps.now ?? (() => Date.now());
+    this.cloudIdSettleMs = deps.cloudIdSettleMs ?? SessionManager.CLOUD_ID_SETTLE_MS;
   }
 
   capabilities(): Capabilities {
@@ -140,6 +162,8 @@ export class SessionManager {
         deduper: new ReplayDeduper(),
         inputs: this.inputsFor(),
         kiroSessionId: null,
+        awaitingCloudId: false,
+        cloudIdResolve: null,
         activeTurnId: null,
         turnStartedAt: null,
         firstEventAt: null,
@@ -180,10 +204,51 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Late-binding adoption (Bug A): the live agent routes session/update and
+   * _kiro/sessions/changed under a FRESH cloud id (e.g. sess_f0140707-...) that
+   * session/new never returned. When an id arrives with no kiroToLocal mapping,
+   * attach it to the single runtime that launched via ACP and is still awaiting
+   * its real id. Only adopts when UNAMBIGUOUS (exactly one pending ACP runtime);
+   * otherwise returns null so the caller logs update_for_unknown_session.
+   * Returns the bound runtime (and persists the real kiroSessionId) on success.
+   */
+  private async adoptCloudId(kiroSessionId: string): Promise<SessionRuntime | null> {
+    if (!kiroSessionId || this.kiroToLocal.has(kiroSessionId)) {
+      return null;
+    }
+    const pending = [...this.runtimes.values()].filter((rt) => rt.awaitingCloudId);
+    if (pending.length !== 1) {
+      return null;
+    }
+    const rt = pending[0];
+    if (!rt) {
+      return null;
+    }
+    this.kiroToLocal.set(kiroSessionId, rt.id);
+    rt.kiroSessionId = kiroSessionId;
+    rt.awaitingCloudId = false;
+    this.logger.info("cloud_session_id_adopted", { sessionId: rt.id, kiroSessionId });
+    // Persist the now-known real id so reconnect/load keys on it too.
+    await this.persistSessionStatus(rt);
+    // Release launch()'s bounded settling wait so the first prompt uses the id.
+    if (rt.cloudIdResolve) {
+      const resolve = rt.cloudIdResolve;
+      rt.cloudIdResolve = null;
+      resolve();
+    }
+    return rt;
+  }
+
   /** Called by the gateway hook when a session/update arrives. */
   async handleUpdate(kiroSessionId: string, update: unknown): Promise<void> {
     const localId = this.kiroToLocal.get(kiroSessionId) ?? kiroSessionId;
-    const rt = this.runtimes.get(localId);
+    let rt = this.runtimes.get(localId);
+    if (!rt) {
+      // No mapping yet: try to adopt this as the real cloud id for a launched
+      // ACP session that is still awaiting one.
+      rt = (await this.adoptCloudId(kiroSessionId)) ?? undefined;
+    }
     if (!rt) {
       this.logger.debug("update_for_unknown_session", { kiroSessionId });
       return;
@@ -195,12 +260,43 @@ export class SessionManager {
     await this.persistEvent(rt, ev);
   }
 
+  /**
+   * Defensively read the cloud session id out of an agent notification's params.
+   * _kiro/sessions/changed may expose the id as a top-level `sessionId` or inside
+   * a `sessions` array as `sessionId` / `id`. The exact field is not observable
+   * in-sandbox; FEAT-002's live logs confirm it on redeploy.
+   */
+  private sessionIdFromNotification(params: unknown): string {
+    const p = (params ?? {}) as {
+      sessionId?: unknown;
+      sessions?: Array<{ sessionId?: unknown; id?: unknown }>;
+    };
+    if (typeof p.sessionId === "string" && p.sessionId.length > 0) {
+      return p.sessionId;
+    }
+    if (Array.isArray(p.sessions)) {
+      for (const s of p.sessions) {
+        if (s && typeof s.sessionId === "string" && s.sessionId.length > 0) {
+          return s.sessionId;
+        }
+        if (s && typeof s.id === "string" && s.id.length > 0) {
+          return s.id;
+        }
+      }
+    }
+    return "";
+  }
+
   /** Called by the gateway hook when an agent notification we surface arrives. */
   async handleAgentNotification(method: string, params: unknown): Promise<void> {
-    const p = (params ?? {}) as { sessionId?: string };
-    const kiroSessionId = typeof p.sessionId === "string" ? p.sessionId : "";
+    const kiroSessionId = this.sessionIdFromNotification(params);
     const localId = this.kiroToLocal.get(kiroSessionId) ?? kiroSessionId;
-    const rt = this.runtimes.get(localId);
+    let rt = this.runtimes.get(localId);
+    if (!rt && kiroSessionId) {
+      // _kiro/sessions/changed may carry the real cloud id for a launched-but-
+      // unmapped ACP session: adopt it (benign; never fails the session).
+      rt = (await this.adoptCloudId(kiroSessionId)) ?? undefined;
+    }
     const ev = normalizeRequest(localId, method, params, {
       turnId: rt?.activeTurnId ?? null,
       hooks: { onUnmapped: () => this.metrics.count("RawEventsUnmapped") },
@@ -331,6 +427,7 @@ export class SessionManager {
 
     let path: LaunchPath;
     let kiroSessionId: string;
+    rt.inputs = inputs;
     if (hasCloudTarget) {
       path = "acp";
       // The cloud execution target learns its repos from session/new inputs
@@ -338,6 +435,18 @@ export class SessionManager {
       // passes the same repos via the --repo flag.
       const session = await this.gateway.newSession(inputs);
       kiroSessionId = session.sessionId;
+      if (kiroSessionId) {
+        // session/new returned a usable id: map it directly (today's behavior).
+        rt.kiroSessionId = kiroSessionId;
+        rt.awaitingCloudId = false;
+        this.kiroToLocal.set(kiroSessionId, id);
+      } else {
+        // Bug A: session/new did NOT return a usable id. The real sess_ id only
+        // arrives via the first session/update (or _kiro/sessions/changed). Mark
+        // this runtime as awaiting it; do NOT put a bogus '' key in kiroToLocal.
+        rt.kiroSessionId = null;
+        rt.awaitingCloudId = true;
+      }
     } else {
       // No cloud execution target advertised: headless stream-json fallback,
       // then session/load so all later interaction is over ACP.
@@ -347,21 +456,22 @@ export class SessionManager {
         repos: args.repos,
       });
       await this.gateway.loadSession(kiroSessionId, inputs);
+      rt.kiroSessionId = kiroSessionId;
+      rt.awaitingCloudId = false;
+      this.kiroToLocal.set(kiroSessionId, id);
     }
-
-    rt.kiroSessionId = kiroSessionId;
-    rt.inputs = inputs;
-    this.kiroToLocal.set(kiroSessionId, id);
 
     // Provisioned -> idle.
     this.applyMachine(rt, { kind: "provisioned" });
 
-    // Record which path into META + emit metrics.
+    // Record which path into META + emit metrics. persistSessionStatus/
+    // updateSession only write kiroSessionId when it is a real (truthy) value,
+    // so an awaiting-id runtime does not persist a bogus id here.
     const item = await this.repo.getSession(id);
     if (item) {
       await this.repo.updateSession(id, item.version, {
         status: rt.machine.session,
-        kiroSessionId,
+        ...(rt.kiroSessionId ? { kiroSessionId: rt.kiroSessionId } : {}),
         model: args.model ?? item.model,
         mode: args.mode ?? item.mode,
         effort: args.effort ?? item.effort,
@@ -371,10 +481,60 @@ export class SessionManager {
     this.metrics.count("LaunchPath", 1, { path });
     this.logger.info("session_launched", { sessionId: id, path });
 
+    // If we are still awaiting the real cloud id, give the first session/update
+    // (or _kiro/sessions/changed) a brief, BOUNDED window to adopt it before the
+    // first prompt goes out -- the live timeline shows session_launched then the
+    // prompt ~50ms later, so the prompt could otherwise race ahead with the wrong
+    // id. We NEVER hang the launch: after the timeout we fall back to whatever id
+    // is known (the returned id or, failing that, the local id) and proceed.
+    if (rt.awaitingCloudId) {
+      await this.settleCloudId(rt);
+    }
+
     // The launch command carries the first prompt; send it now (idle -> running).
     await this.prompt(id, args.prompt);
 
-    return { path, kiroSessionId };
+    return { path, kiroSessionId: rt.kiroSessionId ?? kiroSessionId };
+  }
+
+  /** Default bounded wait (ms) for the real cloud id to be adopted post-launch. */
+  private static readonly CLOUD_ID_SETTLE_MS = 3000;
+
+  /**
+   * Wait (bounded) for the real cloud id to be adopted via the first
+   * session/update or _kiro/sessions/changed. Resolves as soon as adoption fires
+   * (adoptCloudId invokes rt.cloudIdResolve) or after a conservative timeout --
+   * it never hangs the launch indefinitely. If the id already arrived before we
+   * got here, awaitingCloudId is already false and we return immediately.
+   */
+  private async settleCloudId(rt: SessionRuntime): Promise<void> {
+    if (!rt.awaitingCloudId) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        clearTimeout(timer);
+        rt.cloudIdResolve = null;
+        resolve();
+      };
+      rt.cloudIdResolve = finish;
+      const timer = setTimeout(() => {
+        // The real id did not arrive via sessions/changed in time. We stop
+        // BLOCKING the launch and let prompt() fall back to the local id, but we
+        // keep awaitingCloudId = true so the FIRST session/update (which the
+        // prompt itself triggers) can still adopt the real id. FEAT-002's live
+        // logs reveal the real shape so this path can be tightened on redeploy.
+        if (rt.awaitingCloudId) {
+          this.logger.warn("cloud_session_id_settle_timeout", { sessionId: rt.id });
+        }
+        finish();
+      }, this.cloudIdSettleMs);
+    });
   }
 
   /**
@@ -434,6 +594,9 @@ export class SessionManager {
       if (rt.turnStartedAt !== null) {
         this.metrics.duration("TurnDuration", this.now() - rt.turnStartedAt);
       }
+      // Drain in-flight updates so any late cloud-id adoption (Bug A) has landed
+      // on the runtime before the final status write persists kiroSessionId.
+      await this.drainUpdates();
       // Flush any coalesced chunks for the completed turn.
       for (const ev of rt.coalescer.flushAll()) {
         await this.writeEvent(rt, ev, this.now());

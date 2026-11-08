@@ -78,6 +78,89 @@ describe("launch -> prompt -> turn settle", () => {
     expect(launchPath?.dimensions?.path).toBe("acp");
   });
 
+  test("adopts a fresh cloud id when session/new returns no id (Bug A)", async () => {
+    const freshCloudId = "sess_f0140707-5ace-4779-a290-fc9fc3773dca";
+    harness = await createHarness({
+      // session/new returns NO id; the agent routes under this fresh sess_ id and
+      // announces it via _kiro/sessions/changed, exactly like the live agent.
+      emptyNewSessionId: true,
+      freshCloudId,
+      emitSessionsChangedOnNew: true,
+      initialize: initResult(),
+      onPrompt: {
+        messages: [
+          {
+            kind: "notify",
+            method: "session/update",
+            params: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "hi" },
+            },
+          },
+        ],
+        response: { stopReason: "end_turn" },
+      },
+    });
+    await harness.server.start();
+    await harness.seedSession("sfresh");
+
+    await harness.server.intake.dispatch(launchCmd("sfresh"));
+
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("sfresh"))?.status === "idle",
+    );
+    const session = await harness.repo.getSession("sfresh");
+    expect(session?.status).toBe("idle");
+    // kiroToLocal adopted the fresh sess_ id and it was persisted.
+    expect(session?.kiroSessionId).toBe(freshCloudId);
+
+    // Events reached the DynamoDB log (routing worked after adoption).
+    const events = await harness.repo.queryEvents("sfresh", 0, { limit: 100 });
+    expect(events.length).toBeGreaterThan(0);
+    expect(harness.metrics.sum("EventsWritten")).toBeGreaterThan(0);
+
+    // No unknown-session complaint remains for the adopted id.
+    const unknown = harness.logLines.filter(
+      (l) => l.includes("update_for_unknown_session") && l.includes(freshCloudId),
+    );
+    expect(unknown).toEqual([]);
+  });
+
+  test("adopts a fresh cloud id from the first session/update alone (Bug A)", async () => {
+    const freshCloudId = "sess_update-only-cloud-id";
+    harness = await createHarness({
+      // No _kiro/sessions/changed: adoption must happen off the first update.
+      emptyNewSessionId: true,
+      freshCloudId,
+      initialize: initResult(),
+      onPrompt: {
+        messages: [
+          {
+            kind: "notify",
+            method: "session/update",
+            params: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "hi" },
+            },
+          },
+        ],
+        response: { stopReason: "end_turn" },
+      },
+    });
+    await harness.server.start();
+    await harness.seedSession("supd");
+
+    await harness.server.intake.dispatch(launchCmd("supd"));
+
+    await waitFor(
+      async () => (await requireHarness(harness).repo.getSession("supd"))?.status === "idle",
+    );
+    const session = await harness.repo.getSession("supd");
+    expect(session?.kiroSessionId).toBe(freshCloudId);
+    const events = await harness.repo.queryEvents("supd", 0, { limit: 100 });
+    expect(events.length).toBeGreaterThan(0);
+  });
+
   test("a turn_end session_info_update does NOT settle the turn", async () => {
     harness = await createHarness({
       newSessionId: "cloud-2",

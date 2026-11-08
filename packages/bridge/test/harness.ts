@@ -59,6 +59,8 @@ export async function createHarness(scenario: unknown): Promise<Harness> {
       additionalDirectories: ["/workspace/shared"],
       mcpServers: [{ name: "example", command: "x" }],
       region: "us-east-1",
+      // Keep the Bug A late-adoption settling short so tests stay fast.
+      cloudIdSettleMs: 200,
     },
     ddb: docClient,
     // biome-ignore lint/suspicious/noExplicitAny: injecting fake S3/SQS clients.
