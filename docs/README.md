@@ -11,7 +11,8 @@ single CDK stack (`KiroRemoteStack`) into your own AWS account. It exposes:
   `<host>/mcp`),
 
 both backed by an ECS Fargate **bridge** that runs `kiro-cli` to launch and drive
-Kiro cloud sessions.
+Kiro cloud sessions, provisioned and driven via `kiro-cli chat --cloud` (see
+[deploy.md](./deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only)).
 
 ## What to do next
 
@@ -50,8 +51,10 @@ MCP. The OAuth token is what _you_ present to the API.
 ## Regions
 
 The stack region comes from the standard CDK environment variables
-(`CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`). Note that Kiro cloud sandboxes
-always run in `us-east-1` regardless of the region your stack is deployed to.
+(`CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`). Kiro cloud sandboxes are
+provisioned by Kiro cloud ([app.kiro.dev](https://app.kiro.dev)), not by your
+stack, so their region is managed by Kiro and is independent of where your stack is
+deployed.
 
 ## Toolchain
 

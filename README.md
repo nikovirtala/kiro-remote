@@ -16,7 +16,12 @@ or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
 - **MCP server** (`packages/mcp`) exposed two ways: a stdio transport via the
   `kiro-remote` CLI, and a Streamable HTTP transport mounted at `<host>/mcp`.
 - **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs
-  `kiro-cli` over the Agent Client Protocol.
+  `kiro-cli` to launch and drive Kiro cloud sessions: it provisions each cloud
+  session (a Space in app.kiro.dev) and runs every turn via
+  `kiro-cli chat --cloud`, while negotiating capabilities over the Agent Client
+  Protocol. See the
+  [chat-only cloud path](./docs/deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only)
+  for detail.
 - **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS,
   Cognito, the Fargate bridge, and the API (with native stage throttling).
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a

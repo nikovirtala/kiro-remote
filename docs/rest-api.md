@@ -62,16 +62,17 @@ delete needs `sessions:delete`. A session is visible only to its creator's sub.
 
 ## Unauthenticated discovery / facade endpoints (host root, not under `/v1`)
 
-| Method | Path                                        | Purpose                                                     |
-| ------ | ------------------------------------------- | ----------------------------------------------------------- |
-| GET    | `/.well-known/oauth-protected-resource/mcp` | RFC 9728 Protected Resource Metadata.                       |
-| GET    | `/.well-known/oauth-authorization-server`   | RFC 8414 Authorization Server metadata.                     |
-| GET    | `/oauth/authorize`                          | Start the authorization-code flow.                          |
-| GET    | `/oauth/callback`                           | OAuth redirect callback.                                    |
-| POST   | `/oauth/token`                              | Exchange a code (or refresh) for tokens.                    |
-| POST   | `/oauth/revoke`                             | Revoke a refresh token.                                     |
-| GET    | `/oauth/clients/cli.json`                   | The CLI's CIMD client metadata document.                    |
-| GET    | `/openapi.json`                             | The OpenAPI 3.1 contract (OAuth2 authorizationCode scheme). |
+| Method | Path                                        | Purpose                                                                                            |
+| ------ | ------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| GET    | `/.well-known/oauth-protected-resource/mcp` | RFC 9728 Protected Resource Metadata.                                                              |
+| GET    | `/.well-known/oauth-authorization-server`   | RFC 8414 Authorization Server metadata.                                                            |
+| GET    | `/oauth/authorize`                          | Start the authorization-code flow.                                                                 |
+| GET    | `/oauth/callback`                           | OAuth redirect callback.                                                                           |
+| POST   | `/oauth/register`                           | RFC 7591 Dynamic Client Registration (public PKCE client; returns an `mcp_` client_id, no secret). |
+| POST   | `/oauth/token`                              | Exchange a code (or refresh) for tokens.                                                           |
+| POST   | `/oauth/revoke`                             | Revoke a refresh token.                                                                            |
+| GET    | `/oauth/clients/cli.json`                   | The CLI's CIMD client metadata document.                                                           |
+| GET    | `/openapi.json`                             | The OpenAPI 3.1 contract (OAuth2 authorizationCode scheme).                                        |
 
 The Streamable HTTP **MCP server** is mounted at `/mcp` and is a protected
 resource (it requires the same bearer). See [mcp.md](./mcp.md).

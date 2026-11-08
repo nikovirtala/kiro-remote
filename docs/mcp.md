@@ -91,6 +91,28 @@ is a protected resource: it requires `Authorization: Bearer <token>` (the same
 Cognito access token as the REST API) and advertises its OAuth requirements via the
 `/.well-known/oauth-protected-resource/mcp` document.
 
+### Authenticating a remote MCP client
+
+A remote MCP client (for example a Claude custom connector) authenticates through
+the facade's OAuth before it can call `<host>/mcp`. It can obtain a `client_id`
+three ways:
+
+- **Dynamic Client Registration (RFC 7591)** — an unauthenticated
+  `POST /oauth/register` that returns an opaque public `client_id` (prefix `mcp_`,
+  no client secret, `token_endpoint_auth_method: "none"`). This is what a client's
+  "Register automatically" option uses; the RFC 8414 authorization-server metadata
+  advertises it as the `registration_endpoint` (`<host>/oauth/register`).
+- **A CIMD URL `client_id`** — a client-id-metadata-document URL whose host is
+  allow-listed via the construct's `cimdAllowedHosts`. The metadata advertises
+  `client_id_metadata_document_supported: true`.
+- **The pre-registered CLI client** — the CIMD document at
+  `<host>/oauth/clients/cli.json` that `kiro-remote login` uses.
+
+Regardless of which `client_id` is used, and regardless of what scope the client
+requests, the token the client receives always carries the MCP resource scopes
+(`openid` plus `sessions:read` / `sessions:write` / `sessions:delete`), because the
+facade forwards the resource scopes to Cognito.
+
 ## The 14 tools
 
 Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
