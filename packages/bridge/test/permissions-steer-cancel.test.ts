@@ -151,6 +151,12 @@ describe("follow-up turn routing (chat-only cloud)", () => {
     const spec = runner.mock.calls[1][0] as { args: string[] };
     expect(spec.args).toContain("--resume-id");
     expect(spec.args).toContain(CLOUD_ID);
+    // A cloud resume must pass ONLY --resume-id: kiro-cli rejects --cloud/--repo
+    // combined with --resume/--resume-id ("start a new cloud session and cannot
+    // be combined with --resume"). Pin the regression so a revert to the
+    // --cloud resume argv fails here.
+    expect(spec.args).not.toContain("--cloud");
+    expect(spec.args).not.toContain("--repo");
     expect((await harness.repo.getSession("st"))?.status).toBe("idle");
   });
 

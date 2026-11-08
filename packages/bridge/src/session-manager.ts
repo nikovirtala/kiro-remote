@@ -10,7 +10,8 @@
  *  - PROVISION and DRIVE cloud sessions entirely through `kiro-cli chat
  *    --cloud` subprocesses (chat-only == cloud-only, for now): launch runs
  *    `chat --cloud --repo ... --no-interactive "<prompt>"` and follow-up turns
- *    run `chat --cloud --resume-id <id> --no-interactive "<prompt>"`. ACP cannot
+ *    run `chat --resume-id <id> --no-interactive "<prompt>"` (NO --cloud/--repo
+ *    on resume -- kiro-cli rejects those combined with --resume-id). ACP cannot
  *    drive a cloud session (session/load+prompt against a real cloud id returns
  *    `Session not found`), so the cloud path never uses gateway.newSession/
  *    prompt;
@@ -124,7 +125,7 @@ interface SessionRuntime {
   /**
    * Follow-up turn ids this runtime has already accepted, so a redelivered
    * `prompt` command (SQS at-least-once) does NOT spawn a second
-   * `chat --cloud --resume-id` turn and, if it lands mid-turn, is NOT
+   * `chat --resume-id` turn and, if it lands mid-turn, is NOT
    * reinterpreted as a steer. A turn id is recorded the moment prompt() accepts
    * it and never removed (idempotency, not a queue).
    */
@@ -705,7 +706,7 @@ export class SessionManager {
 
     // Idempotency: a redelivered `prompt` command (SQS at-least-once, or a
     // visibility-timeout redelivery) must NOT spawn a second
-    // `chat --cloud --resume-id` turn. When a turn id is supplied (the command
+    // `chat --resume-id` turn. When a turn id is supplied (the command
     // carries one) and we have already accepted it, this is a logged no-op --
     // never a duplicate resume subprocess and never a mid-turn re-dispatch. A
     // dedupe is only meaningful with a stable turn id from the command; a bare
@@ -722,8 +723,9 @@ export class SessionManager {
     await this.persistSessionStatus(rt);
 
     // A follow-up turn on a cloud session is driven by a NEW `kiro-cli chat
-    // --cloud --resume-id <cloudSessionId> --no-interactive "<prompt>"`
-    // subprocess -- ACP CANNOT drive a cloud session (session/load+prompt
+    // --resume-id <cloudSessionId> --no-interactive "<prompt>"` subprocess
+    // (NO --cloud/--repo on resume) -- ACP CANNOT drive a cloud session
+    // (session/load+prompt
     // against a real cloud id returns `Session not found`), so the gateway
     // prompt path is never used for cloud. Run the subprocess as BACKGROUND work
     // (tracked on rt.settling), exactly like the launch turn, so intake acks the
@@ -870,7 +872,7 @@ export class SessionManager {
       );
     }
     // Mid-turn steering is NOT supported on a cloud session. A cloud turn runs
-    // in a detached `chat --cloud --resume-id` subprocess, and ACP cannot drive
+    // in a detached `chat --resume-id` subprocess, and ACP cannot drive
     // a cloud session (session/load+prompt against a real cloud id returns
     // `Session not found`), so issuing gateway.steer here would silently no-op.
     // Reject LOUDLY (sentinel error -> intake logs + persists a client-visible

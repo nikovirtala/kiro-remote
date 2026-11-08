@@ -12,7 +12,10 @@
  *  - launch (first turn):
  *    `kiro-cli chat --cloud --repo <r> [--repo <r2> ...] --no-interactive "<prompt>"`
  *  - follow-up turn (resume):
- *    `kiro-cli chat --cloud --resume-id <cloudSessionId> --no-interactive "<prompt>"`
+ *    `kiro-cli chat --resume-id <cloudSessionId> --no-interactive "<prompt>"`
+ *    (NO --cloud/--repo: kiro-cli rejects --cloud/--repo combined with
+ *    --resume-id -- those start a NEW cloud session -- so to continue an
+ *    existing cloud session we pass ONLY --resume-id <id>)
  *  - delete: `kiro-cli chat --delete-session <kiroSessionId>`.
  *
  * The real `--cloud` output is PLAIN TEXT (there is no JSON/stream-json output
@@ -228,11 +231,14 @@ export async function headlessLaunch(
 
 /**
  * Run a follow-up turn against an existing cloud session via
- * `kiro-cli chat --cloud --resume-id <cloudSessionId> --no-interactive
- * "<prompt>"`. The CLI help documents `--resume-id <SESSION_ID>` ("Resume a
- * specific conversation by session ID"), which composes with --cloud. Returns
- * the parsed assistant/tool output (the cloud id is the one we resumed). Throws
- * LOUDLY on non-zero exit.
+ * `kiro-cli chat --resume-id <cloudSessionId> --no-interactive "<prompt>"`.
+ * The CLI help documents `--resume-id <SESSION_ID>` ("Resume a specific
+ * conversation by session ID"). We pass ONLY --resume-id (NO --cloud/--repo):
+ * kiro-cli rejects --cloud/--repo combined with --resume-id ("--cloud/--repo
+ * start a new cloud session and cannot be combined with --resume/--resume-id;
+ * to continue a cloud session pass only --resume-id <id>"). Returns the parsed
+ * assistant/tool output (the cloud id is the one we resumed). Throws LOUDLY on
+ * non-zero exit.
  */
 export async function headlessResume(
   runner: HeadlessRunner,
@@ -242,7 +248,7 @@ export async function headlessResume(
 ): Promise<HeadlessTurnResult> {
   const result = await runner({
     command: KIRO_CLI,
-    args: ["chat", "--cloud", "--resume-id", cloudSessionId, "--no-interactive", prompt],
+    args: ["chat", "--resume-id", cloudSessionId, "--no-interactive", prompt],
   });
   // A resume already knows its cloud id; the `[cloud] session` line (on STDERR)
   // may not be re-emitted, so fall back to the resumed id when parsing finds

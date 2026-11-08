@@ -192,18 +192,22 @@ describe("follow-up turns via --resume-id", () => {
     });
     await harness.server.manager.awaitTurnSettled("res");
 
-    // The follow-up invoked chat --cloud --resume-id <same cloud id>.
+    // The follow-up invoked chat --resume-id <same cloud id>, with NO
+    // --cloud/--repo: kiro-cli rejects --cloud/--repo combined with
+    // --resume-id ("start a new cloud session and cannot be combined with
+    // --resume"). To continue a cloud session we pass ONLY --resume-id.
     expect(runner).toHaveBeenCalledTimes(2);
     const spec = runner.mock.calls[1][0] as { command: string; args: string[] };
     expect(spec.command).toBe("kiro-cli");
     expect(spec.args).toEqual([
       "chat",
-      "--cloud",
       "--resume-id",
       CLOUD_ID,
       "--no-interactive",
       "and now this",
     ]);
+    expect(spec.args).not.toContain("--cloud");
+    expect(spec.args).not.toContain("--repo");
 
     // The session returned to idle after the follow-up turn.
     expect((await harness.repo.getSession("res"))?.status).toBe("idle");
