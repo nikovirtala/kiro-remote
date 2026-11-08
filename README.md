@@ -1,31 +1,18 @@
-# kiro-remote
+# Kiro Remote
 
-A personal AWS control plane (CDK) that wraps `kiro-cli` to launch and drive Kiro
-cloud sessions through a REST API and an MCP server.
+Have you ever wanted to command your hosted coding agent from the Claude chat conversation without changing the tool to Claude Code for instance? — If yes, then read on!
 
-You deploy it once into your own AWS account. After that you (and the MCP clients
-you authorize) can launch repo-scoped Kiro cloud sessions, send prompts, stream
-events, answer permission prompts, and manage sessions, either over the REST API
-or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
+Kiro Remote is a personal AWS control plane that wraps `kiro-cli` to launch and drive [Kiro Web](https://kiro.dev/web/) agentic coding sessions through an MCP server and a REST API.
 
-## What's in the box
+You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, stream events, answer permission prompts, and manage sessions, either over the REST API or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
 
-- **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`,
-  with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at
-  `/openapi.json`.
-- **MCP server** (`packages/mcp`) exposed two ways: a stdio transport via the
-  `kiro-remote` CLI, and a Streamable HTTP transport mounted at `<host>/mcp`.
-- **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs
-  `kiro-cli` to launch and drive Kiro cloud sessions: it provisions each cloud
-  session (a Space in app.kiro.dev) and runs every turn via
-  `kiro-cli chat --cloud`, while negotiating capabilities over the Agent Client
-  Protocol. See the
-  [chat-only cloud path](./docs/deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only)
-  for detail.
-- **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS,
-  Cognito, the Fargate bridge, and the API (with native stage throttling).
-- **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a
-  live end-to-end harness (`e2e`).
+## What's in the box?
+
+- **MCP server** (`packages/mcp`) exposed in two ways: a Streamable HTTP transport mounted at `<host>/mcp` and a stdio transport via the `kiro-remote` CLI.
+- **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`,with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at `/openapi.json`.
+- **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs `kiro-cli` to launch and drive Kiro Web sessions: it provisions each cloud session and runs every turn via `kiro-cli chat --cloud`, while negotiating capabilities over the Agent Client Protocol. See the [chat-only cloud path](./docs/deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only) for detail.
+- **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS,Cognito, the Fargate bridge, and the API (with native stage throttling).
+- **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a live end-to-end harness (`e2e`).
 
 ## Documentation
 
@@ -40,18 +27,11 @@ Operator and user guides live under [`docs/`](./docs/):
 
 ## Getting help
 
-For bugs, questions, and feature requests, open a
-[GitHub issue](https://github.com/nikovirtala/kiro-remote/issues). For anything
-not suited to a public issue, email the maintainer at
-[niko.virtala@hey.com](mailto:niko.virtala@hey.com). Security-sensitive reports
-should go there privately rather than to a public issue; see
-[SECURITY.md](./SECURITY.md).
+For bugs, questions, and feature requests, open a [GitHub issue](https://github.com/nikovirtala/kiro-remote/issues). For anything not suited to a public issue, email the maintainer at [niko.virtala@hey.com](mailto:niko.virtala@hey.com). Security-sensitive reports should go there privately rather than to a public issue; see [SECURITY.md](./SECURITY.md).
 
 ## Toolchain
 
-Node 26.13.0 and pnpm 12.18.0, pinned in [`.mise.toml`](./.mise.toml). TypeScript
-runs directly via Node's native type stripping (no compile step). See
-[`docs/deploy.md`](./docs/deploy.md) for the exact setup commands.
+Node 26.13.0 and pnpm 12.18.0, pinned in [`.mise.toml`](./.mise.toml). TypeScript runs directly via Node's native type stripping (no compile step). See [`docs/deploy.md`](./docs/deploy.md) for the exact setup commands.
 
 ## License
 
