@@ -423,7 +423,10 @@ export class SessionManager {
     // logged success so the message is still deleted and the FIFO group unblocks.
     if (await this.launchAlreadyIssued(id, rt)) {
       this.logger.info("launch_idempotent_skip", { sessionId: id });
-      return { path: "acp", kiroSessionId: rt.kiroSessionId ?? "" };
+      // Fall back to the local id when the real cloud id has not been adopted
+      // yet (awaiting-cloud-id runtime), matching the non-skip return's
+      // `rt.kiroSessionId ?? <local id>` shape rather than returning "".
+      return { path: "acp", kiroSessionId: rt.kiroSessionId ?? id };
     }
     // Mark launched up front so a redelivery that arrives WHILE this launch is
     // still issuing session/new is also deduped (the in-memory runtime is the
@@ -709,6 +712,41 @@ export class SessionManager {
     const rt = this.runtimes.get(id);
     while (rt?.settling) {
       await rt.settling;
+    }
+  }
+
+  /**
+   * Await every runtime's in-flight background settlement (rt.settling) up to a
+   * BOUNDED timeout, then return regardless. Called on SIGTERM shutdown so a
+   * turn that is actively settling (prompt response has/will arrive, draining
+   * and persisting the final status) gets a chance to finish persisting before
+   * the transport is stopped -- the SQS message was already deleted on dispatch,
+   * so there is no redelivery to re-drive it.
+   *
+   * The timeout is a hard cap and MUST always win if settlement does not: a turn
+   * parked on an UNANSWERED permission never settles on its own (recovery there
+   * relies on reconnect/replay after restart), so this must never hang shutdown.
+   */
+  async awaitAllSettled(timeoutMs: number): Promise<void> {
+    const settling = [...this.runtimes.values()]
+      .map((rt) => rt.settling)
+      .filter((p): p is Promise<void> => p !== null);
+    if (settling.length === 0) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    try {
+      // Promise.all over the settling promises cannot reject (settleTurn never
+      // throws), but race against the timer so an unsettleable (parked) turn
+      // does not hang shutdown.
+      await Promise.race([Promise.all(settling).then(() => undefined), timeout]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
     }
   }
 

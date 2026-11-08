@@ -284,6 +284,109 @@ describe("launch idempotency (FEAT-002)", () => {
   });
 });
 
+describe("shutdown awaits in-flight settlement (FEAT-002 hardening)", () => {
+  test("shutdown waits for an actively-settling turn to finish persisting", async () => {
+    harness = await createHarness({
+      newSessionId: "cloud-drain",
+      initialize: initResult(),
+      onPrompt: {
+        messages: [
+          {
+            kind: "notify",
+            method: "session/update",
+            params: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "working" },
+            },
+          },
+        ],
+        // The prompt response resolves after a short delay, so at the moment we
+        // call shutdown() the turn is still settling in the background. Because
+        // the SQS message was already deleted on dispatch, a bounded drain is
+        // the only thing that lets this turn finish persisting.
+        promptDelayMs: 80,
+        response: { stopReason: "end_turn" },
+      },
+      // Comfortably longer than promptDelayMs so the drain does not cut it off.
+      shutdownDrainMs: 2000,
+    });
+    await harness.server.start();
+    await harness.seedSession("drain");
+
+    // Dispatch the launch through the real intake loop so it acks on dispatch.
+    harness.sqs.enqueue(launchCmd("drain"), "drain");
+    await harness.server.intake.pollOnce();
+    await waitFor(() => requireHarness(harness).sqs.remaining() === 0);
+
+    // The turn is still in-flight (settling): the message was acked but the
+    // prompt response has not resolved yet.
+    expect(harness.server.manager.runtime("drain")?.settling).not.toBeNull();
+    expect(harness.server.manager.machineState("drain")?.turn).toBe("running");
+
+    // shutdown() must await the in-flight settlement (bounded), not drop it.
+    const h = harness;
+    await h.server.shutdown();
+    harness = null; // shutdown already ran; skip afterEach double-stop.
+
+    // The turn actually settled rather than being dropped: machine completed,
+    // session idle, events persisted.
+    expect(h.server.manager.machineState("drain")?.turn).toBe("completed");
+    expect((await h.repo.getSession("drain"))?.status).toBe("idle");
+    const events = await h.repo.queryEvents("drain", 0, { limit: 100 });
+    expect(events.length).toBeGreaterThan(0);
+  });
+
+  test("shutdown does NOT hang when a turn is parked on an unanswered permission", async () => {
+    harness = await createHarness({
+      newSessionId: "cloud-parked",
+      initialize: initResult(),
+      // The agent holds the prompt response open until a permission reply that
+      // never arrives, so the turn stays parked forever -- the bounded-timeout
+      // path must return rather than wait indefinitely.
+      waitForPermissionReply: true,
+      onPrompt: {
+        messages: [
+          {
+            kind: "request",
+            method: "session/request_permission",
+            params: SHELL_PERMISSION_PARAMS,
+          },
+        ],
+        response: { stopReason: "end_turn" },
+      },
+      // A short drain bound keeps the test fast; the parked turn outlives it.
+      shutdownDrainMs: 150,
+    });
+    await harness.server.start();
+    await harness.seedSession("parked");
+
+    harness.sqs.enqueue(launchCmd("parked"), "parked");
+    await harness.server.intake.pollOnce();
+    await waitFor(() => requireHarness(harness).sqs.remaining() === 0);
+    await waitFor(() => requireHarness(harness).server.gateway.pendingPermissions.has("perm-1"));
+
+    // The turn is parked (never answered) so its settling promise will not
+    // resolve. The bounded drain must return on its timeout rather than wait
+    // indefinitely -- measure the drain directly (isolated from the fixed child
+    // transport-stop overhead that the full shutdown also incurs).
+    const h = harness;
+    expect(h.server.manager.runtime("parked")?.settling).not.toBeNull();
+    const started = Date.now();
+    await h.server.manager.awaitAllSettled(150);
+    const elapsed = Date.now() - started;
+    // Returned bounded (~150ms + slack), proving it capped the wait on the
+    // unsettleable parked turn rather than hanging.
+    expect(elapsed).toBeLessThan(1000);
+    // The parked turn is STILL unsettled: the drain did not fabricate a
+    // settlement, it only bounded the wait.
+    expect(h.server.manager.runtime("parked")?.settling).not.toBeNull();
+
+    // And the full shutdown also completes without hanging.
+    await h.server.shutdown();
+    harness = null; // shutdown already ran; skip afterEach double-stop.
+  });
+});
+
 describe("lost permission soft-fail (FEAT-002)", () => {
   test("answerPermission for an unknown requestId is a clean logged no-op", async () => {
     harness = await createHarness({

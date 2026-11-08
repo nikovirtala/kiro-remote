@@ -47,6 +47,13 @@ export interface ServeConfig {
   region?: string;
   /** Bounded wait (ms) for late cloud-id adoption before the first prompt. */
   cloudIdSettleMs?: number;
+  /**
+   * Bounded wait (ms) on SIGTERM shutdown for in-flight background turn
+   * settlement to finish persisting before the transport is stopped. A hard cap
+   * -- a turn parked on an unanswered permission never settles, so this must not
+   * hang. Defaults to {@link BridgeServer.SHUTDOWN_DRAIN_MS}; tests shrink it.
+   */
+  shutdownDrainMs?: number;
 }
 
 export interface ServeDeps {
@@ -256,7 +263,17 @@ export class BridgeServer {
     void this.intake.run();
   }
 
-  /** SIGTERM drain: stop intake, flush in-flight writes, stop the child. */
+  /**
+   * Default bounded wait (ms) on shutdown for in-flight turn settlement. The
+   * ack now happens on dispatch (the SQS message is deleted before the turn
+   * settles in the background), so a turn that is actively settling at SIGTERM
+   * would otherwise be dropped with no redelivery to re-drive it. A couple of
+   * seconds gives an in-flight settle time to persist; it is a HARD cap so a
+   * turn parked on an unanswered permission never hangs shutdown.
+   */
+  static readonly SHUTDOWN_DRAIN_MS = 2000;
+
+  /** SIGTERM drain: stop intake, await in-flight settlement (bounded), stop the child. */
   async shutdown(): Promise<void> {
     if (this.shuttingDown) {
       return;
@@ -264,8 +281,14 @@ export class BridgeServer {
     this.shuttingDown = true;
     this.logger.info("bridge_shutdown_begin");
     this.intake.stop();
-    // Give in-flight dispatches a moment to persist their writes.
-    await new Promise((r) => setTimeout(r, 50));
+    // Await any outstanding background turn settlement up to a bounded timeout
+    // so an in-flight turn gets a chance to finish persisting before we stop the
+    // transport. Bounded: a turn parked on an unanswered permission will not
+    // settle on its own (it relies on reconnect/replay after restart), so the
+    // timeout caps the wait rather than hanging shutdown.
+    await this.manager.awaitAllSettled(
+      this.config.shutdownDrainMs ?? BridgeServer.SHUTDOWN_DRAIN_MS,
+    );
     await this.transport.stop("SIGTERM");
     this.logger.info("bridge_shutdown_done");
   }
