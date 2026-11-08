@@ -435,6 +435,31 @@ chat-only is the only cloud path for now.
   `cancel_unsupported_cloud`); the in-flight turn runs to completion, then the
   caller can send a new prompt. (An idle-session "steer" is still just a new
   prompt turn, unchanged.)
+
+  The rejection is a **permanent** condition, so it is handled as a _loud but
+  terminal_ command: `SessionManager` throws an `UnsupportedCloudOperationError`
+  and the SQS intake catches that sentinel, logs `command_unsupported_cloud`,
+  persists a client-visible `turn.failed` rejection event
+  (`rawType: "operation_rejected"`, with the rejected `operation` in the
+  payload), and then **deletes** the command message. This is deliberate: the
+  command queue is a DLQ-less FIFO keyed by `MessageGroupId = sessionId`, so if
+  the message were left for redelivery (the policy for a genuine _transient_
+  dispatch failure) it would redeliver every visibility timeout **and**
+  head-of-line-block every later command for that session (next prompt,
+  answerPermission, even delete) until the turn happened to settle. Deleting the
+  message keeps the FIFO group moving while a polling client still sees _why_ the
+  steer/cancel did nothing via `GET /v1/sessions/{id}/events`. Genuine transient
+  failures (e.g. an un-advertised `setConfig`) still throw a plain error and are
+  left for redelivery.
+- **`whenBusy=queue` is rejected the same way (for now).** A busy `prompt` with
+  `whenBusy=queue` cannot be honored on the cloud path either: there is no
+  queue-drain mechanism, and a cloud turn runs in a detached subprocess the
+  bridge cannot interleave with, so a "queued" turn would never actually run.
+  Rather than tell the caller the turn is `queued` and then never drain it, the
+  bridge rejects it the same visible, non-state-mutating way as a mid-turn steer
+  (`steer_queue_unsupported_cloud` + the same deleted-message + rejection-event
+  contract). Draining queued turns after the active one settles is a possible
+  future enhancement.
 - **Delete.** `kiro-cli chat --delete-session <cloudSessionId>` (unchanged).
 
 **Why not ACP?** The ACP child (`kiro-cli acp --agent-engine=v3`) **cannot drive

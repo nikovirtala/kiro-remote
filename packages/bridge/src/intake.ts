@@ -19,7 +19,7 @@ import {
 } from "@aws-sdk/client-sqs";
 import type { Command } from "@nikovirtala/kiro-remote-core";
 import type { Logger } from "./logger.ts";
-import type { SessionManager } from "./session-manager.ts";
+import { type SessionManager, UnsupportedCloudOperationError } from "./session-manager.ts";
 
 export interface IntakeDeps {
   sqs: SQSClient;
@@ -110,7 +110,41 @@ export class CommandIntake {
       await this.dispatch(command);
       await this.deleteMessage(message);
     } catch (err) {
-      // Leave the message for redelivery (visibility timeout) on failure.
+      if (err instanceof UnsupportedCloudOperationError) {
+        // PERMANENT rejection (mid-turn steer/cancel, or a queued follow-up with
+        // no drain) -- NOT a transient dispatch failure. Redelivering would
+        // reject identically forever while the turn runs, and on the DLQ-less
+        // FIFO command queue (MessageGroupId = sessionId, no redrive) an
+        // undeleted message head-of-line-blocks the session's ENTIRE command
+        // stream (next prompt, answerPermission, even delete) and loops every
+        // visibility timeout. So keep the rejection LOUD to the user -- a warn
+        // log AND a client-visible rejection event on GET /v1/sessions/{id}/
+        // events -- but DELETE the message so the FIFO group keeps moving.
+        this.logger.warn("command_unsupported_cloud", {
+          kind: command.kind,
+          sessionId: command.sessionId,
+          operation: err.operation,
+          error: err.message,
+        });
+        try {
+          await this.manager.recordUnsupportedRejection(
+            command.sessionId,
+            err.operation,
+            err.message,
+          );
+        } catch (persistErr) {
+          // Persisting the client-visible event is best-effort; never let it
+          // turn a permanent rejection back into a redelivery loop.
+          this.logger.warn("command_rejection_persist_error", {
+            sessionId: command.sessionId,
+            error: String(persistErr),
+          });
+        }
+        await this.deleteMessage(message);
+        return;
+      }
+      // Genuine TRANSIENT failure: leave the message for redelivery (visibility
+      // timeout) so it can succeed on a retry.
       this.logger.error("command_dispatch_error", {
         kind: command.kind,
         sessionId: command.sessionId,

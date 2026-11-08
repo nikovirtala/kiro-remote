@@ -54,6 +54,41 @@ import type { Metrics } from "./metrics.ts";
  */
 export type LaunchPath = "headless" | "adopt";
 
+/**
+ * A PERMANENT "this operation cannot be honored for a cloud session" rejection.
+ *
+ * A cloud turn runs in a detached `chat --cloud` subprocess that ACP cannot
+ * drive, so a mid-turn steer/cancel (and a `whenBusy=queue` follow-up, which has
+ * no drain mechanism) genuinely cannot be honored. This is NOT a transient
+ * dispatch failure: redelivering the same command will reject identically every
+ * time. {@link CommandIntake} recognizes this sentinel and treats it as
+ * "log + persist a client-visible rejection + DELETE the message" rather than
+ * leaving the message for SQS redelivery (which on the DLQ-less FIFO command
+ * queue would head-of-line-block the session's entire command stream and loop
+ * ~every visibility timeout until the turn happens to settle). Genuine transient
+ * failures throw a plain Error and keep the redelivery semantics.
+ */
+export class UnsupportedCloudOperationError extends Error {
+  /** The command kind that was rejected (for the client-visible event). */
+  readonly operation: string;
+  constructor(operation: string, message: string) {
+    super(message);
+    this.name = "UnsupportedCloudOperationError";
+    this.operation = operation;
+  }
+}
+
+/**
+ * Cap on {@link SessionRuntime.issuedTurns}. The set exists only for follow-up
+ * idempotency (dedupe a redelivered `prompt` command by turn id); a redelivery
+ * is only possible within the SQS retention window, so retaining the most
+ * recent ids is sufficient. Bounding the set keeps a long-lived session with
+ * many turns from growing it without limit (it is otherwise freed only on
+ * session delete). FIFO eviction of the oldest id is safe: an id old enough to
+ * be evicted is far past any plausible redelivery.
+ */
+const MAX_ISSUED_TURNS = 512;
+
 /** Per-session runtime state held in the bridge (not the durable store). */
 interface SessionRuntime {
   id: string;
@@ -554,6 +589,53 @@ export class SessionManager {
   }
 
   /**
+   * Record a follow-up turn id for idempotency, evicting the oldest id once the
+   * set reaches {@link MAX_ISSUED_TURNS} so it never grows without bound over a
+   * long-lived session. A Set preserves insertion order, so the first key is the
+   * oldest.
+   */
+  private recordIssuedTurn(rt: SessionRuntime, turnId: string): void {
+    rt.issuedTurns.add(turnId);
+    while (rt.issuedTurns.size > MAX_ISSUED_TURNS) {
+      const oldest = rt.issuedTurns.values().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      rt.issuedTurns.delete(oldest);
+    }
+  }
+
+  /**
+   * Persist a client-visible rejection for an operation that cannot be honored
+   * for a cloud session (mid-turn steer/cancel, or a queued follow-up with no
+   * drain). This runs OFF the command-dispatch error path (intake calls it after
+   * catching an {@link UnsupportedCloudOperationError}) so a polling client sees,
+   * via GET /v1/sessions/{id}/events, WHY the steer/cancel/queue did nothing
+   * instead of silence -- WITHOUT turning the SQS message into a redelivery loop.
+   * It does NOT mutate the state machine (the in-flight turn keeps running and
+   * settles on its own subprocess result).
+   */
+  async recordUnsupportedRejection(id: string, operation: string, reason: string): Promise<void> {
+    const rt = this.runtimes.get(id);
+    if (!rt) {
+      return;
+    }
+    await this.writeEvent(
+      rt,
+      {
+        type: "turn.failed",
+        sessionId: rt.id,
+        turnId: rt.activeTurnId,
+        replay: false,
+        rawType: "operation_rejected",
+        failureReason: "generic",
+        payload: { source: "chat-cloud", operation, reason },
+      },
+      this.now(),
+    );
+  }
+
+  /**
    * Decide whether a launch for this session has ALREADY been issued, so a
    * redelivery is a no-op. True when either the in-memory runtime has already
    * launched (still-present case) OR the durable session row is past
@@ -632,7 +714,7 @@ export class SessionManager {
       this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
       return;
     }
-    rt.issuedTurns.add(tid);
+    this.recordIssuedTurn(rt, tid);
 
     rt.activeTurnId = tid;
     rt.turnStartedAt = this.now();
@@ -773,17 +855,31 @@ export class SessionManager {
       return;
     }
     if (whenBusy === "queue") {
-      this.applyMachine(rt, { kind: "prompt.queued" });
-      this.logger.info("steer_queued", { sessionId: id });
+      // `whenBusy=queue` is NOT drainable on the cloud path. There is no
+      // queue-drain mechanism, and a cloud turn runs in a detached subprocess
+      // we cannot interleave with, so a "queued" follow-up would never actually
+      // run. Reject it the SAME visible, non-state-mutating way as a mid-turn
+      // steer (for now): do NOT apply `prompt.queued` (telling the client the
+      // turn is queued when it will never drain is worse than a clean
+      // rejection). The user should wait for the active turn to settle, then
+      // send a new prompt.
+      this.logger.warn("steer_queue_unsupported_cloud", { sessionId: id });
+      throw new UnsupportedCloudOperationError(
+        "queue",
+        "queuing a follow-up turn is not supported for cloud sessions; wait for the active turn to complete, then send a new prompt",
+      );
     }
     // Mid-turn steering is NOT supported on a cloud session. A cloud turn runs
     // in a detached `chat --cloud --resume-id` subprocess, and ACP cannot drive
     // a cloud session (session/load+prompt against a real cloud id returns
     // `Session not found`), so issuing gateway.steer here would silently no-op.
-    // Reject LOUDLY with a clear error instead of firing a doomed ACP request;
-    // the user should wait for the turn to settle, then send a new prompt.
+    // Reject LOUDLY (sentinel error -> intake logs + persists a client-visible
+    // rejection event + DELETES the message) instead of firing a doomed ACP
+    // request OR looping the command through SQS redelivery; the user should
+    // wait for the turn to settle, then send a new prompt.
     this.logger.warn("steer_unsupported_cloud", { sessionId: id });
-    throw new Error(
+    throw new UnsupportedCloudOperationError(
+      "steer",
       "mid-turn steering is not supported for cloud sessions; wait for the turn to complete, then send a new prompt",
     );
   }
@@ -802,7 +898,8 @@ export class SessionManager {
     // DO NOT mutate the machine (a swallowed cancel must not fake a cancelling
     // state); the turn settles on its own subprocess result.
     this.logger.warn("cancel_unsupported_cloud", { sessionId: id });
-    throw new Error(
+    throw new UnsupportedCloudOperationError(
+      "cancel",
       "cancellation is not supported for cloud sessions; the in-flight turn will run to completion",
     );
   }
