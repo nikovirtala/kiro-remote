@@ -76,3 +76,12 @@ packages/mcp       the `kiro-remote` CLI and the MCP tools/transports
 packages/cdk       the CDK app and KiroRemoteStack
 e2e                a live end-to-end harness (needs a deployed stack)
 ```
+
+## Getting help
+
+For bugs, questions, and feature requests, open a
+[GitHub issue](https://github.com/nikovirtala/kiro-remote/issues). For anything
+not suited to a public issue, email the maintainer at
+[niko.virtala@hey.com](mailto:niko.virtala@hey.com). See the root README's
+[Getting help](../README.md#getting-help) section and, for security-sensitive
+reports, [SECURITY.md](../SECURITY.md).
