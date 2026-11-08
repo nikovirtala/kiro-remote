@@ -40,6 +40,7 @@ export class ReplayDeduper {
     return true;
   }
 
+  /** Forget all seen keys (e.g. when a new replay window opens). */
   reset(): void {
     this.seen.clear();
   }
