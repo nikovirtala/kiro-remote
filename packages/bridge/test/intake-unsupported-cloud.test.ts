@@ -25,7 +25,7 @@
 import type { Command } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { HeadlessResult } from "../src/headless.ts";
-import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+import { cloudStreams, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -59,15 +59,13 @@ function launchThenGatedResume(): {
     if (call === 1) {
       return {
         code: 0,
-        stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
-        stderr: "",
+        ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
       };
     }
     await gate;
     return {
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "late" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "late" }),
     };
   });
   return { runner, release: () => resolveFn?.(), callCount: () => runner.mock.calls.length };

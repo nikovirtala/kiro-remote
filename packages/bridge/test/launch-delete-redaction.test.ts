@@ -8,9 +8,9 @@
 
 import type { Command } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { parseCloudSessionId } from "../src/headless.ts";
+import { parseCloudOutput, parseCloudSessionId } from "../src/headless.ts";
 import { createLogger } from "../src/logger.ts";
-import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+import { cloudStreams, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -35,9 +35,17 @@ function launchCmd(sessionId: string, commandId = "cmd-launch"): Command {
 
 const CLOUD_ID = "08047063-f7b4-4ce5-b79a-2aea9a7a1d29";
 
-describe("parseCloudSessionId (plain-text [cloud] session line)", () => {
+// A BARE UUID cloud id (no `sess_` prefix), exactly the shape the real
+// app.kiro.dev Space URL uses, e.g. 0719d335-adab-4df9-99f9-9699e9cc84a4.
+const BARE_UUID = "0719d335-adab-4df9-99f9-9699e9cc84a4";
+
+describe("parseCloudSessionId (plain-text [cloud] session line on STDERR)", () => {
   test("reads the uuid from a `[cloud] session <uuid>` line", () => {
     expect(parseCloudSessionId(`[cloud] session ${CLOUD_ID}`)).toBe(CLOUD_ID);
+  });
+
+  test("captures a BARE UUID (no sess_ prefix) like the real Space id", () => {
+    expect(parseCloudSessionId(`[cloud] session ${BARE_UUID}`)).toBe(BARE_UUID);
   });
 
   test("tolerates a surrounding log prefix and extra whitespace", () => {
@@ -47,12 +55,12 @@ describe("parseCloudSessionId (plain-text [cloud] session line)", () => {
   });
 
   test("returns the id from the FIRST matching line when interleaved with logs", () => {
-    const out = cloudStdout({
+    const { stderr } = cloudStreams({
       cloudSessionId: CLOUD_ID,
       tools: [{ title: "fs_read", status: "Completed" }],
       assistant: "hello",
     });
-    expect(parseCloudSessionId(out)).toBe(CLOUD_ID);
+    expect(parseCloudSessionId(stderr)).toBe(CLOUD_ID);
   });
 
   test("returns null when there is no `[cloud] session` line", () => {
@@ -61,12 +69,42 @@ describe("parseCloudSessionId (plain-text [cloud] session line)", () => {
   });
 });
 
+describe("parseCloudOutput (cloud id + tools from STDERR, assistant from STDOUT)", () => {
+  test("reads the cloud id from STDERR while STDOUT holds only assistant prose", () => {
+    // Production shape: the `[cloud] session` + `[tool]` lines are on STDERR;
+    // the assistant answer (no bracketed lines) is on STDOUT.
+    const stderr = [
+      "[INFO] starting cloud session",
+      `[cloud] session ${BARE_UUID}`,
+      "[tool] fs_read /workspace/README.md",
+      "[tool] status: Completed",
+      "[sandbox] done",
+    ].join("\n");
+    const stdout = "## repository summary\nThis is the assistant answer prose.";
+
+    const parsed = parseCloudOutput(stdout, stderr);
+    // Bare UUID from STDERR is captured.
+    expect(parsed.cloudSessionId).toBe(BARE_UUID);
+    // Tools come from STDERR.
+    expect(parsed.tools).toEqual([
+      { id: "1", title: "fs_read /workspace/README.md", status: "Completed" },
+    ]);
+    // Assistant text comes from STDOUT.
+    expect(parsed.assistantText).toBe("## repository summary\nThis is the assistant answer prose.");
+  });
+
+  test("returns a null cloud id (loud-failure trigger) when STDERR has no `[cloud]` line", () => {
+    const parsed = parseCloudOutput("just the assistant answer\n", "[INFO] no cloud line\n");
+    expect(parsed.cloudSessionId).toBeNull();
+    expect(parsed.assistantText).toBe("just the assistant answer");
+  });
+});
+
 describe("launch idempotency", () => {
   test("a redelivered launch invokes the headless runner exactly once", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "done" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "done" }),
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
@@ -98,11 +136,10 @@ describe("signal-killed launch (code === null) is a failure, not a truncated suc
     // A process killed by a signal reports code === null. Even though it printed
     // a `[cloud] session <uuid>` line, the turn is TRUNCATED -- it must fail, not
     // be persisted as a complete turn at idle.
-    const runner = vi.fn(async () => ({
-      code: null,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "partial answer" }),
-      stderr: "Killed",
-    }));
+    const runner = vi.fn(async () => {
+      const streams = cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "partial answer" });
+      return { code: null, stdout: streams.stdout, stderr: `${streams.stderr}Killed\n` };
+    });
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
       runner,
@@ -127,8 +164,7 @@ describe("follow-up turns via --resume-id", () => {
   test("a prompt on an idle cloud session resumes the SAME cloud id", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },

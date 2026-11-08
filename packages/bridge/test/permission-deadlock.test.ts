@@ -18,7 +18,7 @@
 import type { Command } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { HeadlessResult } from "../src/headless.ts";
-import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+import { cloudStreams, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -61,8 +61,7 @@ function gatedRunner(): {
     await gate;
     return {
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "done" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "done" }),
     };
   });
   return {
@@ -164,8 +163,7 @@ describe("launch idempotency (FEAT-002)", () => {
   test("a redelivered launch does not spawn a second chat --cloud / second Space", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "hi" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "hi" }),
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },

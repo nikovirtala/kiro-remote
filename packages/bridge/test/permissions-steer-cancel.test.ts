@@ -18,7 +18,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { AcpGateway } from "../src/gateway.ts";
 import { createLogger } from "../src/logger.ts";
 import type { StdioJsonRpcTransport } from "../src/transport.ts";
-import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+import { cloudStreams, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult, SHELL_PERMISSION_PARAMS } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -115,8 +115,7 @@ describe("follow-up turn routing (chat-only cloud)", () => {
   test("a prompt on an idle cloud session resumes via chat --cloud --resume-id", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
@@ -163,11 +162,11 @@ describe("follow-up turn routing (chat-only cloud)", () => {
       if (call === 1) {
         return {
           code: 0,
-          stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
-          stderr: "",
+          ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
         };
       }
-      return { code: 1, stdout: cloudStdout({ cloudSessionId: CLOUD_ID }), stderr: "resume boom" };
+      const streams = cloudStreams({ cloudSessionId: CLOUD_ID });
+      return { code: 1, stdout: streams.stdout, stderr: `${streams.stderr}resume boom\n` };
     });
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
@@ -214,8 +213,7 @@ describe("follow-up turn routing (chat-only cloud)", () => {
   test("a redelivered follow-up prompt (same turnId) does NOT run a second resume", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
-      stderr: "",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
@@ -272,16 +270,14 @@ describe("follow-up turn routing (chat-only cloud)", () => {
         // Launch completes immediately so the session reaches idle.
         return {
           code: 0,
-          stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
-          stderr: "",
+          ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "ok" }),
         };
       }
       // The resume turn parks on the gate -> the turn stays running.
       await gate;
       return {
         code: 0,
-        stdout: cloudStdout({ cloudSessionId: CLOUD_ID, assistant: "late" }),
-        stderr: "",
+        ...cloudStreams({ cloudSessionId: CLOUD_ID, assistant: "late" }),
       };
     });
     harness = await createHarness(

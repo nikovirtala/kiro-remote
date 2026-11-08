@@ -15,12 +15,15 @@
  *    `kiro-cli chat --cloud --resume-id <cloudSessionId> --no-interactive "<prompt>"`
  *  - delete: `kiro-cli chat --delete-session <kiroSessionId>`.
  *
- * The real `--cloud` stdout is PLAIN TEXT (there is no JSON/stream-json output
- * mode for --cloud): interleaved `[INFO] ...`, `[cloud] session <uuid>`,
- * `[tool] ...`, `[tool] status: Completed`, `[sandbox] ...` log lines, then the
- * assistant's free-text answer. We parse the cloud session id out of the
- * `[cloud] session <uuid>` line and the assistant text + tool activity out of
- * the remaining lines.
+ * The real `--cloud` output is PLAIN TEXT (there is no JSON/stream-json output
+ * mode for --cloud) and is SPLIT ACROSS TWO STREAMS:
+ *  - STDERR carries the log-prefixed lines: `[INFO] ...`, `[cloud] session
+ *    <uuid>`, `[tool] ...`, `[tool] status: Completed`, `[sandbox] ...`.
+ *  - STDOUT carries ONLY the assistant's free-text answer (the prose), with no
+ *    bracketed/log-prefixed lines.
+ * So we parse the cloud session id + tool activity out of STDERR (where the
+ * `[cloud] session <uuid>`/`[tool]` lines live) and the assistant text out of
+ * STDOUT.
  *
  * The runner is injectable so tests supply a fake without a real binary.
  */
@@ -75,15 +78,17 @@ const KIRO_CLI = "kiro-cli";
 const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
 
 /**
- * Parse the cloud session id out of plain-text `--cloud` stdout. The real
- * output carries a line like `[cloud] session 08047063-f7b4-4ce5-...`; scan for
- * the first line whose (whitespace/log-prefix-tolerant) content matches the
- * `[cloud] session ` marker and capture the following token as the id. Returns
- * the first match or null (pure + unit-testable). There is NO stream-json for
+ * Parse the cloud session id out of the plain-text `--cloud` log stream
+ * (STDERR). The real output carries a line like `[cloud] session
+ * 08047063-f7b4-4ce5-...`; scan for the first line whose
+ * (whitespace/log-prefix-tolerant) content matches the `[cloud] session `
+ * marker and capture the following token as the id. The id may be a BARE UUID
+ * (no `sess_` prefix), e.g. `0719d335-adab-4df9-99f9-9699e9cc84a4`. Returns the
+ * first match or null (pure + unit-testable). There is NO stream-json for
  * --cloud, so we never JSON.parse here.
  */
-export function parseCloudSessionId(stdout: string): string | null {
-  for (const line of stdout.split("\n")) {
+export function parseCloudSessionId(stderr: string): string | null {
+  for (const line of stderr.split("\n")) {
     // Tolerate a surrounding log prefix/timestamp before the `[cloud]` marker.
     const marker = line.indexOf("[cloud]");
     if (marker < 0) {
@@ -137,42 +142,51 @@ function hasSystemPrefix(trimmed: string): boolean {
 }
 
 /**
- * Map the plain-text `--cloud` stdout into a structured result: the cloud
- * session id, the ordered tool activity, and the assistant's trailing free-text
- * answer. `[tool] status: <s>` lines update the status of the most recent
- * `[tool] <title>` line; any line without a known system prefix is treated as
- * assistant text. Pure + unit-testable.
+ * Map the plain-text `--cloud` output into a structured result, reading from
+ * the correct stream for each field. The real `chat --cloud` output is split:
+ * STDERR carries the `[cloud] session <uuid>`/`[tool]`/`[INFO]`/`[sandbox]` log
+ * lines, and STDOUT carries only the assistant's free-text answer. So:
+ *  - the cloud session id + ordered tool activity come from STDERR (`[tool]
+ *    status: <s>` lines update the status of the most recent `[tool] <title>`
+ *    line);
+ *  - the assistant answer is every non-empty, non-system-prefixed line of
+ *    STDOUT (in practice all of stdout, which has no bracketed lines).
+ * Pure + unit-testable.
  */
-export function parseCloudOutput(stdout: string): ParsedCloudOutput {
+export function parseCloudOutput(stdout: string, stderr: string): ParsedCloudOutput {
   const tools: ParsedTool[] = [];
+  // Tool activity lives on STDERR alongside the other log-prefixed lines.
+  for (const line of stderr.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || !trimmed.startsWith("[tool]")) {
+      continue;
+    }
+    const body = trimmed.slice("[tool]".length).trim();
+    const statusMatch = body.match(/^status:\s*(.+)$/i);
+    if (statusMatch) {
+      // Attach the status to the most recent tool line.
+      const last = tools[tools.length - 1];
+      if (last) {
+        last.status = statusMatch[1].trim();
+      }
+      continue;
+    }
+    tools.push({ id: String(tools.length + 1), title: body, status: null });
+  }
+  // The assistant free-text answer lives on STDOUT. Keep the "a
+  // non-system-prefixed line is assistant text" rule so any stray log line is
+  // still excluded; in practice stdout has no bracketed lines so this is every
+  // non-empty line.
   const assistantLines: string[] = [];
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
-    if (trimmed.length === 0) {
+    if (trimmed.length === 0 || hasSystemPrefix(trimmed)) {
       continue;
     }
-    if (trimmed.startsWith("[tool]")) {
-      const body = trimmed.slice("[tool]".length).trim();
-      const statusMatch = body.match(/^status:\s*(.+)$/i);
-      if (statusMatch) {
-        // Attach the status to the most recent tool line.
-        const last = tools[tools.length - 1];
-        if (last) {
-          last.status = statusMatch[1].trim();
-        }
-        continue;
-      }
-      tools.push({ id: String(tools.length + 1), title: body, status: null });
-      continue;
-    }
-    if (hasSystemPrefix(trimmed)) {
-      continue;
-    }
-    // A non-prefixed line is assistant free-text.
     assistantLines.push(trimmed);
   }
   return {
-    cloudSessionId: parseCloudSessionId(stdout),
+    cloudSessionId: parseCloudSessionId(stderr),
     tools,
     assistantText: assistantLines.join("\n").trim(),
   };
@@ -230,9 +244,10 @@ export async function headlessResume(
     command: KIRO_CLI,
     args: ["chat", "--cloud", "--resume-id", cloudSessionId, "--no-interactive", prompt],
   });
-  // A resume already knows its cloud id; the `[cloud] session` line may not be
-  // re-emitted, so fall back to the resumed id when parsing finds none.
-  const parsed = parseCloudOutput(result.stdout);
+  // A resume already knows its cloud id; the `[cloud] session` line (on STDERR)
+  // may not be re-emitted, so fall back to the resumed id when parsing finds
+  // none. The assistant answer still comes from STDOUT.
+  const parsed = parseCloudOutput(result.stdout, result.stderr);
   // Only code === 0 is success. A null exit code (signal-killed, e.g. OOM mid
   // turn) is a TRUNCATED turn, not a quiet success -- fail loudly so settleResume
   // surfaces a turn.failed event + metric rather than persisting a partial answer.
@@ -253,15 +268,20 @@ export async function headlessResume(
 }
 
 /**
- * Shared completion handling for a launch turn: parse the plain-text output,
- * require a cloud session id + zero exit, and log the numeric status under
+ * Shared completion handling for a launch turn: parse the plain-text output
+ * (cloud id + tools from STDERR, assistant answer from STDOUT), require a cloud
+ * session id + zero exit, and log the numeric status under
  * `exitCode` (NOT `code`: core redact() lists `code` in SENSITIVE_KEYS -- the
  * OAuth authorization code -- and would scrub it). stdout/stderr still run
  * through the pattern redactor, so any ksk_/bearer/OAuth value in them stays
  * scrubbed.
  */
 function finishTurn(logger: Logger, result: HeadlessResult, tag: string): HeadlessTurnResult {
-  const parsed = parseCloudOutput(result.stdout);
+  // The cloud id + tool activity come from STDERR; the assistant answer comes
+  // from STDOUT. A real `chat --cloud` success prints the `[cloud] session`
+  // line on STDERR with the prose on STDOUT, so reading stdout alone would miss
+  // the id and wrongly fail the turn.
+  const parsed = parseCloudOutput(result.stdout, result.stderr);
   // A clean turn exits 0. Treat BOTH a non-zero exit AND a null exit code
   // (process killed by a signal with no code -- e.g. OOM/SIGKILL mid-turn) as a
   // failure: a signal-killed subprocess that happened to have already printed a

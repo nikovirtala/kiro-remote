@@ -14,7 +14,7 @@
 
 import type { Command } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { cloudStdout, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
+import { cloudStreams, createHarness, type Harness, requireHarness, waitFor } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
 
 let harness: Harness | null = null;
@@ -43,12 +43,11 @@ describe("chat-only cloud launch (FEAT-002)", () => {
   test("provisions via chat --cloud, parses the cloud id, persists events, reaches idle", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: cloudStdout({
+      ...cloudStreams({
         cloudSessionId: CLOUD_ID,
         tools: [{ title: "fs_read /workspace/README.md", status: "Completed" }],
         assistant: "Here is the answer.",
       }),
-      stderr: "",
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
@@ -96,8 +95,9 @@ describe("chat-only cloud launch (FEAT-002)", () => {
   test("fails LOUDLY when no `[cloud] session` line appears", async () => {
     const runner = vi.fn(async () => ({
       code: 0,
-      stdout: "[INFO] starting\n[sandbox] done\nno session was created\n",
-      stderr: "",
+      // STDERR has log lines but NO `[cloud] session` marker; STDOUT has prose.
+      stdout: "no session was created\n",
+      stderr: "[INFO] starting\n[sandbox] done\n",
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },
@@ -125,8 +125,7 @@ describe("chat-only cloud launch (FEAT-002)", () => {
   test("fails LOUDLY when the chat --cloud subprocess exits non-zero", async () => {
     const runner = vi.fn(async () => ({
       code: 1,
-      stdout: cloudStdout({ cloudSessionId: CLOUD_ID }),
-      stderr: "boom",
+      ...cloudStreams({ cloudSessionId: CLOUD_ID }),
     }));
     harness = await createHarness(
       { initialize: initResult(), onPrompt: { response: { stopReason: "end_turn" } } },

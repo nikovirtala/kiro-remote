@@ -36,31 +36,33 @@ export interface HarnessOptions {
 }
 
 /**
- * Build plain-text `kiro-cli chat --cloud` stdout: interleaved log lines plus a
- * `[cloud] session <uuid>` line, tool activity, and the assistant's free-text
- * answer -- exactly the shape the real --cloud output has (there is NO
- * stream-json for --cloud).
+ * Build the plain-text `kiro-cli chat --cloud` output split across the two
+ * streams, EXACTLY as the real --cloud subprocess emits it (there is NO
+ * stream-json for --cloud):
+ *  - STDERR carries the log-prefixed lines: `[INFO] ...`, `[cloud] session
+ *    <uuid>`, `[tool] ...`/`[tool] status: ...`, `[sandbox] ...`.
+ *  - STDOUT carries ONLY the assistant's free-text answer (no bracketed lines).
+ * This mirrors production so the fakes exercise the same stream split the
+ * parser relies on.
  */
-export function cloudStdout(opts: {
+export function cloudStreams(opts: {
   cloudSessionId: string;
   tools?: { title: string; status?: string }[];
   assistant?: string;
-}): string {
-  const lines: string[] = [
+}): { stdout: string; stderr: string } {
+  const errLines: string[] = [
     "[INFO] starting cloud session",
     `[cloud] session ${opts.cloudSessionId}`,
   ];
   for (const t of opts.tools ?? []) {
-    lines.push(`[tool] ${t.title}`);
+    errLines.push(`[tool] ${t.title}`);
     if (t.status) {
-      lines.push(`[tool] status: ${t.status}`);
+      errLines.push(`[tool] status: ${t.status}`);
     }
   }
-  lines.push("[sandbox] done");
-  if (opts.assistant) {
-    lines.push(opts.assistant);
-  }
-  return `${lines.join("\n")}\n`;
+  errLines.push("[sandbox] done");
+  const stdout = opts.assistant ? `${opts.assistant}\n` : "";
+  return { stdout, stderr: `${errLines.join("\n")}\n` };
 }
 
 /** A headless runner that returns a fixed plain-text cloud result for every call. */
@@ -69,7 +71,7 @@ export function cloudRunner(opts: {
   tools?: { title: string; status?: string }[];
   assistant?: string;
 }): HeadlessRunner {
-  return async () => ({ code: 0, stdout: cloudStdout(opts), stderr: "" });
+  return async () => ({ code: 0, ...cloudStreams(opts) });
 }
 
 /** Build a spawn fn that launches the fake agent with a scenario env. */
