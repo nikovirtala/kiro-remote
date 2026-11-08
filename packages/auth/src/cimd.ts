@@ -78,10 +78,6 @@ export interface CimdFetcherDeps {
   httpGet?: CimdHttpGetter;
 }
 
-const PRIVATE_V4: ReadonlyArray<readonly [number, number, number]> = [
-  // [first octet, second-octet low, second-octet high] where applicable.
-];
-
 /** Return true if an IPv4/IPv6 literal is private, loopback, or link-local. */
 export function isDisallowedAddress(addr: string): boolean {
   const kind = isIP(addr);
@@ -116,9 +112,6 @@ export function isDisallowedAddress(addr: string): boolean {
   // Not an IP literal at all -> treat as disallowed (we only pass resolved IPs).
   return true;
 }
-
-// Silence unused-constant lint while documenting intent.
-void PRIVATE_V4;
 
 const defaultResolve: DnsResolver = async (host) => {
   const results = await lookup(host, { all: true });
