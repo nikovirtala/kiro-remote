@@ -247,6 +247,11 @@ export class AcpGateway implements KiroGateway {
 
   async loadSession(sessionId: string, inputs: SessionInputs): Promise<GatewaySession> {
     // Handlers must already be registered (start() does so); re-send inputs.
+    // Build the same tolerant _meta.kiro + top-level cloud target/source as
+    // session/new so a reconnect/load re-asserts the cloud Space selection.
+    const kiro: Record<string, unknown> = {};
+    if (inputs.executionTarget) kiro.executionTarget = inputs.executionTarget;
+    if (inputs.sessionSource) kiro.sessionSource = inputs.sessionSource;
     const result = await this.transport.request<unknown>("session/load", {
       sessionId,
       cwd: inputs.cwd,
@@ -254,6 +259,10 @@ export class AcpGateway implements KiroGateway {
         ? { additionalDirectories: inputs.additionalDirectories }
         : {}),
       mcpServers: inputs.mcpServers ?? [],
+      // Top-level (tolerant) placement -- see sessionParams for why both.
+      ...(inputs.executionTarget ? { executionTarget: inputs.executionTarget } : {}),
+      ...(inputs.sessionSource ? { sessionSource: inputs.sessionSource } : {}),
+      ...(Object.keys(kiro).length > 0 ? { _meta: { kiro } } : {}),
     });
     // Honor a nested id if the load response carries one; otherwise fall back to
     // the requested id (do not depend on the load response repeating it).
@@ -267,12 +276,24 @@ export class AcpGateway implements KiroGateway {
     if (inputs.effortLevel) kiro.effortLevel = inputs.effortLevel;
     // Target repos for the cloud execution target ride under _meta.kiro.
     if (inputs.repos && inputs.repos.length > 0) kiro.repos = inputs.repos;
+    // Cloud execution target / session source select a real cloud Space (vs the
+    // default source='local' in-container session). The exact ACP V3 field is
+    // NOT observable in-sandbox, so send them TOLERANTLY in BOTH plausible
+    // locations: under _meta.kiro alongside modeId/modelId/effortLevel/repos AND
+    // as top-level session/new params. The redacted acp_rpc_request log in
+    // transport.ts confirms the real field on the next live redeploy, and the
+    // KIRO_EXECUTION_TARGET / KIRO_SESSION_SOURCE env overrides correct it
+    // without a code change.
+    if (inputs.executionTarget) kiro.executionTarget = inputs.executionTarget;
+    if (inputs.sessionSource) kiro.sessionSource = inputs.sessionSource;
     return {
       cwd: inputs.cwd,
       ...(inputs.additionalDirectories
         ? { additionalDirectories: inputs.additionalDirectories }
         : {}),
       mcpServers: inputs.mcpServers ?? [],
+      ...(inputs.executionTarget ? { executionTarget: inputs.executionTarget } : {}),
+      ...(inputs.sessionSource ? { sessionSource: inputs.sessionSource } : {}),
       ...(Object.keys(kiro).length > 0 ? { _meta: { kiro } } : {}),
     };
   }

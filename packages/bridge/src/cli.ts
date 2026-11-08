@@ -24,6 +24,14 @@ function configFromEnv(): ServeConfig {
       ? { additionalDirectories: process.env.ADDITIONAL_DIRECTORIES.split(",").filter(Boolean) }
       : {}),
     ...(process.env.AWS_REGION ? { region: process.env.AWS_REGION } : {}),
+    // Optional overrides for the cloud execution target / session source
+    // requested on session/new. Unset by default (the resolver derives them
+    // from the advertisement); set these to correct the real ACP V3 strings
+    // after a live redeploy reveals them, with NO code change.
+    ...(process.env.KIRO_EXECUTION_TARGET
+      ? { executionTarget: process.env.KIRO_EXECUTION_TARGET }
+      : {}),
+    ...(process.env.KIRO_SESSION_SOURCE ? { sessionSource: process.env.KIRO_SESSION_SOURCE } : {}),
   };
 }
 

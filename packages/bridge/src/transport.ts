@@ -273,6 +273,11 @@ export class StdioJsonRpcTransport {
   }
 
   private dispatchNotification(method: string, params: unknown): void {
+    // Raw-RPC observability for INBOUND notifications: reveals the real
+    // _kiro/sessions/changed params (the cloud session id + source) on the next
+    // live redeploy. Routed through the logger so any secret-bearing field is
+    // redacted; capability/session-id shapes are not secrets.
+    this.logger.debug("acp_rpc_notification", { method, params });
     const handler = this.notificationHandlers.get(method);
     if (!handler) {
       // Unknown notifications are ignored (never fail the session), but logged.

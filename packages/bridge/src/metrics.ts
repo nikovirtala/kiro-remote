@@ -19,6 +19,7 @@ export const METRIC_NAMES = [
   "RawEventsUnmapped",
   "SessionsLaunched",
   "LaunchPath",
+  "CloudTargetUnavailable",
 ] as const;
 
 export type MetricName = (typeof METRIC_NAMES)[number];
@@ -45,6 +46,7 @@ const UNIT_FOR: Record<MetricName, MetricUnit> = {
   RawEventsUnmapped: "Count",
   SessionsLaunched: "Count",
   LaunchPath: "Count",
+  CloudTargetUnavailable: "Count",
 };
 
 /** Thin recorder over a {@link MetricSink} that fills in the canonical unit. */

@@ -23,13 +23,14 @@ import {
   type PermissionAnswer,
   ReplayDeduper,
   type Repository,
+  resolveCloudTarget,
   type SessionInputs,
   type SessionMetaItem,
   transition,
 } from "@nikovirtala/kiro-remote-core";
 import { ulid } from "ulid";
 import type { AcpGateway } from "./gateway.ts";
-import { type HeadlessRunner, headlessDelete, headlessLaunch } from "./headless.ts";
+import { type HeadlessRunner, headlessDelete } from "./headless.ts";
 import type { Logger } from "./logger.ts";
 import type { Metrics } from "./metrics.ts";
 
@@ -103,6 +104,14 @@ export interface SessionManagerDeps {
    * tests shrink it to keep the suite fast.
    */
   cloudIdSettleMs?: number;
+  /**
+   * Optional override for the cloud execution target / session source selected
+   * on session/new. When set, it wins over the advertised strings in
+   * {@link resolveCloudTarget}, so the real ACP V3 strings can be corrected from
+   * env (KIRO_EXECUTION_TARGET / KIRO_SESSION_SOURCE) after the next live
+   * redeploy reveals them, WITHOUT a code change.
+   */
+  cloudTargetOverride?: { executionTarget?: string; sessionSource?: string };
 }
 
 function stateOf(item: SessionMetaItem): MachineState {
@@ -129,6 +138,7 @@ export class SessionManager {
   private readonly mcpServers: unknown[];
   private readonly now: () => number;
   private readonly cloudIdSettleMs: number;
+  private readonly cloudTargetOverride?: { executionTarget?: string; sessionSource?: string };
 
   private readonly runtimes = new Map<string, SessionRuntime>();
   /** Maps the cloud (Kiro) session id back to our session id for update routing. */
@@ -153,6 +163,7 @@ export class SessionManager {
     this.mcpServers = deps.mcpServers ?? [];
     this.now = deps.now ?? (() => Date.now());
     this.cloudIdSettleMs = deps.cloudIdSettleMs ?? SessionManager.CLOUD_ID_SETTLE_MS;
+    this.cloudTargetOverride = deps.cloudTargetOverride;
   }
 
   capabilities(): Capabilities {
@@ -435,39 +446,81 @@ export class SessionManager {
 
     rt.launchStartedAt = this.now();
     const caps = this.gateway.capabilities();
-    // Prefer the ACP cloud path whenever cloud/remote execution is genuinely
-    // advertised (derived resiliently in core, not from a single literal
-    // target). Headless stream-json is a true last resort.
-    const hasCloudTarget = caps.cloudExecution;
-    // Redaction-safe decision log: records the driving signals so the next live
-    // run shows exactly WHY a path was chosen. We log only non-secret capability
-    // shapes plus a COUNT of extension methods (method names are not secrets but
-    // we keep the line compact).
+    // Resolve the cloud execution target / session source to request on
+    // session/new so the agent provisions a REAL cloud Space (visible in
+    // app.kiro.dev) rather than defaulting to source='local' and running inside
+    // this container. An env override (KIRO_EXECUTION_TARGET /
+    // KIRO_SESSION_SOURCE) wins over the advertised strings; otherwise the
+    // advertised cloud-sandbox/remote strings are selected.
+    const resolved = resolveCloudTarget(caps, this.cloudTargetOverride);
+    // A cloud launch is only possible when cloud/remote execution is genuinely
+    // advertised (derived resiliently in core) AND at least one concrete cloud
+    // field -- execution target OR session source -- was resolvable from the
+    // advertisement/override. Otherwise we MUST NOT silently create an invisible
+    // local session -- we fail loudly below.
+    const hasCloudTarget =
+      caps.cloudExecution && (resolved.executionTarget !== null || resolved.sessionSource !== null);
+    // Redaction-safe decision log: records the driving signals (incl. the
+    // resolved target/source -- names are not secrets) so the next live run
+    // shows exactly WHY a path was chosen. Extension method names are kept as a
+    // COUNT to keep the line compact.
     this.logger.info("launch_path_decision", {
       sessionId: id,
-      path: hasCloudTarget ? "acp" : "headless",
+      path: hasCloudTarget ? "acp" : "failed",
       cloudExecution: caps.cloudExecution,
       executionTargets: caps.executionTargets,
       sessionSources: caps.sessionSources,
       listScopes: caps.listScopes,
       extensionMethodCount: caps.extensionMethods.length,
+      resolvedExecutionTarget: resolved.executionTarget,
+      resolvedSessionSource: resolved.sessionSource,
     });
+
+    if (!hasCloudTarget) {
+      // LOUD FAILURE: cloud execution is not advertised (or no cloud target
+      // resolvable). Creating a local in-container session here would produce a
+      // session the user can NEVER see as a Space in app.kiro.dev (the exact
+      // "Space not found" symptom). Drive the session to `failed`, log an error,
+      // emit a metric, and return WITHOUT creating a local session or prompting.
+      this.applyMachine(rt, { kind: "provision_failed" });
+      this.metrics.count("CloudTargetUnavailable");
+      this.logger.error("cloud_target_unavailable", {
+        sessionId: id,
+        executionTargets: caps.executionTargets,
+        sessionSources: caps.sessionSources,
+        cloudExecution: caps.cloudExecution,
+      });
+      const failed = await this.repo.getSession(id);
+      if (failed) {
+        await this.repo.updateSession(id, failed.version, {
+          status: rt.machine.session,
+          activeTurnId: null,
+        });
+      }
+      return { path: "acp", kiroSessionId: "" };
+    }
 
     const inputs: SessionInputs = this.inputsFor({
       ...(args.mode ? { modeId: args.mode } : {}),
       ...(args.model ? { modelId: args.model } : {}),
       ...(args.effort ? { effortLevel: args.effort } : {}),
       ...(args.repos.length > 0 ? { repos: args.repos } : {}),
+      // Carry the resolved cloud target/source so newSession selects the cloud
+      // Space (sent tolerantly under _meta.kiro AND top-level by the gateway).
+      ...(resolved.executionTarget ? { executionTarget: resolved.executionTarget } : {}),
+      ...(resolved.sessionSource ? { sessionSource: resolved.sessionSource } : {}),
     });
 
-    let path: LaunchPath;
+    // The only launch path is the ACP cloud target now: a non-cloud
+    // advertisement failed loudly above (it must never create an invisible
+    // local in-container session the user cannot drive as a Space).
+    const path: LaunchPath = "acp";
     let kiroSessionId: string;
     rt.inputs = inputs;
-    if (hasCloudTarget) {
-      path = "acp";
+    {
       // The cloud execution target learns its repos from session/new inputs
-      // (carried under _meta.kiro.repos by the gateway); the headless fallback
-      // passes the same repos via the --repo flag.
+      // (carried under _meta.kiro.repos by the gateway) and the execution
+      // target/session source from the same inputs.
       const session = await this.gateway.newSession(inputs);
       kiroSessionId = session.sessionId;
       if (kiroSessionId) {
@@ -482,18 +535,6 @@ export class SessionManager {
         rt.kiroSessionId = null;
         rt.awaitingCloudId = true;
       }
-    } else {
-      // No cloud execution target advertised: headless stream-json fallback,
-      // then session/load so all later interaction is over ACP.
-      path = "headless";
-      kiroSessionId = await headlessLaunch(this.headlessRunner, this.logger, {
-        prompt: args.prompt,
-        repos: args.repos,
-      });
-      await this.gateway.loadSession(kiroSessionId, inputs);
-      rt.kiroSessionId = kiroSessionId;
-      rt.awaitingCloudId = false;
-      this.kiroToLocal.set(kiroSessionId, id);
     }
 
     // Provisioned -> idle.
