@@ -153,9 +153,31 @@ describe("GET /oauth/authorize", () => {
 
   test("wrong resource is rejected with invalid_target", async () => {
     const q = baseQuery();
-    q.resource = "https://kiro.example.com/other";
+    q.resource = "https://evil.example/mcp";
     const res = await handleAuthorize(authorizeReq(q), deps());
-    expect(new URL(res.headers.location).searchParams.get("error")).toBe("invalid_target");
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.location);
+    // Rejection redirects back to the CLIENT's registered redirect_uri.
+    expect(location.origin + location.pathname).toBe(REDIRECT_URI);
+    expect(location.searchParams.get("error")).toBe("invalid_target");
+  });
+
+  test("missing resource defaults to the facade's mcpResource and succeeds", async () => {
+    const q = baseQuery();
+    delete q.resource;
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.location);
+    // Still a 302 to the Cognito authorization endpoint (same as with-resource).
+    expect(location.origin + location.pathname).toBe(
+      "https://kiro-pool.auth.us-east-1.amazoncognito.com/oauth2/authorize",
+    );
+
+    // The stored TX carries the defaulted resource.
+    const tx = await repo.getOAuthTx("fixed-upstream-state");
+    expect(tx).not.toBeNull();
+    const data = tx?.data as unknown as AuthorizeTxData;
+    expect(data.resource).toBe(config.mcpResource);
   });
 
   test("unregistered redirect_uri renders an error page and does NOT redirect", async () => {

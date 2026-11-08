@@ -2,8 +2,9 @@
  * GET /oauth/authorize.
  *
  * Validates the downstream client's authorization request, resolves the client
- * (CIMD URL or pre-registered), enforces exact redirect_uri + S256 PKCE + the
- * RFC 8707 `resource`, stores an OAUTH#TX item (10 min TTL) carrying the
+ * (CIMD URL or pre-registered), enforces exact redirect_uri + S256 PKCE,
+ * defaults a missing RFC 8707 `resource` to the facade's sole MCP resource (and
+ * rejects a present-but-mismatched one), stores an OAUTH#TX item (10 min TTL) carrying the
  * client's challenge AND the facade's OWN upstream PKCE verifier/state, then
  * redirects the user-agent to Cognito managed login.
  *
@@ -118,10 +119,10 @@ export async function handleAuthorize(
   if (codeChallengeMethod !== "S256") {
     return clientError(redirectUri, "invalid_request", "code_challenge_method must be S256", state);
   }
-  const resource = q.resource;
-  if (!resource) {
-    return clientError(redirectUri, "invalid_target", "resource is required (RFC 8707)", state);
-  }
+  // RFC 8707 resource is optional for the client to send. The facade advertises
+  // exactly one MCP resource, so a missing/empty resource defaults to it. Only a
+  // resource that is PRESENT and does NOT match is rejected.
+  const resource = q.resource ?? deps.config.mcpResource;
   if (resource !== deps.config.mcpResource) {
     return clientError(redirectUri, "invalid_target", "resource is not recognized", state);
   }
