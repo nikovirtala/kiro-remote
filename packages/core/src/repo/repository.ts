@@ -31,6 +31,7 @@ import {
   CAPS_SK,
   CONFIG_PK,
   clientPk,
+  EVENT_SK_MAX,
   eventSk,
   idempotencyPk,
   META_SK,
@@ -297,16 +298,18 @@ export class Repository {
     after: number,
     opts: { limit?: number; types?: string[] } = {},
   ): Promise<EventItem[]> {
+    // The EVT# range is expressed entirely in the key condition. DynamoDB
+    // rejects a FilterExpression that references a primary-key attribute (SK),
+    // and BETWEEN on zero-padded seqs already excludes META/TURN#/PERM# rows.
     const res = await this.ddb.send(
       new QueryCommand({
         TableName: this.table,
-        KeyConditionExpression: "PK = :pk AND SK > :after",
+        KeyConditionExpression: "PK = :pk AND SK BETWEEN :from AND :to",
         ExpressionAttributeValues: {
           ":pk": sessionPk(sessionId),
-          ":after": eventSk(after),
-          ":evtPrefix": "EVT#",
+          ":from": eventSk(after + 1),
+          ":to": EVENT_SK_MAX,
         },
-        FilterExpression: "begins_with(SK, :evtPrefix)",
         Limit: opts.limit,
       }),
     );

@@ -126,15 +126,17 @@ export class FakeDocClient {
       return { Items: items.slice(0, input.Limit ?? items.length) };
     }
 
-    // Main table event query: PK = :pk AND SK > :after, begins_with(SK, EVT#).
-    const pk = values[":pk"];
-    const after = values[":after"] as string | undefined;
-    let items = all.filter((i) => i.PK === pk);
-    if (after) {
-      items = items.filter((i) => String(i.SK) > after);
+    // Like real DynamoDB, refuse a FilterExpression on a primary-key attribute.
+    if (/\bSK\b/.test(input.FilterExpression ?? "")) {
+      throw named("ValidationException");
     }
-    if (input.FilterExpression?.includes("begins_with(SK, :evtPrefix)")) {
-      items = items.filter((i) => String(i.SK).startsWith("EVT#"));
+    // Main table event query: PK = :pk AND SK BETWEEN :from AND :to.
+    const pk = values[":pk"];
+    const from = values[":from"] as string | undefined;
+    const to = values[":to"] as string | undefined;
+    let items = all.filter((i) => i.PK === pk);
+    if (from !== undefined && to !== undefined) {
+      items = items.filter((i) => String(i.SK) >= from && String(i.SK) <= to);
     }
     items = items.sort((a, b) => String(a.SK).localeCompare(String(b.SK)));
     return { Items: input.Limit ? items.slice(0, input.Limit) : items };

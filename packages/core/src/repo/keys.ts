@@ -9,6 +9,8 @@ export const sessionPk = (id: string): string => `SESSION#${id}`;
 export const META_SK = "META";
 export const turnSk = (ulid: string): string => `TURN#${ulid}`;
 export const eventSk = (seq: number): string => `EVT#${padSeq(seq)}`;
+/** The highest possible event sort key (all-nines seq), the inclusive upper bound for event range reads. */
+export const EVENT_SK_MAX = `EVT#${"9".repeat(EVENT_SEQ_WIDTH)}`;
 export const permSk = (requestId: string): string => `PERM#${requestId}`;
 
 export const CONFIG_PK = "CONFIG";

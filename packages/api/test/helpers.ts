@@ -138,13 +138,18 @@ export class FakeDdb {
     }
 
     // Base-table query by PK (events / permissions).
+    // Like real DynamoDB, refuse a FilterExpression on a primary-key attribute.
+    if (/\bSK\b/.test(input.FilterExpression ?? "")) {
+      const err = new Error("Filter Expression can only contain non-primary key attributes");
+      (err as { name: string }).name = "ValidationException";
+      throw err;
+    }
     const pk = values[":pk"];
     let rows = all.filter((i) => i.PK === pk);
-    if (typeof values[":after"] === "string") {
-      rows = rows.filter((i) => i.SK > (values[":after"] as string));
-    }
-    if (typeof values[":evtPrefix"] === "string") {
-      rows = rows.filter((i) => i.SK.startsWith(values[":evtPrefix"] as string));
+    if (typeof values[":from"] === "string" && typeof values[":to"] === "string") {
+      const from = values[":from"] as string;
+      const to = values[":to"] as string;
+      rows = rows.filter((i) => i.SK >= from && i.SK <= to);
     }
     if (typeof values[":permPrefix"] === "string") {
       rows = rows.filter((i) => i.SK.startsWith(values[":permPrefix"] as string));
