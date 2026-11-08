@@ -56,27 +56,35 @@ export function createLoopbackRoundtrip(deps: LoopbackDeps = {}): AuthorizationR
         const code = url.searchParams.get("code");
         const returnedState = url.searchParams.get("state");
         const ok = Boolean(code) && returnedState === state;
-        res.statusCode = ok ? 200 : 400;
+        if (!ok) {
+          // A request hit /callback WITHOUT the matching code+state. This is a
+          // stray/early/duplicate browser request (e.g. Safari issuing a
+          // speculative preconnect/probe, a retry, or a /callback without the
+          // full query), NOT the genuine facade redirect. Respond politely but
+          // DO NOT tear the server down or reject the flow: keep listening so
+          // the real callback can still arrive. The `timer` below handles the
+          // true "user never completed" case.
+          res.statusCode = 400;
+          res.setHeader("content-type", "text/plain");
+          res.end("kiro-remote login: waiting for the authorization callback.");
+          return;
+        }
+        // Genuine callback: a non-empty code AND a matching state. Only now do
+        // we send the success body, stop the server, and resolve.
+        res.statusCode = 200;
         res.setHeader("content-type", "text/plain");
-        res.end(
-          ok
-            ? "kiro-remote login complete. You can close this window."
-            : "kiro-remote login failed. You can close this window.",
-        );
+        res.end("kiro-remote login complete. You can close this window.");
         server.close();
         clearTimeout(timer);
-        if (ok && code) {
-          if (!boundRedirectUri) {
-            // Defensive: the callback fired before the listen callback bound the
-            // redirect_uri. This should be impossible (the browser can only be
-            // opened after we have the port), but never emit a port-0 URI.
-            reject(new Error("loopback callback arrived before the redirect_uri was bound"));
-            return;
-          }
-          resolve({ code, redirectUri: boundRedirectUri });
-        } else {
-          reject(new Error("loopback callback did not carry a valid code/state"));
+        if (!boundRedirectUri) {
+          // Defensive: the callback fired before the listen callback bound the
+          // redirect_uri. This should be impossible (the browser can only be
+          // opened after we have the port), but never emit a port-0 URI.
+          reject(new Error("loopback callback arrived before the redirect_uri was bound"));
+          return;
         }
+        // `code` is non-null here because `ok` required Boolean(code).
+        resolve({ code: code as string, redirectUri: boundRedirectUri });
       });
 
       const timer = setTimeout(() => {

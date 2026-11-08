@@ -82,12 +82,57 @@ describe("createLoopbackRoundtrip against a real loopback server", () => {
     expect(result.code).toBe("happy-code");
   });
 
-  it("rejects when the returned state does not match", async () => {
+  it("does NOT tear down or reject on a state mismatch; it keeps listening until timeout", async () => {
+    // A /callback that carries the wrong state is a stray/forged hit, not the
+    // genuine redirect. The server must stay up (so a real callback could still
+    // arrive) and the flow must fail only via the timeout -- never by rejecting
+    // the whole login on a single non-matching request.
     const roundtrip = createLoopbackRoundtrip({
       open: openThatRedirects("code=some-code&state=wrong-state"),
+      timeoutMs: 150,
     });
     await expect(
       roundtrip({ authorizeUrl, loopbackHost: "http://127.0.0.1", state: STATE }),
-    ).rejects.toThrow(/valid code\/state/);
+    ).rejects.toThrow(/timed out waiting/);
+  });
+
+  it("stays up after a stray/early /callback with no (or non-matching) code+state, then resolves on the real callback", async () => {
+    // Reproduces the live Safari bug: a speculative/duplicate request hits
+    // /callback FIRST without the matching code+state. The old handler closed
+    // the server and rejected on that first hit, so the genuine callback then
+    // hit a dead port ("Safari Can't Connect") and login failed with
+    // "did not carry a valid code/state". The server must survive the stray
+    // hit and still complete on the real code+state callback.
+    let authorizeRedirectUri: string | undefined;
+    const open: UrlOpener = (url: string): void => {
+      authorizeRedirectUri = redirectUriOf(url);
+      // 1. Stray/early probe: hits /callback with NO code+state.
+      get(`${authorizeRedirectUri}`, (strayRes) => {
+        strayRes.resume();
+        // 2. The genuine facade redirect, carrying code+state (and an extra
+        //    `iss` param like the real facade adds, which must be ignored).
+        get(
+          `${authorizeRedirectUri}?code=real-code&iss=${encodeURIComponent(
+            "https://facade.example",
+          )}&state=${STATE}`,
+          (realRes) => {
+            realRes.resume();
+          },
+        ).on("error", () => {});
+      }).on("error", () => {});
+    };
+
+    const roundtrip = createLoopbackRoundtrip({ open, timeoutMs: 5000 });
+    const result = await roundtrip({
+      authorizeUrl,
+      loopbackHost: "http://127.0.0.1",
+      state: STATE,
+    });
+
+    // The stray hit did not kill the server; the real callback completed the
+    // flow with the correct code and the byte-identical redirect_uri.
+    expect(result.code).toBe("real-code");
+    expect(result.redirectUri).toBe(authorizeRedirectUri);
+    expect(result.redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
   });
 });
