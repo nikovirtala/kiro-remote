@@ -33,41 +33,54 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".
 const account = process.env.CDK_DEFAULT_ACCOUNT;
 const region = process.env.CDK_DEFAULT_REGION;
 
+// Deploy context is REQUIRED and has NO defaults here: a missing key fails the
+// synth (and therefore deploy/diff) instead of silently becoming a placeholder
+// that would overwrite a live stack. Synths and deploys go through
+// scripts/deploy.sh (`pnpm synth` / `pnpm run deploy`), which passes every key
+// from deploy.env.
+const requiredContextKeys = [
+  "publicBaseUrl",
+  "cognitoDomainPrefix",
+  "allowedRepos",
+  "kiroApiKeySecretArn",
+  "kiroCliVersion",
+];
+const isBlank = (value: unknown): boolean =>
+  value === undefined ||
+  value === null ||
+  (typeof value === "string" && value.trim() === "") ||
+  (Array.isArray(value) && value.length === 0);
+const missingContext = requiredContextKeys.filter((key) => isBlank(app.node.tryGetContext(key)));
+if (missingContext.length > 0) {
+  throw new Error(
+    `missing required context: ${missingContext.join(", ")}. Deploy with ./scripts/deploy.sh ` +
+      "(reads deploy.env), or pass every key with -c key=value.",
+  );
+}
+
 // The canonical <host>: a custom domain or the API Gateway default domain.
-// Supplied via `-c publicBaseUrl=...` (falls back to a placeholder for synth).
-const publicBaseUrl =
-  (app.node.tryGetContext("publicBaseUrl") as string | undefined) ?? "https://kiro.example.com";
-const cognitoDomainPrefix =
-  (app.node.tryGetContext("cognitoDomainPrefix") as string | undefined) ?? "kiro-remote";
-const allowedReposCtx = app.node.tryGetContext("allowedRepos") as string | string[] | undefined;
-const allowedRepos = Array.isArray(allowedReposCtx)
-  ? allowedReposCtx
-  : typeof allowedReposCtx === "string"
-    ? allowedReposCtx.split(",")
-    : ["*/*"];
+const publicBaseUrl = app.node.tryGetContext("publicBaseUrl") as string;
+const cognitoDomainPrefix = app.node.tryGetContext("cognitoDomainPrefix") as string;
+// Comma-separated string from -c, or an array from a context file.
+const allowedReposCtx = app.node.tryGetContext("allowedRepos") as string | string[];
+const allowedRepos = Array.isArray(allowedReposCtx) ? allowedReposCtx : allowedReposCtx.split(",");
 
 const env = account && region ? { account, region } : undefined;
 
 // Full ARN of a PRE-EXISTING Secrets Manager secret holding KIRO_API_KEY
-// (ksk_). Passed via `-c kiroApiKeySecretArn=<arn>` (or set in local cdk.json
-// context). RECOMMENDED for real deploys: the secret is created + populated out
-// of band and survives stack rollback, so a failed deploy cannot delete the key
-// before it can be populated. Omitted => the construct creates an empty secret
-// (synth/dev only, destroyed on rollback). The ARN is account/region-specific
-// and user-chosen, so it is NOT hardcoded in the committed cdk.json.
-const kiroApiKeySecretArn = app.node.tryGetContext("kiroApiKeySecretArn") as string | undefined;
+// (ksk_). The secret is created + populated out of band and survives stack
+// rollback, so a failed deploy cannot delete the key before it can be
+// populated. Required here: without it the construct would create an EMPTY
+// secret and repoint the bridge at it.
+const kiroApiKeySecretArn = app.node.tryGetContext("kiroApiKeySecretArn") as string;
 
-// OPT-IN production-asset trigger. The real bridge image AND the real bundled
-// API Lambda code are built ONLY when `-c kiroCliVersion=<ver>` is passed. This
-// single flag gates everything that needs a Docker build or a Node bundler, so
-// the default placeholder path (no flag) synthesizes with no Docker and no
-// bundler and all existing assertion tests stay green.
+// Real production assets: `-c kiroCliVersion=<ver>` (required above) builds the
+// real bridge image(s) (Docker) AND bundles the real API Lambda code (esbuild).
 //
 // `selectAppAssets` is a pure, unit-tested helper (src/app-assets.ts): it
-// validates the trigger (throwing clearly for a blank value, since the bridge
+// validates the version (throwing clearly for a blank value, since the bridge
 // Dockerfile's KIRO_CLI_VERSION build arg has no default) and only then invokes
-// the asset factories. When the flag is absent it builds nothing and the
-// construct falls back to its placeholders.
+// the asset factories.
 const { kiroCliVersion, bridgeImage, lambdaImage, apiLambdaCode } = selectAppAssets(
   { kiroCliVersion: app.node.tryGetContext("kiroCliVersion") as string | undefined },
   {
@@ -162,7 +175,7 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     cognitoDomainPrefix,
     allowedRepos,
     ...(bridgeMode ? { bridgeMode } : {}),
-    ...(kiroApiKeySecretArn ? { kiroApiKeySecretArn } : {}),
+    kiroApiKeySecretArn,
     ...(kiroCliVersion ? { kiroCliVersion } : {}),
     ...(bridgeImage ? { bridgeImage } : {}),
     ...(lambdaImage ? { lambdaImage } : {}),
