@@ -15,11 +15,15 @@
 #
 # NODE_VERSION pins the Node base image. It is a REAL, published Docker tag
 # (node:<version>-bookworm-slim on Docker Hub), which is a DIFFERENT concern
-# from the Node the repo's .mise.toml pins for local type-stripping. The esbuild
-# bundle below targets node22, the API Lambda runtime is NODEJS_22_X, and the
-# serverless image (Dockerfile.lambda) uses the Node 22 Lambda base, so the
-# build+runtime toolchain is uniformly Node 22 here; pin a real Node 22 tag (not
-# an unpublished 26.x, which would fail the build at `FROM`).
+# from the Node the repo's .mise.toml pins for local type-stripping.
+# node:26-bookworm-slim IS published on Docker Hub (verified, including
+# 26.13.0-bookworm-slim, matching .mise.toml), so this ECS image moves to Node
+# 26: the esbuild bundle below targets node26, the API Lambda runtime is the
+# NODEJS_26_X shim (nodejs26.x; aws/aws-cdk#39021), and the serverless image
+# (Dockerfile.lambda) uses the Node 26 Lambda base, so the build+runtime
+# toolchain is uniformly Node 26 here. NOTE: this ECS image's base is a GA Docker
+# Hub tag; the PUBLIC-PREVIEW distinction for nodejs26.x applies only to the AWS
+# Lambda runtime stage over in Dockerfile.lambda, not here.
 #
 # LAMBDA-PATH ENTRYPOINTS (FEAT-003 source; FEAT-004 wires the image).
 #   The serverless bridge adds two more entry shapes that this image's bundle
@@ -37,7 +41,7 @@
 # - KIRO_API_KEY is injected as an ECS secret at RUNTIME (never baked into the
 #   image, never an ENV/ARG here).
 
-ARG NODE_VERSION=22
+ARG NODE_VERSION=26
 
 ############################
 # deps: install workspace node_modules with pnpm and bundle the bridge
@@ -94,7 +98,7 @@ COPY packages/bridge ./packages/bridge
 RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/cli.ts \
       --bundle \
       --platform=node \
-      --target=node22 \
+      --target=node26 \
       --format=cjs \
       --resolve-extensions=.ts,.js,.mjs,.json \
       --outfile=/app/dist/bridge.cjs

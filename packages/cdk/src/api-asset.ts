@@ -9,8 +9,11 @@
  * tsconfig sets allowImportingTsExtensions + rewriteRelativeImportExtensions);
  * no custom resolve plugin is required.
  *
- * The AWS SDK v3 clients are marked external: the NODEJS_22_X managed runtime
- * ships @aws-sdk/* so bundling them would only bloat the asset.
+ * The AWS SDK v3 clients are marked external: the NODEJS_26_X managed runtime
+ * (see the NODEJS_26_X shim in construct.ts -- a workaround for the missing
+ * `Runtime.NODEJS_26_X` constant, aws/aws-cdk#39021; note nodejs26.x is AWS
+ * public preview) still ships @aws-sdk/*, so bundling them would only bloat the
+ * asset.
  */
 
 import { dirname, join } from "node:path";
@@ -40,10 +43,12 @@ export function buildApiLambdaCode(): Code {
     // top-level await, so CJS is safe.
     format: "cjs",
     platform: "node",
-    target: "node22",
+    target: "node26",
     // Resolve the repo's explicit .ts import specifiers without a plugin.
     resolveExtensions: [".ts", ".js", ".mjs", ".json"],
-    // The managed NODEJS_22_X runtime provides the AWS SDK v3.
+    // The managed NODEJS_26_X runtime (nodejs26.x; see the shim in construct.ts
+    // for the aws/aws-cdk#39021 workaround and the public-preview caveat) still
+    // provides the AWS SDK v3, so keep @aws-sdk/* external.
     external: ["@aws-sdk/*"],
     logLevel: "warning",
   });

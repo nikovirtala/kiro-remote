@@ -77,6 +77,7 @@ import {
   FilterRule,
   Function as LambdaFunction,
   Runtime,
+  RuntimeFamily,
 } from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
@@ -112,6 +113,34 @@ export type BridgeMode = "fargate" | "lambda" | "both";
 
 /** Default bridge mode: Fargate-only, preserving the backward-compatible stack. */
 export const DEFAULT_BRIDGE_MODE: BridgeMode = "fargate";
+
+/**
+ * The Node.js 26 managed Lambda runtime.
+ *
+ * WHY a hand-rolled shim instead of `Runtime.NODEJS_26_X`: aws-cdk-lib (as of
+ * 2.272.0) does NOT yet ship a `Runtime.NODEJS_26_X` constant -- see the
+ * tracking issue aws/aws-cdk#39021. Until that constant lands we construct the
+ * runtime directly from its name + family, which is the verbatim interim
+ * workaround the issue recommends. SWAP THIS FOR `Runtime.NODEJS_26_X` once a
+ * released aws-cdk-lib exposes it (then delete this constant and the
+ * `RuntimeFamily` import), so we stop carrying a bespoke Runtime instance.
+ *
+ * `supportsInlineCode: true` mirrors the real managed Node runtimes: the API
+ * construct's DEFAULT code is an inline placeholder (used under placeholder-path
+ * synth with no bundler), and CDK refuses inline code on a runtime that does not
+ * advertise support for it -- so without this flag `pnpm synth` would fail.
+ *
+ * PREVIEW CAVEAT (surfaced loudly on purpose): AWS lists `nodejs26.x` as a
+ * PUBLIC PREVIEW runtime -- it is NOT covered by the Lambda SLA or AWS Support,
+ * is explicitly not recommended for production, and GA is targeted for ~Nov 2026
+ * (see the AWS Lambda runtimes docs). We adopt it as the default because the
+ * repo's .mise.toml already pins Node 26.13.0 and the stack is meant to run on
+ * Node 26, but a production operator should weigh the preview status before
+ * deploying.
+ */
+export const NODEJS_26_X = new Runtime("nodejs26.x", RuntimeFamily.NODEJS, {
+  supportsInlineCode: true,
+});
 
 /** Default CIMD-allowed host besides the facade's own host. */
 export const DEFAULT_CIMD_ALLOWED_HOST = "claude.ai";
@@ -499,7 +528,7 @@ export class KiroRemote extends Construct {
 
     // The main REST + /mcp Lambda.
     this.apiFn = new LambdaFunction(this, "ApiFn", {
-      runtime: Runtime.NODEJS_22_X,
+      runtime: NODEJS_26_X,
       handler: "index.handler",
       code: lambdaCode,
       memorySize: 512,
@@ -509,7 +538,7 @@ export class KiroRemote extends Construct {
 
     // The OAUTH#CODE callback handler (encrypts the Cognito token set).
     this.callbackFn = new LambdaFunction(this, "OAuthCallbackFn", {
-      runtime: Runtime.NODEJS_22_X,
+      runtime: NODEJS_26_X,
       handler: "index.handler",
       code: lambdaCode,
       memorySize: 256,
@@ -519,7 +548,7 @@ export class KiroRemote extends Construct {
 
     // The OAUTH#CODE token handler (decrypts + returns the Cognito tokens).
     this.tokenFn = new LambdaFunction(this, "OAuthTokenFn", {
-      runtime: Runtime.NODEJS_22_X,
+      runtime: NODEJS_26_X,
       handler: "index.handler",
       code: lambdaCode,
       memorySize: 256,

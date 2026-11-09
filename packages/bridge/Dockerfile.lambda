@@ -31,12 +31,22 @@
 #   runtime from Secrets Manager via KIRO_API_KEY_SECRET_ARN (resolveKiroApiKey).
 
 # NODE_VERSION pins the Node base image for the deps/bundle stage. It must be a
-# REAL, published Docker tag (node:<version>-bookworm-slim). The esbuild bundles
-# below target node22 and the runtime stage is the Node 22 AWS Lambda base
-# (public.ecr.aws/lambda/nodejs:22), so the deps stage is pinned to the matching
-# real Node 22 tag. (An unpublished 26.x tag would fail the build at `FROM`;
-# the repo's .mise.toml pins a different Node only for local type-stripping.)
-ARG NODE_VERSION=22
+# REAL, published Docker tag (node:<version>-bookworm-slim). node:26-bookworm-slim
+# IS published on Docker Hub (verified, including 26.13.0-bookworm-slim, which
+# matches the repo's .mise.toml pin), so the deps stage safely moves to Node 26
+# to match the esbuild --target=node26 bundles below and the Node 26 AWS Lambda
+# runtime stage (public.ecr.aws/lambda/nodejs:26).
+#
+# PREVIEW CAVEAT (surfaced loudly on purpose): the RUNTIME stage's AWS Lambda
+# base `public.ecr.aws/lambda/nodejs:26` is a PUBLIC PREVIEW image -- AWS lists
+# nodejs26.x as public preview (NOT covered by the Lambda SLA/Support, NOT
+# recommended for production, GA targeted ~Nov 2026; see the AWS Lambda runtimes
+# docs and the CDK gap aws/aws-cdk#39021). This Docker Hub `node:26-bookworm-slim`
+# deps tag is GA and unaffected; the preview distinction applies only to the
+# Lambda base below. There is NO Docker daemon in CI here, so a Docker host MUST
+# confirm `public.ecr.aws/lambda/nodejs:26` resolves before a real
+# `-c kiroCliVersion` deploy.
+ARG NODE_VERSION=26
 
 ############################
 # deps: install workspace node_modules with pnpm and bundle both Lambda entries
@@ -88,14 +98,14 @@ COPY packages/bridge ./packages/bridge
 RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/lambda-consumer.ts \
       --bundle \
       --platform=node \
-      --target=node22 \
+      --target=node26 \
       --format=cjs \
       --resolve-extensions=.ts,.js,.mjs,.json \
       --outfile=/app/dist/lambda-consumer.cjs \
     && packages/cdk/node_modules/.bin/esbuild packages/bridge/src/caps-publisher.ts \
       --bundle \
       --platform=node \
-      --target=node22 \
+      --target=node26 \
       --format=cjs \
       --resolve-extensions=.ts,.js,.mjs,.json \
       --outfile=/app/dist/caps-publisher.cjs
@@ -106,7 +116,7 @@ RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/lambda-consumer.t
 # The AWS Lambda base image ships the Runtime Interface Client/Emulator so the
 # bundled `handler` export is invokable by the Lambda service. public.ecr.aws
 # is the canonical source for the managed base images.
-FROM public.ecr.aws/lambda/nodejs:22 AS runtime
+FROM public.ecr.aws/lambda/nodejs:26 AS runtime
 
 # The kiro-cli version to install is a REQUIRED build arg (no default pin here).
 ARG KIRO_CLI_VERSION

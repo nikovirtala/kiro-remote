@@ -46,6 +46,35 @@ mise exec -- pnpm synth
 `packages/cdk`. It uses placeholder images/code and the fallback
 `publicBaseUrl` so it works without a container build or AWS credentials.
 
+### Lambda runtime: Node 26 (public preview)
+
+The stack targets **Node 26** on every Lambda, matching the Node 26.13.0
+toolchain pinned in [`.mise.toml`](../.mise.toml):
+
+- The managed (zip) API and OAuth Lambdas run on the `nodejs26.x` managed
+  runtime. aws-cdk-lib does not yet expose a `Runtime.NODEJS_26_X` constant
+  ([aws/aws-cdk#39021](https://github.com/aws/aws-cdk/issues/39021)), so the
+  construct uses a small shim (`new Runtime("nodejs26.x", RuntimeFamily.NODEJS,
+  { supportsInlineCode: true })`) until that constant ships.
+- The serverless bridge image
+  ([`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda))
+  is built on the `public.ecr.aws/lambda/nodejs:26` Lambda base, and the ECS
+  bridge image ([`packages/bridge/Dockerfile`](../packages/bridge/Dockerfile))
+  on `node:26-bookworm-slim` (a GA Docker Hub tag).
+
+> **Preview caveat.** AWS lists `nodejs26.x` (and its `public.ecr.aws/lambda/nodejs:26`
+> base image) as a **PUBLIC PREVIEW** runtime: it is **not covered by the AWS
+> Lambda SLA or AWS Support**, is **not recommended for production**, and GA is
+> targeted for around **November 2026** (see the
+> [AWS Lambda runtimes docs](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html)).
+> Node 26 is the default here because the repo pins 26.13.0 and is built to run
+> on Node 26, but a production operator should weigh the preview status before
+> deploying. The ECS image's `node:26-bookworm-slim` base is GA and unaffected;
+> the preview distinction applies only to the Lambda base image and the
+> `nodejs26.x` managed runtime. There is no Docker in CI here, so a Docker host
+> must confirm the `public.ecr.aws/lambda/nodejs:26` tag resolves before a real
+> `-c kiroCliVersion` deploy.
+
 ## 3. Choose your deploy context
 
 The CDK app ([`packages/cdk/bin/app.ts`](../packages/cdk/bin/app.ts)) reads three

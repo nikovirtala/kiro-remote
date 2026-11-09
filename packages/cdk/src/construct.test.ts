@@ -67,6 +67,23 @@ function synthMode(bridgeMode?: "fargate" | "lambda" | "both"): { template: Temp
   return { template: Template.fromStack(stack) };
 }
 
+/**
+ * The Runtime strings of exactly the THREE managed (Zip-package) Lambdas this
+ * construct owns -- ApiFn, OAuthCallbackFn, OAuthTokenFn -- identified by their
+ * logical-id substrings. This deliberately EXCLUDES both the container-image
+ * bridge functions (which carry no Runtime) and any CDK-internal framework
+ * Lambda (a custom-resource provider sets its OWN managed runtime, outside our
+ * control), so a Node-26 regression on OUR functions cannot be masked.
+ */
+function managedFunctionRuntimes(t: Template): string[] {
+  const fns = t.findResources("AWS::Lambda::Function");
+  const owned = ["ApiFn", "OAuthCallbackFn", "OAuthTokenFn"];
+  return Object.entries(fns)
+    .filter(([logicalId]) => owned.some((name) => logicalId.includes(name)))
+    .map(([, fn]) => (fn.Properties as { Runtime?: string }).Runtime)
+    .filter((r): r is string => r !== undefined);
+}
+
 describe("KiroRemote", () => {
   let template: Template;
   let stack: Stack;
@@ -160,6 +177,23 @@ describe("KiroRemote", () => {
     // The API/bridge roles never touch the key.
     expect(roleRefs.some((r) => r.includes("ApiFn"))).toBe(false);
     expect(roleRefs.some((r) => r.includes("TaskRole"))).toBe(false);
+  });
+
+  test("the managed API/OAuth Lambdas target the Node 26 runtime (nodejs26.x)", () => {
+    // The three managed (Zip-package) functions -- ApiFn, OAuthCallbackFn,
+    // OAuthTokenFn -- must synthesize with Runtime 'nodejs26.x' via the
+    // NODEJS_26_X shim (aws/aws-cdk#39021). We isolate OUR functions by their
+    // logical-id substrings so neither the container-image bridge functions
+    // (which carry NO Runtime) nor any CDK-internal framework Lambda (e.g. a
+    // custom-resource provider, which sets its OWN managed runtime outside our
+    // control) can mask a regression. This assertion is intentionally
+    // reversion-sensitive: reverting the shim to nodejs22.x makes it FAIL.
+    const runtimes = managedFunctionRuntimes(template);
+    // Exactly the three managed functions we own.
+    expect(runtimes.length).toBe(3);
+    for (const runtime of runtimes) {
+      expect(runtime).toBe("nodejs26.x");
+    }
   });
 
   test("the VPC has no NAT gateway", () => {
@@ -638,6 +672,26 @@ describe("KiroRemote bridge mode", () => {
       expect(env?.AWS_REGION).toBeUndefined();
       // The key itself is never a plain env var.
       expect(env?.KIRO_API_KEY).toBeUndefined();
+    }
+  });
+
+  test("the managed Lambdas target nodejs26.x in lambda and both modes (reversion-sensitive)", () => {
+    // Guard the Node 26 choice across the modes that also provision the
+    // container-image bridge functions AND a custom-resource provider framework
+    // Lambda: managedFunctionRuntimes isolates OUR three managed functions by
+    // logical id, so neither the image functions (no Runtime) nor the CDK
+    // framework Lambda can mask a regression. Reverting the shim to nodejs22.x
+    // makes this FAIL.
+    for (const mode of ["lambda", "both"] as const) {
+      const { template: t } = synthMode(mode);
+      const runtimes = managedFunctionRuntimes(t);
+      // The three managed API/OAuth functions are present in both modes.
+      expect(runtimes.length).toBe(3);
+      for (const runtime of runtimes) {
+        expect(runtime).toBe("nodejs26.x");
+      }
+      // Sanity: the two container-image bridge functions carry no Runtime.
+      expect(imageFunctions(t).length).toBe(2);
     }
   });
 
