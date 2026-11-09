@@ -138,15 +138,19 @@ ARG KIRO_CLI_INSTALL_URL=https://cli.kiro.dev/install
 # ASSERT both are present+executable so a standalone zip (which ships no
 # kiro-cli-chat) fails the build LOUDLY here instead of producing a broken
 # image. This mirrors packages/bridge/Dockerfile's install stanza 1:1.
+#
+# `curl` is NOT in the package list: the Lambda AL2023 base already ships
+# `curl-minimal` (which provides /usr/bin/curl), and asking dnf/microdnf for
+# the full `curl` package fails with a curl-minimal package conflict.
 RUN (command -v microdnf >/dev/null 2>&1 \
-      && microdnf install -y bash tar gzip curl unzip ca-certificates \
-      || dnf install -y bash tar gzip curl unzip ca-certificates) \
+      && microdnf install -y bash tar gzip unzip ca-certificates \
+      || dnf install -y bash tar gzip unzip ca-certificates) \
     && test -n "${KIRO_CLI_VERSION}" \
     && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | Q_INSTALL_GLOBAL=1 bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
     && { [ -x /usr/local/bin/kiro-cli ] || { [ -d /root/.local/bin ] && cp -a /root/.local/bin/. /usr/local/bin/; }; } \
     && { [ -x /usr/local/bin/kiro-cli ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
-    && command -v kiro-cli-chat >/dev/null 2>&1 \
-      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; } \
+    && { command -v kiro-cli-chat >/dev/null 2>&1 \
+      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; }; } \
     && chmod 0755 /usr/local/bin/kiro-cli /usr/local/bin/kiro-cli-chat \
     && kiro-cli --version
 
