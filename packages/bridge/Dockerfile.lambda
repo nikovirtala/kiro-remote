@@ -30,7 +30,13 @@
 # - KIRO_API_KEY is NEVER baked into the image: the functions resolve it at
 #   runtime from Secrets Manager via KIRO_API_KEY_SECRET_ARN (resolveKiroApiKey).
 
-ARG NODE_VERSION=26.13.0
+# NODE_VERSION pins the Node base image for the deps/bundle stage. It must be a
+# REAL, published Docker tag (node:<version>-bookworm-slim). The esbuild bundles
+# below target node22 and the runtime stage is the Node 22 AWS Lambda base
+# (public.ecr.aws/lambda/nodejs:22), so the deps stage is pinned to the matching
+# real Node 22 tag. (An unpublished 26.x tag would fail the build at `FROM`;
+# the repo's .mise.toml pins a different Node only for local type-stripping.)
+ARG NODE_VERSION=22
 
 ############################
 # deps: install workspace node_modules with pnpm and bundle both Lambda entries
