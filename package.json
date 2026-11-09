@@ -15,8 +15,9 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "synth": "pnpm --filter @nikovirtala/kiro-remote-cdk synth",
-    "deploy": "pnpm --filter @nikovirtala/kiro-remote-cdk deploy",
+    "synth": "./scripts/deploy.sh --synth",
+    "diff": "./scripts/deploy.sh --diff",
+    "deploy": "./scripts/deploy.sh",
     "e2e": "pnpm --filter @nikovirtala/kiro-remote-e2e e2e"
   },
   "devDependencies": {

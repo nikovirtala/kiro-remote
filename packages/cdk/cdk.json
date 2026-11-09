@@ -5,14 +5,6 @@
     "exclude": ["node_modules", "cdk.out"]
   },
   "context": {
-    "publicBaseUrl": "https://kiro-remote.nikovirtala.dev",
-    "cognitoDomainPrefix": "kiro-remote",
-    "allowedRepos": "*/*",
-    "customDomainName": "kiro-remote.nikovirtala.dev",
-    "dnsZoneName": "kiro-remote.nikovirtala.dev",
-    "hostedZoneId": "Z00492973OD5EM79JPSQP",
-    "kiroCliVersion": "2.37.1",
-    "kiroApiKeySecretArn": "arn:aws:secretsmanager:eu-north-1:827333031966:secret:kiro-remote/kiro-api-key-DuTGZY",
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "@aws-cdk/core:validateSnapshotRemovalPolicy": true,

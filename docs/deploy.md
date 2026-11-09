@@ -35,16 +35,27 @@ mise exec -- pnpm install
 ## 2. Build and sanity-check
 
 TypeScript runs via Node type stripping, so `build` only type-checks; it does not
-emit artifacts. Running `synth` confirms the CDK app assembles before you deploy:
+emit artifacts. The CDK unit tests synthesize the stack with test props and run
+the cdk-nag checks, with no Docker and no AWS credentials:
 
 ```bash
 mise exec -- pnpm build
-mise exec -- pnpm synth
+mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk test
 ```
 
-`pnpm synth` runs `cdk synth --app "node bin/app.ts" --quiet` inside
-`packages/cdk`. It uses placeholder images/code and the fallback
-`publicBaseUrl` so it works without a container build or AWS credentials.
+`pnpm synth` runs `./scripts/deploy.sh --synth`: a `cdk synth` with exactly the
+settings a deploy would use (your `deploy.env`, region, and account checks). It
+bundles the real API Lambda, stages the bridge image's Docker build context in
+`cdk.out`, and runs the cdk-nag checks against the real asset constructs. It
+needs AWS credentials but not Docker (the image is built at deploy), and it
+deploys nothing. Set up `deploy.env` first (see
+[Bootstrap and deploy](#5-bootstrap-and-deploy)).
+
+The CDK app has **no defaults** for its deploy context. It refuses to synthesize
+(so `cdk deploy`/`cdk diff` refuse to run) unless `publicBaseUrl`,
+`cognitoDomainPrefix`, `allowedRepos`, `kiroApiKeySecretArn` and `kiroCliVersion`
+are all set. This stops a context-free `cdk deploy` from replacing a live stack
+with placeholders.
 
 ### Lambda runtime: Node 26 (public preview)
 
@@ -80,32 +91,31 @@ toolchain pinned in [`.mise.toml`](../.mise.toml):
 The CDK app ([`packages/cdk/bin/app.ts`](../packages/cdk/bin/app.ts)) reads three
 context values, passed with `-c key=value`:
 
-> **Real-asset opt-in, `-c kiroCliVersion=<ver>`.** This single flag is the
-> trigger for BOTH real production assets and is **required for a real deploy**:
-> the bridge Dockerfile's `KIRO_CLI_VERSION` build arg has **no default**, so
-> without a concrete version there is nothing to build the real image from. When
-> you pass it:
+> **Real assets, `-c kiroCliVersion=<ver>` (required).** This flag drives BOTH
+> real production assets: the bridge Dockerfile's `KIRO_CLI_VERSION` build arg
+> has **no default**, so without a concrete version there is nothing to build
+> the real image from. With it:
 >
 > - the app **builds the real bridge container image locally** from
 >   [`packages/bridge/Dockerfile`](../packages/bridge/Dockerfile) via
 >   `ContainerImage.fromAsset` with the repo root as the build context,
 >   `platform: linux/arm64` (Graviton) and `buildArgs: { KIRO_CLI_VERSION }`.
 >   This **needs a working Docker/container runtime** on the machine running
->   `cdk synth`/`cdk deploy`, and it builds `linux/arm64`; and
+>   `cdk deploy` (synth only stages the build context), and it builds
+>   `linux/arm64`; and
 > - the app **bundles the real API Lambda** (`src/lambda/entry.ts`) in-process
 >   with esbuild and passes it as `apiLambdaCode`. The bundle is **headless, no
 >   Docker** (esbuild is a workspace dev dependency).
 >
-> Omitting the flag is the **override seam**: the stack ships a lightweight
-> placeholder bridge image and an inline placeholder API Lambda, so
-> `cdk synth`/`cdk deploy` run with **no Docker build and no Node bundler**,
-> which is what lets `cdk synth` run in constrained CI/sandboxes. The kiro-cli
-> version is **operator-supplied and never hardcoded** anywhere in the repo.
+> This repo's CDK app refuses to synthesize without it. The `KiroRemote`
+> construct itself still falls back to a placeholder bridge image and an inline
+> placeholder API Lambda when no real assets are passed; that is what the CDK
+> unit tests use. The kiro-cli version is **operator-supplied** (`KIRO_CLI_VERSION`
+> in `deploy.env`) and never hardcoded in the CDK code.
 >
 > The real bridge image build is the only step that needs Docker; run the
-> real-asset deploy on a machine that has it (the API Lambda bundle itself runs
-> anywhere esbuild does). A blank/empty `kiroCliVersion` is rejected with a
-> clear error rather than silently falling back to placeholders.
+> deploy on a machine that has it (the API Lambda bundle itself runs anywhere
+> esbuild does). A blank/empty `kiroCliVersion` is rejected with a clear error.
 >
 > Example real deploy (combining the version with this repo's custom-domain
 > context):
@@ -123,49 +133,51 @@ context values, passed with `-c key=value`:
 > empty-capabilities fallback. This is expected right after a fresh deploy and
 > resolves once the bridge task is healthy and has published its capabilities.
 
-| Context key           | Default                                             | Meaning                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `publicBaseUrl`       | `https://kiro.example.com` (synth placeholder only) | The canonical `https://<host>` **without** a trailing slash. Use a custom domain fronting the HTTP API, or the API Gateway default domain `https://<api-id>.execute-api.<region>.amazonaws.com`. Used verbatim for the RFC 9728 PRM, the RFC 8414 AS-metadata issuer, the Cognito resource identifier (`<host>/mcp`), and the CIMD allow-list, so for a real deploy it **must** be the real, reachable host. |
-| `cognitoDomainPrefix` | `kiro-remote`                                       | The Cognito managed-login domain prefix. The hosted UI is served from `<prefix>.auth.<region>.amazoncognito.com`.                                                                                                                                                                                                                                                                                            |
-| `allowedRepos`        | `*/*`                                               | Comma-separated GitHub repo globs the bridge may launch sessions against. Launches outside this list are rejected with 403.                                                                                                                                                                                                                                                                                  |
-| `bridgeMode`          | `fargate`                                           | Which host(s) drive the cloud command path: `fargate` (default), `lambda`, or `both`. Pass with `-c bridgeMode=lambda\|fargate\|both`. See [Choosing the bridge mode](#choosing-the-bridge-mode). The default reproduces the Fargate-only stack exactly.                                                                                                                                                     |
+| Context key           | Default      | Meaning                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `publicBaseUrl`       | — (required) | The canonical `https://<host>` **without** a trailing slash. Use a custom domain fronting the HTTP API, or the API Gateway default domain `https://<api-id>.execute-api.<region>.amazonaws.com`. Used verbatim for the RFC 9728 PRM, the RFC 8414 AS-metadata issuer, the Cognito resource identifier (`<host>/mcp`), and the CIMD allow-list, so for a real deploy it **must** be the real, reachable host. |
+| `cognitoDomainPrefix` | — (required) | The Cognito managed-login domain prefix. The hosted UI is served from `<prefix>.auth.<region>.amazoncognito.com`.                                                                                                                                                                                                                                                                                            |
+| `allowedRepos`        | — (required) | Comma-separated GitHub repo globs the bridge may launch sessions against. Launches outside this list are rejected with 403.                                                                                                                                                                                                                                                                                  |
+| `bridgeMode`          | `fargate`    | Which host(s) drive the cloud command path: `fargate` (default), `lambda`, or `both`. Pass with `-c bridgeMode=lambda\|fargate\|both`. See [Choosing the bridge mode](#choosing-the-bridge-mode). The default reproduces the Fargate-only stack exactly.                                                                                                                                                     |
 
-Three more context keys drive the optional custom domain (all unset by default
-except `customDomainName`/`dnsZoneName`, which this repo's `cdk.json` sets to the
-scoped subdomain `kiro-remote.nikovirtala.dev`):
+Three more context keys drive the optional custom domain (unset in the CDK app;
+`scripts/deploy.sh` defaults `customDomainName`/`dnsZoneName` to the scoped
+subdomain `kiro-remote.nikovirtala.dev`):
 
 | Context key        | Default                        | Meaning                                                                                                                                                                                                                                                                                                                                      |
 | ------------------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `customDomainName` | — (default execute-api domain) | The custom host fronting the HTTP API. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain. See [Option B](#option-b--a-custom-domain-recommended).                                                                                                                                             |
 | `dnsZoneName`      | — (no DNS stack)               | When set, `bin/app.ts` also synthesizes `KiroRemoteDnsStack`: a Route 53 **public hosted zone** for a delegated subdomain. Only needed for the automated Route 53 alternative; harmless otherwise (the zone is a separate stack you deploy or ignore). See [the Route 53 alternative](#automated-alternative--route-53-delegated-subdomain). |
-| `hostedZoneId`     | — (zone-less manual CNAME)     | Id of a Route 53 public hosted zone owning `customDomainName` (typically the `HostedZoneId` output of `KiroRemoteDnsStack`). When set, the app stack validates the cert against that zone **and** creates the alias records in it — no manual DNS. Omit for the manual-Cloudflare path. Account-specific; **not** committed to `cdk.json`.   |
+| `hostedZoneId`     | — (zone-less manual CNAME)     | Id of a Route 53 public hosted zone owning `customDomainName` (typically the `HostedZoneId` output of `KiroRemoteDnsStack`). When set, the app stack validates the cert against that zone **and** creates the alias records in it — no manual DNS. Omit for the manual-Cloudflare path. Account-specific; set it in `deploy.env`.            |
 
 > **About `publicBaseUrl` and the chicken-and-egg with the API Gateway default
 > domain:** if you are not using a custom domain, the default domain only exists
-> after the HTTP API is created. A common approach is to deploy once (the synth
-> placeholder is fine to create the API), read the generated API Gateway domain,
+> after the HTTP API is created. A common approach is to deploy once with any
+> placeholder `PUBLIC_BASE_URL` to create the API, read the generated API Gateway domain,
 > and then redeploy with `-c publicBaseUrl=https://<api-id>.execute-api.<region>.amazonaws.com`
 > so the PRM/AS-metadata/CIMD values all match the real host. Using a custom
 > domain avoids the second deploy. The two paths are laid out in full in
 > [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api).
 
-You can pass these on the command line with `-c`, or save them once in the
-`context` block of [`packages/cdk/cdk.json`](../packages/cdk/cdk.json) so every
-`synth`/`deploy` picks them up without flags (a `-c` flag still overrides the
-file for a one-off). That file is version-controlled, so the values travel with
-the repo — do **not** put them in `cdk.context.json`, which is gitignored and
-owned by the CDK CLI for cached environment lookups. Example:
+[`packages/cdk/cdk.json`](../packages/cdk/cdk.json) holds only CDK feature
+flags, no deploy values. Set the values in a gitignored `deploy.env` at the repo
+root and deploy with [`scripts/deploy.sh`](../scripts/deploy.sh), which maps each
+`deploy.env` key to its `-c` flag (see [Bootstrap and deploy](#5-bootstrap-and-deploy)).
+You can still pass `-c key=value` directly to the CDK CLI for one-off synths.
 
-```json
-{
-  "context": {
-    "publicBaseUrl": "https://kiro-remote.nikovirtala.dev",
-    "cognitoDomainPrefix": "kiro-remote",
-    "allowedRepos": "*/*",
-    "@aws-cdk/core:checkSecretUsage": true
-  }
-}
-```
+| `deploy.env` key          | Context key           |
+| ------------------------- | --------------------- |
+| `KIRO_CLI_VERSION`        | `kiroCliVersion`      |
+| `BRIDGE_MODE`             | `bridgeMode`          |
+| `PUBLIC_BASE_URL`         | `publicBaseUrl`       |
+| `COGNITO_DOMAIN_PREFIX`   | `cognitoDomainPrefix` |
+| `ALLOWED_REPOS`           | `allowedRepos`        |
+| `CUSTOM_DOMAIN_NAME`      | `customDomainName`    |
+| `DNS_ZONE_NAME`           | `dnsZoneName`         |
+| `HOSTED_ZONE_ID`          | `hostedZoneId`        |
+| `HOSTED_ZONE_NAME`        | `hostedZoneName`      |
+| `CERTIFICATE_ARN`         | `certificateArn`      |
+| `KIRO_API_KEY_SECRET_ARN` | `kiroApiKeySecretArn` |
 
 > **Allow-list glob gotcha:** repos are matched as `owner/name`, where a single
 > `*` matches any run of characters **except** `/`, and `**` matches across `/`.
@@ -197,9 +209,10 @@ entrypoint only wires the three context keys above; to set the rest you edit
 | `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 > The defaults for `bridgeImage`, `lambdaImage`, and `apiLambdaCode` are
-> deliberately placeholders so `cdk synth` runs with no Docker build and no
-> bundling step in constrained CI/sandboxes. A production deploy must override
-> them (image + Lambda code) so the stack actually serves traffic.
+> placeholders so the construct synthesizes with no Docker build and no
+> bundling step (the CDK unit tests rely on this). A production deploy must
+> override them (image + Lambda code) so the stack actually serves traffic; this
+> repo's app always does, from the required `kiroCliVersion`.
 
 ## Choosing the bridge mode
 
@@ -227,9 +240,8 @@ A few operational details for the `lambda` and `both` modes:
 - **Image.** The serverless functions run the container image built from
   [`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)
   (arm64, `kiro-cli` on PATH, both the consumer and caps-publisher handler
-  bundles). Like the Fargate image, it is built only when you pass
-  `-c kiroCliVersion=<ver>`; without that flag `cdk synth` uses a placeholder
-  image and needs no Docker.
+  bundles). Like the Fargate image, it is built from the required
+  `-c kiroCliVersion=<ver>`, so deploy needs Docker.
 - **Concurrency.** `maxCloudSessions` maps to the consumer function's RESERVED
   CONCURRENCY. Because the queue is FIFO and the producer sets
   `MessageGroupId = sessionId`, SQS already serializes work per session; the
@@ -287,8 +299,8 @@ default domain
 `https://<api-id>.execute-api.<region>.amazonaws.com`. That domain only exists
 once the HTTP API is created, so this is a **two-pass deploy**:
 
-1. Deploy once with any placeholder `publicBaseUrl` (the synth placeholder is
-   fine) to create the API.
+1. Deploy once with any placeholder `PUBLIC_BASE_URL` (for example
+   `https://kiro.example.com`) to create the API.
 2. Read the generated host from the `ApiUrl` CloudFormation output (see
    [Find the resource identifiers you'll need](#6-find-the-resource-identifiers-youll-need)).
 3. Redeploy with
@@ -331,10 +343,10 @@ prop:
 > the region you want — for this deploy that is `eu-north-1` (see
 > [the region note](#5-bootstrap-and-deploy)).
 
-This repo's [`cdk.json`](../packages/cdk/cdk.json) already sets both
-`publicBaseUrl` **and** `customDomainName` to `kiro-remote.nikovirtala.dev`, so a
-plain `deploy` creates the custom domain. The app also accepts them as context
-flags:
+[`scripts/deploy.sh`](../scripts/deploy.sh) defaults both `PUBLIC_BASE_URL`
+**and** `CUSTOM_DOMAIN_NAME` to `kiro-remote.nikovirtala.dev`, so a plain
+`./scripts/deploy.sh` creates the custom domain. The app also accepts them as
+context flags:
 
 ```bash
 mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
@@ -354,9 +366,9 @@ mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
   -c certificateArn=arn:aws:acm:eu-north-1:<account>:certificate/<id>
 ```
 
-The certificate ARN is not secret, but it is account-specific — it is **not**
-stored in `cdk.json`; pass it at deploy time (or set `customDomain.certificateArn`
-in your own thin app).
+The certificate ARN is not secret, but it is account-specific: set it as
+`CERTIFICATE_ARN` in `deploy.env` (or set `customDomain.certificateArn` in your
+own thin app).
 
 #### DNS records to create at Cloudflare
 
@@ -421,7 +433,7 @@ complete first-time setup.
 > stay on Cloudflare.
 
 1. **Deploy the DNS stack first.** It is synthesized whenever `dnsZoneName` is
-   set (this repo's `cdk.json` sets it to `kiro-remote.nikovirtala.dev`):
+   set (`scripts/deploy.sh` defaults `DNS_ZONE_NAME` to `kiro-remote.nikovirtala.dev`):
 
    ```bash
    mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk exec cdk deploy KiroRemoteDnsStack
@@ -446,13 +458,11 @@ complete first-time setup.
    ```
 
 3. **Deploy the app stack with the zone imported.** Pass the DNS stack's
-   `HostedZoneId` as the `hostedZoneId` context key (set it in `cdk.json`
-   context or pass `-c hostedZoneId=...` — it is account-specific, so this repo
-   leaves it **unset** in `cdk.json`):
+   `HostedZoneId` as the `hostedZoneId` context key. It is account-specific,
+   so set it as `HOSTED_ZONE_ID` in `deploy.env`, then deploy:
 
    ```bash
-   mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
-     -c hostedZoneId=<HostedZoneId output>
+   ./scripts/deploy.sh
    ```
 
    Now the ACM certificate is DNS-validated **against the Route 53 zone**
@@ -623,11 +633,10 @@ bridgeImage: ContainerImage.fromAsset(repoRoot, {
 ```
 
 Building this requires a working container runtime (Docker) that can produce a
-`linux/arm64` image; CDK invokes it during `cdk synth`/`cdk deploy` on the
-operator's machine. Omit `-c kiroCliVersion` and the construct keeps its
-lightweight placeholder image so `cdk synth` runs with no container build (the
-constrained CI/sandbox path). The `KIRO_CLI_VERSION` value is operator-supplied
-and never hardcoded in the repo.
+`linux/arm64` image; CDK builds it during `cdk deploy` on the operator's
+machine (`cdk synth` only stages the build context). The app requires
+`-c kiroCliVersion`, so every deploy builds the image. The `KIRO_CLI_VERSION` value is operator-supplied (in
+`deploy.env`) and never hardcoded in the CDK code.
 
 ## 4. Store the Kiro API key
 
@@ -658,22 +667,22 @@ your key.
    (the trailing `-<suffix>` is the random 6-char suffix Secrets Manager adds,
    and it is part of the ARN the deploy expects).
 
-2. **Deploy pointing at the ARN.** Pass it with `-c kiroApiKeySecretArn=...`
-   (or set it in your local `cdk.json` context):
+2. **Deploy pointing at the ARN.** Set it in `deploy.env`:
 
    ```bash
-   -c kiroApiKeySecretArn=arn:aws:secretsmanager:eu-north-1:<account>:secret:kiro-remote/kiro-api-key-<suffix>
+   KIRO_API_KEY_SECRET_ARN=arn:aws:secretsmanager:eu-north-1:<account>:secret:kiro-remote/kiro-api-key-<suffix>
    ```
 
-   The ARN is not a secret value, but it is account/region-specific, so it is
-   **not** committed to this repo's `cdk.json`; pass it at deploy time or keep
-   it in your own local context.
+   The ARN is not a secret value, but it is account/region-specific, so it
+   stays in the gitignored `deploy.env`. This repo's CDK app refuses to
+   synthesize without it, and `scripts/deploy.sh` also refuses an ARN from a
+   different region or account.
 
-> **Fallback (NOT recommended for real deploys).** If you omit
-> `kiroApiKeySecretArn`, the stack creates an **empty** secret for `KIRO_API_KEY`
-> (fine for `synth`/dev). You then have to populate it, and it is **destroyed on
-> rollback** (the exact chicken-and-egg above). If you go this route anyway, set
-> the value after the stack exists:
+> **Fallback for your own thin app (NOT recommended for real deploys).** The
+> `KiroRemote` construct still accepts no `kiroApiKeySecretArn`; it then creates
+> an **empty** secret for `KIRO_API_KEY`. You then have to populate it, and it is
+> **destroyed on rollback** (the exact chicken-and-egg above). If you go this
+> route anyway, set the value after the stack exists:
 >
 > ```bash
 > aws secretsmanager put-secret-value \
@@ -692,30 +701,49 @@ Never commit or echo the real key; use the placeholder `ksk_xxxxxxxx` in notes.
 
 ## 5. Bootstrap and deploy
 
-If the account/region has never been CDK-bootstrapped, bootstrap it once. Run CDK
-commands from `packages/cdk` (its `cdk.json` sets `app` to `node bin/app.ts`). The
-`aws-cdk` CLI is a dev dependency of that package, so invoke it through pnpm:
+If the account/region has never been CDK-bootstrapped, bootstrap it once. The
+`aws-cdk` CLI is a dev dependency of `packages/cdk`, so invoke it through pnpm:
 
 ```bash
 # Bootstrap (once per account/region).
-mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk exec cdk bootstrap
-
-# Deploy. With the context values saved in cdk.json you need no flags:
-mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy
-
-# Or pass/override them on the command line (a -c flag wins over cdk.json):
-mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
-  -c publicBaseUrl=https://<host> \
-  -c cognitoDomainPrefix=<prefix> \
-  -c allowedRepos=owner/repo1,owner/repo2
+AWS_REGION=eu-north-1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk exec cdk bootstrap
 ```
 
-The account and region are **not hardcoded**: they come from `CDK_DEFAULT_ACCOUNT`
-/ `CDK_DEFAULT_REGION` (standard CDK behavior), which the CDK CLI derives from your
-active AWS profile / `AWS_REGION`. If neither is set the stack is region-agnostic
-and deploys to wherever the CLI points. To pin the region, set it in your profile
-or export it before deploying, e.g. `export AWS_REGION=eu-north-1` (Stockholm,
-the default region used here).
+Then deploy with [`scripts/deploy.sh`](../scripts/deploy.sh). It reads a
+gitignored `deploy.env` at the repo root (template:
+[`deploy.env.example`](../deploy.env.example)):
+
+```bash
+cp deploy.env.example deploy.env
+$EDITOR deploy.env                 # AWS_PROFILE, KIRO_API_KEY_SECRET_ARN, HOSTED_ZONE_ID, ...
+./scripts/deploy.sh --dry-run      # verify profile, account, region and the cdk command
+./scripts/deploy.sh --diff         # cdk diff against the deployed stacks (or: pnpm run diff)
+./scripts/deploy.sh                # or: mise exec -- pnpm run deploy
+```
+
+Before building anything the script:
+
+- checks that the AWS profile resolves to `AWS_ACCOUNT_ID`;
+- pins every aws/cdk call to `AWS_REGION` (default `eu-north-1`), so the
+  profile's own default region is never used;
+- refuses to deploy if `KiroRemoteStack` does not already exist in that region,
+  unless you pass `--first-deploy` for a brand-new environment;
+- refuses a `KIRO_API_KEY_SECRET_ARN` from another region or account, a missing
+  `KIRO_CLI_VERSION`, and `DNS_ZONE_NAME` without `HOSTED_ZONE_ID`.
+
+It then runs `pnpm install --frozen-lockfile` (skip with `--skip-install`) and
+`cdk deploy --all` with the mapped `-c` flags. `--diff` runs `cdk diff` with the
+same flags instead: CDK creates a read-only change set per stack and prints what
+a deploy would change, without deploying or building the bridge image.
+`--synth` does the same for `cdk synth`. Arguments after `--` go to
+`cdk deploy` verbatim, e.g. `./scripts/deploy.sh -- --require-approval never`.
+Run `./scripts/deploy.sh --help` for all flags.
+
+The CDK app itself hardcodes no account or region: they come from
+`CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION`, which the CDK CLI derives from the
+active AWS profile / `AWS_REGION`. If you run `cdk deploy` directly instead of the
+script, export `AWS_REGION` yourself and pass every `-c` flag the script would.
+Without `publicBaseUrl` and `kiroCliVersion` the app refuses to synthesize.
 
 The region you deploy to is stamped into region-scoped resource names — notably
 the Cognito managed-login host becomes `<cognitoDomainPrefix>.auth.<region>.amazoncognito.com`
@@ -727,13 +755,9 @@ deployed** — that is Kiro's side (the `kiro-cli` in the bridge talks to Kiro's
 `us-east-1` as well minimizes latency between the bridge and Kiro, but any region
 works.
 
-> The `deploy` script runs `cdk deploy --app "node bin/app.ts"` inside
-> `packages/cdk` (the same `--app` invocation as `synth`). The `--` passes the
-> `-c key=value` context args through pnpm to the CDK CLI. A root convenience
-> script mirrors it, so from the repository root you can also run
-> `mise exec -- pnpm run deploy -- -c publicBaseUrl=https://<host> ...`
-> (use `pnpm run deploy` rather than bare `pnpm deploy`, which is pnpm's own
-> built-in command).
+> The root `deploy` script runs `./scripts/deploy.sh`, so
+> `mise exec -- pnpm run deploy --dry-run` works too. Use `pnpm run deploy`
+> rather than bare `pnpm deploy`, which is pnpm's own built-in command.
 
 ## 6. Find the resource identifiers you'll need
 

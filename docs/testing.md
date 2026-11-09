@@ -34,15 +34,24 @@ mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk test
 
 ## Synthesizing the CDK stack
 
-`synth` is a quick way to confirm the CDK app assembles (and it runs the cdk-nag
-checks):
+The CDK unit tests synthesize the stack with test props and run the cdk-nag
+checks, with no Docker and no AWS credentials:
 
 ```bash
-mise exec -- pnpm synth   # pnpm --filter @nikovirtala/kiro-remote-cdk synth
+mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk test
 ```
 
-It uses placeholder images/code and the fallback `publicBaseUrl`, so it needs no
-Docker build and no AWS credentials.
+To synthesize exactly what a deploy would produce, run:
+
+```bash
+mise exec -- pnpm synth   # ./scripts/deploy.sh --synth
+```
+
+It reads `deploy.env`, checks the AWS account and region, bundles the real API
+Lambda, stages the bridge image build context, and runs the cdk-nag checks
+against the real asset constructs. It needs AWS credentials but not Docker (the
+image is built at deploy), and deploys nothing. See
+[Bootstrap and deploy](deploy.md#5-bootstrap-and-deploy).
 
 ## The live end-to-end harness
 
