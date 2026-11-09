@@ -1,0 +1,155 @@
+# syntax=docker/dockerfile:1
+
+# The SERVERLESS bridge image (the Lambda-path counterpart to the ECS
+# Dockerfile).
+#
+# It runs the SAME workspace code as the ECS bridge but packaged for the AWS
+# Lambda container runtime rather than a long-running ECS task:
+#
+# - linux/arm64 (the Lambda functions run on Graviton, Architecture.ARM_64).
+# - Installs kiro-cli via the OFFICIAL install script, pinned by a build ARG
+#   (never hardcode a version here) -- EXACTLY the stanza from
+#   packages/bridge/Dockerfile, including the kiro-cli AND kiro-cli-chat
+#   presence asserts. The caps-publisher spawns an ACP child
+#   (`kiro-cli acp ...`) which internally exec's `kiro-cli-chat`, and the
+#   consumer spawns `kiro-cli chat ...`, so BOTH binaries must be present and
+#   on PATH or the image is silently broken.
+# - esbuild-bundles BOTH Lambda entries at IMAGE-BUILD time into single
+#   self-contained CommonJS files (mirroring the ECS image's `bridge.cjs`
+#   step), so there is no bare `@nikovirtala/*` import and no raw `.ts` under a
+#   node_modules path at runtime (Node refuses to type-strip `.ts` resolved
+#   under node_modules):
+#     - dist/lambda-consumer.cjs  -> the SQS FIFO cloud consumer `handler`
+#       (packages/bridge/src/lambda-consumer.ts), and
+#     - dist/caps-publisher.cjs   -> the one-shot CONFIG#CAPS publisher
+#       `handler` (packages/bridge/src/caps-publisher.ts).
+# - Uses the AWS Lambda Node base image so the handler is invokable by the
+#   Lambda runtime. The CDK construct selects WHICH handler each function runs
+#   by overriding the image CMD (the `<file>.handler` string), so one image
+#   serves both the consumer and the publisher.
+# - KIRO_API_KEY is NEVER baked into the image: the functions resolve it at
+#   runtime from Secrets Manager via KIRO_API_KEY_SECRET_ARN (resolveKiroApiKey).
+
+ARG NODE_VERSION=26.13.0
+
+############################
+# deps: install workspace node_modules with pnpm and bundle both Lambda entries
+############################
+# CDK passes platform: Platform.LINUX_ARM64 to DockerImageCode.fromImageAsset,
+# so buildkit already sets the target platform from the build-level --platform
+# flag; a per-FROM --platform would be redundant (RedundantTargetPlatform).
+FROM node:${NODE_VERSION}-bookworm-slim AS deps
+WORKDIR /app
+
+# Install the pinned pnpm via npm (the node slim image ships npm but not
+# corepack, which was unbundled from recent Node distributions).
+ARG PNPM_VERSION=12.18.0
+RUN npm install -g pnpm@${PNPM_VERSION}
+
+# Copy only the manifests first for better layer caching.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/core/package.json packages/core/package.json
+COPY packages/bridge/package.json packages/bridge/package.json
+COPY packages/cdk/package.json packages/cdk/package.json
+
+# Install the bridge (and its workspace deps) plus the cdk package, whose dev
+# dependency esbuild performs the bundling below. --frozen-lockfile keeps the
+# image reproducible; --prod=false pulls in the esbuild devDependency.
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    PNPM_HOME=/pnpm pnpm install --frozen-lockfile \
+      --filter @nikovirtala/kiro-remote-bridge... \
+      --filter @nikovirtala/kiro-remote-cdk --prod=false
+
+# The sources that get bundled (the workspace .ts entries + their imports).
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/core ./packages/core
+COPY packages/bridge ./packages/bridge
+
+# Bundle BOTH Lambda entries to SINGLE self-contained CommonJS files. Settings
+# mirror the ECS image's bridge.cjs step: @aws-sdk/* is BUNDLED IN (no
+# --external) so the runtime image needs no node_modules at all; `.cjs` forces
+# CommonJS (the repo-root package.json is "type": "module"); and
+# --resolve-extensions includes `.ts` so esbuild resolves the repo's explicit
+# `.ts` import specifiers (allowImportingTsExtensions +
+# rewriteRelativeImportExtensions in tsconfig) without a custom plugin. The
+# kiro-cli child process is a runtime PATH binary spawned via child_process,
+# not an import, so it is neither bundled nor externalized.
+#
+# esbuild is a devDependency of @nikovirtala/kiro-remote-cdk; under pnpm's
+# isolated node_modules layout its bin is linked ONLY into that package's
+# node_modules/.bin, so we invoke it by its explicit path (same as the ECS
+# image).
+RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/lambda-consumer.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --format=cjs \
+      --resolve-extensions=.ts,.js,.mjs,.json \
+      --outfile=/app/dist/lambda-consumer.cjs \
+    && packages/cdk/node_modules/.bin/esbuild packages/bridge/src/caps-publisher.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --format=cjs \
+      --resolve-extensions=.ts,.js,.mjs,.json \
+      --outfile=/app/dist/caps-publisher.cjs
+
+############################
+# runtime: AWS Lambda Node base + kiro-cli + the self-contained bundles
+############################
+# The AWS Lambda base image ships the Runtime Interface Client/Emulator so the
+# bundled `handler` export is invokable by the Lambda service. public.ecr.aws
+# is the canonical source for the managed base images.
+FROM public.ecr.aws/lambda/nodejs:22 AS runtime
+
+# The kiro-cli version to install is a REQUIRED build arg (no default pin here).
+ARG KIRO_CLI_VERSION
+# The official install script URL (overridable for mirrors/air-gapped builds).
+# Per the Kiro headless docs the canonical command is
+# `curl -fsSL https://cli.kiro.dev/install | bash` (note: no `.sh` suffix).
+ARG KIRO_CLI_INSTALL_URL=https://cli.kiro.dev/install
+
+# Install kiro-cli EXACTLY like the ECS image: the official script needs a
+# downloader (curl), `unzip`, and `sha256sum`. The AWS Lambda base image is
+# Amazon Linux 2023, so packages come from `dnf`/`microdnf`, not apt. The
+# script's shebang is `#!/bin/bash` and it uses bash-only features, so it MUST
+# be piped to `bash`. The version is passed via `--version` (strict semver).
+#
+# CRITICAL: the CLI ships TWO binaries -- `kiro-cli` (the entrypoint) and
+# `kiro-cli-chat` (the headless chat/ACP engine that both `kiro-cli chat` and
+# `kiro-cli acp` internally exec). We set `Q_INSTALL_GLOBAL=1` so BOTH binaries
+# land in /usr/local/bin (on the default PATH and siblings of each other), then
+# ASSERT both are present+executable so a standalone zip (which ships no
+# kiro-cli-chat) fails the build LOUDLY here instead of producing a broken
+# image. This mirrors packages/bridge/Dockerfile's install stanza 1:1.
+RUN (command -v microdnf >/dev/null 2>&1 \
+      && microdnf install -y bash tar gzip curl unzip ca-certificates \
+      || dnf install -y bash tar gzip curl unzip ca-certificates) \
+    && test -n "${KIRO_CLI_VERSION}" \
+    && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | Q_INSTALL_GLOBAL=1 bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
+    && { [ -x /usr/local/bin/kiro-cli ] || { [ -d /root/.local/bin ] && cp -a /root/.local/bin/. /usr/local/bin/; }; } \
+    && { [ -x /usr/local/bin/kiro-cli ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
+    && command -v kiro-cli-chat >/dev/null 2>&1 \
+      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; } \
+    && chmod 0755 /usr/local/bin/kiro-cli /usr/local/bin/kiro-cli-chat \
+    && kiro-cli --version
+
+# kiro-cli needs a WRITABLE HOME/KIRO_HOME for its config/sessions/agent state.
+# The Lambda execution environment only guarantees /tmp is writable, so point
+# HOME and KIRO_HOME under /tmp (the handlers never persist anything that must
+# survive an invocation -- durable state lives in DynamoDB/S3).
+ENV HOME=/tmp \
+    KIRO_HOME=/tmp/.kiro
+
+# Both self-contained bundles are the only app artifacts needed at runtime:
+# each inlines the @nikovirtala/* workspace code AND @aws-sdk/*, so there is no
+# node_modules and no raw .ts source in the runtime image. They land under the
+# Lambda task root so the CMD can address them as `<file>.handler`.
+COPY --from=deps /app/dist/lambda-consumer.cjs ${LAMBDA_TASK_ROOT}/lambda-consumer.cjs
+COPY --from=deps /app/dist/caps-publisher.cjs ${LAMBDA_TASK_ROOT}/caps-publisher.cjs
+
+# Default to the SQS consumer handler. The CDK construct overrides this CMD for
+# the caps-publisher function (to `caps-publisher.handler`) so one image serves
+# both functions. The AWS Lambda base image's ENTRYPOINT is the Runtime
+# Interface Client, which invokes the handler named by this CMD.
+CMD ["lambda-consumer.handler"]

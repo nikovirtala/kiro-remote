@@ -1,17 +1,24 @@
 /**
  * Pure selection logic for the opt-in production assets wired by bin/app.ts.
  *
- * `-c kiroCliVersion=<ver>` is the SINGLE opt-in trigger for BOTH real assets:
- *   - the real bridge container image, built from
- *     [`packages/bridge/Dockerfile`](../../bridge/Dockerfile) via
+ * `-c kiroCliVersion=<ver>` is the SINGLE opt-in trigger for ALL real assets:
+ *   - the real bridge container image (the ECS/Fargate `serve` host), built
+ *     from [`packages/bridge/Dockerfile`](../../bridge/Dockerfile) via
  *     `ContainerImage.fromAsset` (needs Docker, happens on the operator's
- *     machine), and
+ *     machine),
+ *   - the real serverless (Lambda) bridge container image, built from
+ *     [`packages/bridge/Dockerfile.lambda`](../../bridge/Dockerfile.lambda) via
+ *     `DockerImageCode.fromImageAsset` (also needs Docker); it carries the SQS
+ *     consumer AND caps-publisher handlers and is only consumed by the construct
+ *     in the `lambda`/`both` bridge modes, and
  *   - the real bundled API Lambda {@link Code} (esbuild in-process, no Docker;
  *     see [`./api-asset.ts`](./api-asset.ts)).
  *
- * When the flag is ABSENT, both selections stay `undefined` so the construct
+ * When the flag is ABSENT, every selection stays `undefined` so the construct
  * falls back to its lightweight placeholders and `cdk synth` needs no Docker
- * and no bundler (the constrained CI/sandbox path).
+ * and no bundler (the constrained CI/sandbox path) -- for ALL bridge modes,
+ * including `lambda`/`both` (the Lambda functions then use a placeholder
+ * {@link DockerImageCode} that references a not-yet-deployed ECR repo).
  *
  * The Dockerfile's `KIRO_CLI_VERSION` build ARG has NO default, so the real
  * path must be rejected with a CLEAR error whenever the trigger is present but
@@ -21,7 +28,7 @@
  */
 
 import type { ContainerImage } from "aws-cdk-lib/aws-ecs";
-import type { Code } from "aws-cdk-lib/aws-lambda";
+import type { Code, DockerImageCode } from "aws-cdk-lib/aws-lambda";
 
 /**
  * Paths excluded from the bridge image's `ContainerImage.fromAsset` build
@@ -62,8 +69,15 @@ export interface AppAssetsInput {
 /** Factories that actually build the (Docker/esbuild) assets. Injected so the
  * selection logic is testable without triggering a build. */
 export interface AppAssetsFactories {
-  /** Build the real bridge image from the Dockerfile (needs Docker). */
+  /** Build the real ECS/Fargate bridge image from the Dockerfile (needs Docker). */
   buildBridgeImage: (kiroCliVersion: string) => ContainerImage;
+  /**
+   * Build the real serverless (Lambda) bridge image from Dockerfile.lambda
+   * (needs Docker). It carries both the SQS consumer and the caps-publisher
+   * handlers; the construct selects which by passing the handler `cmd` so each
+   * function runs its own entry from the ONE image asset (CDK dedups by hash).
+   */
+  buildLambdaImage: (kiroCliVersion: string, cmd: string[]) => DockerImageCode;
   /** Bundle the real API Lambda code with esbuild (in-process, no Docker). */
   buildApiLambdaCode: () => Code;
 }
@@ -73,8 +87,15 @@ export interface AppAssetsFactories {
 export interface AppAssets {
   /** The validated kiro-cli version, when the real path is opted into. */
   kiroCliVersion?: string;
-  /** The real bridge image, or `undefined` for the placeholder. */
+  /** The real ECS/Fargate bridge image, or `undefined` for the placeholder. */
   bridgeImage?: ContainerImage;
+  /**
+   * A factory that builds the real serverless (Lambda) bridge image for a given
+   * handler `cmd`, or `undefined` for the placeholder path. The construct calls
+   * it once per function (consumer + publisher) so each runs its own handler
+   * from the ONE image asset. Bound to the resolved kiro-cli version.
+   */
+  lambdaImage?: (cmd: string[]) => DockerImageCode;
   /** The real API Lambda code, or `undefined` for the placeholder. */
   apiLambdaCode?: Code;
 }
@@ -116,6 +137,10 @@ export function selectAppAssets(input: AppAssetsInput, factories: AppAssetsFacto
   return {
     kiroCliVersion,
     bridgeImage: factories.buildBridgeImage(kiroCliVersion),
+    // Bind the version so the construct supplies only the per-function handler
+    // `cmd`. Not invoked here: the construct calls it (zero, one, or two times)
+    // depending on the bridge mode.
+    lambdaImage: (cmd: string[]) => factories.buildLambdaImage(kiroCliVersion, cmd),
     apiLambdaCode: factories.buildApiLambdaCode(),
   };
 }
