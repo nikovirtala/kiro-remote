@@ -49,6 +49,24 @@ function synth(
   return { template: Template.fromStack(stack), stack };
 }
 
+/**
+ * Synthesize the construct in a specific bridge mode. `bridgeMode` omitted ==>
+ * the default (`fargate`). Used by the per-mode resource-graph tests below.
+ */
+function synthMode(bridgeMode?: "fargate" | "lambda" | "both"): { template: Template } {
+  const app = new App();
+  const stack = new Stack(app, "TestStack", {
+    env: { account: "111111111111", region: "eu-west-1" },
+  });
+  new KiroRemote(stack, "KiroRemote", {
+    publicBaseUrl: "https://kiro.example.com",
+    cognitoDomainPrefix: "kiro-remote-test",
+    allowedRepos: ["acme/*"],
+    ...(bridgeMode ? { bridgeMode } : {}),
+  });
+  return { template: Template.fromStack(stack) };
+}
+
 describe("KiroRemote", () => {
   let template: Template;
   let stack: Stack;
@@ -487,5 +505,143 @@ describe("KiroRemote", () => {
     for (const record of Object.values(records)) {
       expect((record.Properties as { Name: string }).Name).toBe("api.example.dev.");
     }
+  });
+});
+
+/**
+ * The deploy-time bridge-mode toggle (FEAT-004). These tests synthesize the
+ * construct in each mode and assert the per-mode resource graph, so they would
+ * FAIL if the toggle were ignored (e.g. a Lambda consumer leaking into the
+ * default stack, or the FargateService being dropped from `both`).
+ */
+describe("KiroRemote bridge mode", () => {
+  // Image-package Lambda functions (PackageType: Image) are the serverless
+  // bridge consumer + caps publisher. The API/OAuth Lambdas are Zip-package, so
+  // this cleanly isolates the Lambda-path functions.
+  function imageFunctions(t: Template): Array<{ Properties: Record<string, unknown> }> {
+    const found = t.findResources("AWS::Lambda::Function", {
+      Properties: { PackageType: "Image" },
+    });
+    return Object.values(found) as Array<{ Properties: Record<string, unknown> }>;
+  }
+
+  test("fargate (default) provisions exactly one FargateService and NO Lambda consumer/event-source", () => {
+    const { template: t } = synthMode(); // default
+    // Exactly one Fargate service, as today.
+    t.resourceCountIs("AWS::ECS::Service", 1);
+    // No container-image (serverless bridge) functions.
+    expect(imageFunctions(t).length).toBe(0);
+    // No SQS event-source mapping (the Fargate bridge polls the queue itself).
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 0);
+    // No caps-publisher schedule.
+    t.resourceCountIs("AWS::Events::Rule", 0);
+    // The queue visibility timeout is unchanged at 60s in the default stack.
+    t.hasResourceProperties("AWS::SQS::Queue", { VisibilityTimeout: 60 });
+  });
+
+  test("explicit fargate mode equals the default (one FargateService, no Lambda bridge)", () => {
+    const { template: t } = synthMode("fargate");
+    t.resourceCountIs("AWS::ECS::Service", 1);
+    expect(imageFunctions(t).length).toBe(0);
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 0);
+  });
+
+  test("lambda mode provisions the arm64 DockerImageFunction consumer wired to the FIFO queue, and NO FargateService", () => {
+    const { template: t } = synthMode("lambda");
+
+    // Fargate is NOT provisioned in lambda-only mode.
+    t.resourceCountIs("AWS::ECS::Service", 0);
+    t.resourceCountIs("AWS::ECS::TaskDefinition", 0);
+    // No VPC/NAT either (the whole Fargate networking block is skipped).
+    t.resourceCountIs("AWS::EC2::NatGateway", 0);
+
+    // Two container-image functions: the SQS consumer + the caps publisher.
+    const images = imageFunctions(t);
+    expect(images.length).toBe(2);
+    // Both are arm64.
+    for (const fn of images) {
+      expect(fn.Properties.Architectures).toEqual(["arm64"]);
+    }
+
+    // The consumer has the 15-minute timeout and the reserved-concurrency cap
+    // that maps maxCloudSessions (default 10).
+    const consumer = images.find((fn) => (fn.Properties.Timeout as number) === 900);
+    expect(consumer).toBeDefined();
+    expect(consumer?.Properties.ReservedConcurrentExecutions).toBe(10);
+
+    // A native SQS event-source mapping to the command queue with partial-batch
+    // failure reporting and a FIFO-appropriate batch size.
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 1);
+    t.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+      BatchSize: 1,
+    });
+
+    // The queue visibility timeout is raised to >= the consumer timeout so a
+    // long cloud turn does not get redelivered mid-flight.
+    t.hasResourceProperties("AWS::SQS::Queue", { VisibilityTimeout: 900 });
+
+    // The caps-publisher is invoked on a schedule.
+    t.resourceCountIs("AWS::Events::Rule", 1);
+    t.hasResourceProperties("AWS::Events::Rule", {
+      ScheduleExpression: Match.stringLikeRegexp("rate\\(6 hours\\)"),
+    });
+  });
+
+  test("lambda mode grants the consumer the SAME scoped data-plane access the Fargate task role has", () => {
+    const { template: t } = synthMode("lambda");
+    // Find the consumer role (the function with the 15-minute timeout) and
+    // collect the service prefixes it is granted. It must cover exactly the
+    // same services as the Fargate task role: DynamoDB, S3, SQS, SecretsManager.
+    const policies = t.findResources("AWS::IAM::Policy");
+    const servicesByRole: Record<string, Set<string>> = {};
+    for (const policy of Object.values(policies)) {
+      const props = policy.Properties as {
+        PolicyDocument: { Statement: Array<{ Action?: string | string[] }> };
+        Roles?: Array<{ Ref?: string }>;
+      };
+      const roleRef = props.Roles?.[0]?.Ref ?? "unknown";
+      const set = servicesByRole[roleRef] ?? new Set<string>();
+      servicesByRole[roleRef] = set;
+      for (const stmt of props.PolicyDocument.Statement) {
+        const actions = ([] as string[]).concat(stmt.Action ?? []);
+        for (const a of actions) {
+          set.add(a.split(":")[0]);
+        }
+      }
+    }
+    const consumerRole = Object.keys(servicesByRole).find((r) => r.includes("BridgeConsumerFn"));
+    expect(consumerRole).toBeDefined();
+    const svc = servicesByRole[consumerRole as string];
+    expect(svc.has("dynamodb")).toBe(true);
+    expect(svc.has("s3")).toBe(true);
+    expect(svc.has("sqs")).toBe(true);
+    expect(svc.has("secretsmanager")).toBe(true);
+    // Never a star-everything action.
+    expect(svc.has("*")).toBe(false);
+  });
+
+  test("lambda mode resolves KIRO_API_KEY at runtime from Secrets Manager (ARN env, never a plain key)", () => {
+    const { template: t } = synthMode("lambda");
+    const images = imageFunctions(t);
+    for (const fn of images) {
+      const env = (fn.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables;
+      // The secret ARN is passed so resolveKiroApiKey can read it at runtime.
+      expect(env?.KIRO_API_KEY_SECRET_ARN).toBeDefined();
+      // AWS_REGION is a RESERVED Lambda env var and must never be set here.
+      expect(env?.AWS_REGION).toBeUndefined();
+      // The key itself is never a plain env var.
+      expect(env?.KIRO_API_KEY).toBeUndefined();
+    }
+  });
+
+  test("both mode provisions the FargateService AND the Lambda consumer", () => {
+    const { template: t } = synthMode("both");
+    // Fargate is retained.
+    t.resourceCountIs("AWS::ECS::Service", 1);
+    // AND the serverless bridge (consumer + publisher) exists.
+    expect(imageFunctions(t).length).toBe(2);
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 1);
+    t.resourceCountIs("AWS::Events::Rule", 1);
   });
 });
