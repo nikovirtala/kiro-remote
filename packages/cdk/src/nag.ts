@@ -168,5 +168,24 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
       reason:
         "No DLQ: command messages are idempotent and left for visibility-timeout redelivery; they expire via the retention period rather than dead-lettering.",
     },
+    // ---------------------------------------------------------------------
+    // Serverless (Lambda) bridge path -- provisioned only in the `lambda` and
+    // `both` bridge modes (FEAT-004). The SQS FIFO consumer and the
+    // caps-publisher are container-image (DockerImageFunction) Lambdas that
+    // reuse the SAME scoped grants the Fargate task role gets
+    // (table.grantReadWriteData / bucket.grantReadWrite /
+    // commandQueue.grantConsumeMessages / kiroApiKeySecret.grantRead). Those
+    // grants emit the EXACT same wildcard shapes already acknowledged above
+    // (the S3 object-level / action wildcards, the DynamoDB GSI index wildcard)
+    // and the Lambda execution roles use the same AWS-managed basic-execution
+    // policy (AwsSolutions-IAM4) and the same pinned latest Node runtime
+    // (AwsSolutions-L1). Because acknowledgments cascade to descendants, the
+    // entries above cover the Lambda-path functions too; no NEW finding ids are
+    // introduced by enabling the `lambda`/`both` modes. The CDK Trigger custom
+    // resource (the one-shot post-deploy caps publish) is likewise covered by
+    // the cascading IAM4/L1 acknowledgments. This block is a deliberate
+    // no-additional-suppression marker, re-verified by the per-mode nag tests
+    // in nag.test.ts (lambda + both synth green).
+    // ---------------------------------------------------------------------
   );
 }

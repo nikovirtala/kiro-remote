@@ -2,6 +2,14 @@
  * KiroRemote: the single reusable CDK construct that provisions the whole
  * control plane.
  *
+ * BRIDGE MODE (the deploy-time host selector). The cloud command path can be
+ * driven by the persistent ECS Fargate ACP bridge, by a serverless Lambda
+ * consumer, or by both -- selected per deploy via {@link BridgeMode} (default
+ * `fargate`). Fargate is RETAINED as the ONLY host for the ACP
+ * adopt/session-load path; the Lambda path is a parallel, serverless cloud path
+ * (SQS FIFO consumer + a CONFIG#CAPS publisher). The operator chooses the mode;
+ * the default reproduces today's Fargate-only stack exactly.
+ *
  * It wires, as one coherent resource graph:
  *   - the single DynamoDB table (on-demand, PITR on, GSI1, a `ttl` attribute),
  *   - the S3 bucket for oversized prompts/payloads (public access blocked,
@@ -45,6 +53,7 @@ import {
   TableEncryption,
 } from "aws-cdk-lib/aws-dynamodb";
 import { Peer, Port, SecurityGroup, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
+import { Repository as EcrRepository } from "aws-cdk-lib/aws-ecr";
 import {
   Cluster,
   ContainerImage,
@@ -56,8 +65,18 @@ import {
   LogDrivers,
   OperatingSystemFamily,
 } from "aws-cdk-lib/aws-ecs";
+import { Rule, Schedule } from "aws-cdk-lib/aws-events";
+import { LambdaFunction as LambdaFunctionTarget } from "aws-cdk-lib/aws-events-targets";
 import { Key } from "aws-cdk-lib/aws-kms";
-import { Code, Function as LambdaFunction, Runtime } from "aws-cdk-lib/aws-lambda";
+import {
+  Architecture,
+  Code,
+  DockerImageCode,
+  DockerImageFunction,
+  Function as LambdaFunction,
+  Runtime,
+} from "aws-cdk-lib/aws-lambda";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import {
   AaaaRecord,
@@ -70,7 +89,27 @@ import { ApiGatewayv2DomainProperties } from "aws-cdk-lib/aws-route53-targets";
 import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
 import { type ISecret, Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue } from "aws-cdk-lib/aws-sqs";
+import { Trigger } from "aws-cdk-lib/triggers";
 import { Construct } from "constructs";
+
+/**
+ * Which host(s) drive the cloud command path. Selected per deploy; the default
+ * is `fargate` so an omitted prop reproduces today's stack exactly.
+ *
+ *   - `fargate` (default): the persistent ECS Fargate ACP bridge ONLY. This is
+ *     the ONLY host for the ACP adopt/session-load path, so Fargate is RETAINED
+ *     deliberately and never removed.
+ *   - `lambda`: the serverless cloud path ONLY -- a container-image Lambda
+ *     consumes the SQS FIFO queue and a second function publishes CONFIG#CAPS.
+ *     `adopt`/session-load is NOT supported in this mode (no live ACP child).
+ *   - `both`: provision BOTH hosts (the operator picks per deploy).
+ *
+ * erasableSyntaxOnly: a union literal, not an enum.
+ */
+export type BridgeMode = "fargate" | "lambda" | "both";
+
+/** Default bridge mode: Fargate-only, preserving the backward-compatible stack. */
+export const DEFAULT_BRIDGE_MODE: BridgeMode = "fargate";
 
 /** Default CIMD-allowed host besides the facade's own host. */
 export const DEFAULT_CIMD_ALLOWED_HOST = "claude.ai";
@@ -119,6 +158,19 @@ export interface KiroRemoteProps {
    * Dockerfile; ignored when {@link bridgeImage} is supplied.
    */
   kiroCliVersion?: string;
+
+  /**
+   * Which host(s) drive the cloud command path. Defaults to
+   * {@link DEFAULT_BRIDGE_MODE} (`fargate`), so omitting it reproduces today's
+   * Fargate-only stack exactly. See {@link BridgeMode}.
+   *
+   * Fargate is RETAINED deliberately: it is the ONLY host for the ACP
+   * adopt/session-load path, which the Lambda path does not cover. `lambda`
+   * provisions the serverless cloud path (SQS consumer + caps publisher) and
+   * NO Fargate service; `both` provisions both so the operator can migrate or
+   * run them side by side.
+   */
+  bridgeMode?: BridgeMode;
 
   /** Optional pre-registered public clients passed through to the facade. */
   preRegisteredClients?: PreRegisteredClientProps[];
@@ -199,6 +251,20 @@ export interface KiroRemoteProps {
   bridgeImage?: ContainerImage;
 
   /**
+   * Override factory for the serverless (Lambda) bridge container image used by
+   * the SQS consumer and the caps-publisher functions in `lambda`/`both` modes.
+   * It is called ONCE PER FUNCTION with that function's handler `cmd` (so each
+   * runs its own entry from the ONE image asset, which CDK dedups by hash).
+   * When omitted, a placeholder {@link DockerImageCode} referencing a
+   * not-yet-deployed ECR repo is used so `cdk synth` runs WITHOUT a Docker
+   * build (same gating as {@link bridgeImage}). Production deploys pass a
+   * factory wrapping `DockerImageCode.fromImageAsset(repoRoot, { file:
+   * "packages/bridge/Dockerfile.lambda", buildArgs: { KIRO_CLI_VERSION },
+   * platform: Platform.LINUX_ARM64, cmd })`.
+   */
+  lambdaImage?: (cmd: string[]) => DockerImageCode;
+
+  /**
    * Override for the API Lambda code. When omitted, a tiny inline placeholder
    * handler is used so `cdk synth` runs WITHOUT a Node bundling step in
    * constrained CI/sandboxes. Production deploys pass a bundled asset whose
@@ -220,6 +286,26 @@ function placeholderLambdaCode(): Code {
   );
 }
 
+/**
+ * A placeholder {@link DockerImageCode} for the serverless bridge functions so
+ * `cdk synth` needs no Docker build in the `lambda`/`both` modes. It references
+ * a not-yet-deployed ECR repo by name (the image URI is synthesized but never
+ * built/pulled), mirroring how {@link placeholderBridgeImage} keeps the ECS
+ * path Docker-free. The `cmd` (the per-function handler) is carried through so
+ * the synthesized function still advertises the right handler. Override in prod
+ * with a `DockerImageCode.fromImageAsset` factory. The ECR repo is imported
+ * once and reused across functions (CDK requires a unique construct id, so the
+ * lookup is memoized on the scope's tree).
+ */
+function placeholderLambdaImage(scope: Construct, cmd: string[]): DockerImageCode {
+  const id = "PlaceholderBridgeLambdaRepo";
+  const existing = scope.node.tryFindChild(id) as EcrRepository | undefined;
+  const repo =
+    existing ??
+    EcrRepository.fromRepositoryName(scope, id, "kiro-remote-bridge-lambda-placeholder");
+  return DockerImageCode.fromEcr(repo, { tagOrDigest: "latest", cmd });
+}
+
 export class KiroRemote extends Construct {
   /** The single DynamoDB table. */
   readonly table: Table;
@@ -233,8 +319,23 @@ export class KiroRemote extends Construct {
   readonly kiroApiKeySecret: ISecret;
   /** The Cognito facade (user pool, resource server, facade client). */
   readonly auth: KiroRemoteAuth;
-  /** The ECS Fargate bridge service. */
-  readonly bridgeService: FargateService;
+  /** The selected bridge mode (defaults to {@link DEFAULT_BRIDGE_MODE}). */
+  readonly bridgeMode: BridgeMode;
+  /**
+   * The ECS Fargate bridge service. Present only in `fargate`/`both` modes
+   * (the default). `undefined` in `lambda`-only mode.
+   */
+  readonly bridgeService?: FargateService;
+  /**
+   * The serverless (Lambda) SQS FIFO command consumer. Present only in
+   * `lambda`/`both` modes.
+   */
+  readonly consumerFn?: DockerImageFunction;
+  /**
+   * The serverless (Lambda) one-shot CONFIG#CAPS publisher. Present only in
+   * `lambda`/`both` modes.
+   */
+  readonly capsPublisherFn?: DockerImageFunction;
   /** The HTTP API fronting the api Lambdas at base path /v1. */
   readonly httpApi: HttpApi;
   /**
@@ -254,6 +355,9 @@ export class KiroRemote extends Construct {
     super(scope, id);
 
     const region = Stack.of(this).region;
+    this.bridgeMode = props.bridgeMode ?? DEFAULT_BRIDGE_MODE;
+    const wantFargate = this.bridgeMode === "fargate" || this.bridgeMode === "both";
+    const wantLambda = this.bridgeMode === "lambda" || this.bridgeMode === "both";
     const base = props.publicBaseUrl.replace(/\/+$/, "");
     const ownHost = base.replace(/^https?:\/\//, "").split("/")[0];
     const eventTtlDays = props.eventTtlDays ?? DEFAULT_EVENT_TTL_DAYS;
@@ -298,11 +402,20 @@ export class KiroRemote extends Construct {
 
     // FIFO queue; the producer sets MessageGroupId = sessionId to preserve
     // per-session ordering. Content-based dedup avoids a separate dedup id.
+    //
+    // VISIBILITY TIMEOUT. The Fargate path long-polls and acks quickly, so 60s
+    // is plenty. The Lambda SQS event-source mapping, however, REQUIRES the
+    // source queue's visibility timeout to be at least the consumer function's
+    // timeout (the consumer AWAITs a whole cloud turn, up to its 15-minute
+    // ceiling) -- otherwise a message would become visible again mid-turn and
+    // be redelivered. So the visibility timeout is 15 minutes ONLY when the
+    // Lambda path is enabled; in the default Fargate-only stack it stays 60s so
+    // the template is byte-for-byte unchanged.
     this.commandQueue = new Queue(this, "CommandQueue.fifo", {
       fifo: true,
       contentBasedDeduplication: true,
       retentionPeriod: Duration.days(4),
-      visibilityTimeout: Duration.seconds(60),
+      visibilityTimeout: wantLambda ? Duration.minutes(15) : Duration.seconds(60),
       enforceSSL: true,
     });
 
@@ -551,114 +664,236 @@ export class KiroRemote extends Construct {
 
     /* --------------------------- Fargate bridge -------------------------- */
 
-    // A VPC with ONLY public subnets and NO NAT gateways. The bridge runs with
-    // a public IP and reaches AWS APIs / kiro.dev over egress-443-only.
-    const vpc = new Vpc(this, "BridgeVpc", {
-      maxAzs: 2,
-      natGateways: 0,
-      subnetConfiguration: [{ name: "public", subnetType: SubnetType.PUBLIC, cidrMask: 24 }],
-    });
+    // Provisioned in `fargate` (the default) and `both` modes. Fargate is the
+    // ONLY host for the ACP adopt/session-load path, so it is RETAINED even
+    // when the Lambda path is also enabled. In `lambda`-only mode none of the
+    // VPC/cluster/task/service below is created.
+    if (wantFargate) {
+      // A VPC with ONLY public subnets and NO NAT gateways. The bridge runs with
+      // a public IP and reaches AWS APIs / kiro.dev over egress-443-only.
+      const vpc = new Vpc(this, "BridgeVpc", {
+        maxAzs: 2,
+        natGateways: 0,
+        subnetConfiguration: [{ name: "public", subnetType: SubnetType.PUBLIC, cidrMask: 24 }],
+      });
 
-    const bridgeSg = new SecurityGroup(this, "BridgeSg", {
-      vpc,
-      allowAllOutbound: false,
-      description: "Bridge task SG: no ingress, egress 443 only",
-    });
-    // Egress on 443 ONLY (HTTPS to AWS APIs + kiro.dev); NO ingress at all.
-    bridgeSg.addEgressRule(Peer.anyIpv4(), Port.tcp(443), "HTTPS egress only");
+      const bridgeSg = new SecurityGroup(this, "BridgeSg", {
+        vpc,
+        allowAllOutbound: false,
+        description: "Bridge task SG: no ingress, egress 443 only",
+      });
+      // Egress on 443 ONLY (HTTPS to AWS APIs + kiro.dev); NO ingress at all.
+      bridgeSg.addEgressRule(Peer.anyIpv4(), Port.tcp(443), "HTTPS egress only");
 
-    const cluster = new Cluster(this, "BridgeCluster", {
-      vpc,
-      containerInsightsV2: ContainerInsights.ENABLED,
-    });
+      const cluster = new Cluster(this, "BridgeCluster", {
+        vpc,
+        containerInsightsV2: ContainerInsights.ENABLED,
+      });
 
-    const taskDef = new FargateTaskDefinition(this, "BridgeTask", {
-      cpu: 512,
-      memoryLimitMiB: 1024,
-      runtimePlatform: {
-        cpuArchitecture: CpuArchitecture.ARM64,
-        operatingSystemFamily: OperatingSystemFamily.LINUX,
-      },
-    });
+      const taskDef = new FargateTaskDefinition(this, "BridgeTask", {
+        cpu: 512,
+        memoryLimitMiB: 1024,
+        runtimePlatform: {
+          cpuArchitecture: CpuArchitecture.ARM64,
+          operatingSystemFamily: OperatingSystemFamily.LINUX,
+        },
+      });
 
-    const bridgeLogGroup = new LogGroup(this, "BridgeLogs", {
-      retention: RetentionDays.ONE_MONTH,
-      // RETAIN so a failed-stack rollback (e.g. the ECS deployment circuit
-      // breaker tripping) does NOT delete the container logs -- otherwise the
-      // diagnostics for the very failure that caused the rollback are lost
-      // ("No CloudWatch Logs found").
-      removalPolicy: RemovalPolicy.RETAIN,
-    });
+      const bridgeLogGroup = new LogGroup(this, "BridgeLogs", {
+        retention: RetentionDays.ONE_MONTH,
+        // RETAIN so a failed-stack rollback (e.g. the ECS deployment circuit
+        // breaker tripping) does NOT delete the container logs -- otherwise the
+        // diagnostics for the very failure that caused the rollback are lost
+        // ("No CloudWatch Logs found").
+        removalPolicy: RemovalPolicy.RETAIN,
+      });
 
-    taskDef.addContainer("bridge", {
-      image: props.bridgeImage ?? placeholderBridgeImage(),
-      command: ["serve"],
-      environment: {
+      taskDef.addContainer("bridge", {
+        image: props.bridgeImage ?? placeholderBridgeImage(),
+        command: ["serve"],
+        environment: {
+          TABLE_NAME: this.table.tableName,
+          BUCKET_NAME: this.bucket.bucketName,
+          COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+          AWS_REGION: region,
+          MAX_CLOUD_SESSIONS: String(maxCloudSessions),
+          EVENT_TTL_DAYS: String(eventTtlDays),
+          PERMISSION_TIMEOUT_MS: String(permissionTimeout.toMilliseconds()),
+          ALLOWED_REPOS: props.allowedRepos.join(","),
+          // Verbose by default while the ACP child's startup is being
+          // diagnosed: the bridge logger honors BRIDGE_LOG_LEVEL, and serve.ts
+          // passes KIRO_LOG_LEVEL=debug into the spawned kiro-cli so its own
+          // stderr diagnostics surface (the transport logs the stderr tail at
+          // ERROR on a non-zero exit). Dial both back to "info" once stable.
+          BRIDGE_LOG_LEVEL: "debug",
+          KIRO_LOG_LEVEL: "debug",
+        },
+        // KIRO_API_KEY arrives as an ECS SECRET (not a plain env var).
+        secrets: {
+          KIRO_API_KEY: EcsSecret.fromSecretsManager(this.kiroApiKeySecret),
+        },
+        logging: LogDrivers.awsLogs({ streamPrefix: "bridge", logGroup: bridgeLogGroup }),
+        // Cheap liveness probe: a bare Node exec that only proves the container's
+        // Node runtime is responsive. It deliberately does NOT invoke the bridge
+        // CLI -- the old `node packages/bridge/src/cli.ts healthcheck` both hit
+        // the node_modules .ts type-strip crash and called a `healthcheck`
+        // subcommand the CLI does not implement (cli.ts exits 2 on unknown
+        // commands). This matches the Dockerfile HEALTHCHECK's intent.
+        healthCheck: {
+          command: ["CMD-SHELL", 'node -e "process.exit(0)" || exit 1'],
+          interval: Duration.seconds(30),
+          timeout: Duration.seconds(5),
+          retries: 2,
+          startPeriod: Duration.seconds(20),
+        },
+      });
+
+      // Task-role grants: scoped to its OWN table/bucket/queue/secret only.
+      this.table.grantReadWriteData(taskDef.taskRole);
+      this.bucket.grantReadWrite(taskDef.taskRole);
+      this.commandQueue.grantConsumeMessages(taskDef.taskRole);
+      this.kiroApiKeySecret.grantRead(taskDef.taskRole);
+      // The execution role needs to pull the secret to inject it at start.
+      const executionRole = taskDef.obtainExecutionRole();
+      this.kiroApiKeySecret.grantRead(executionRole);
+      // Scoped to the execution role only (not the stack): with an ECR asset
+      // image, CDK grants ecr:GetAuthorizationToken on "*", an action that does
+      // not support resource-level permissions. Image pulls stay scoped to the
+      // asset repository.
+      Validations.of(executionRole).acknowledge({
+        id: "AwsSolutions-IAM5[Resource::*]",
+        reason:
+          "ecr:GetAuthorizationToken does not support resource-level permissions and must use Resource '*' (https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerregistry.html); ECR pull actions remain scoped to the CDK asset repository.",
+      });
+
+      this.bridgeService = new FargateService(this, "BridgeService", {
+        cluster,
+        taskDefinition: taskDef,
+        desiredCount: 1,
+        assignPublicIp: true,
+        vpcSubnets: { subnetType: SubnetType.PUBLIC },
+        securityGroups: [bridgeSg],
+        minHealthyPercent: 0,
+        maxHealthyPercent: 100,
+        // Fail fast on repeated task start-up failures (and roll back).
+        circuitBreaker: { rollback: true },
+      });
+    }
+
+    /* ------------------------- Serverless (Lambda) bridge ---------------- */
+
+    // Provisioned in `lambda` and `both` modes. The serverless cloud path is a
+    // container-image Lambda (arm64, kiro-cli on PATH) that CONSUMES the SAME
+    // SQS FIFO command queue the API Lambda produces to, plus a second function
+    // that publishes CONFIG#CAPS (the one-shot job the persistent ACP bridge
+    // did at boot). NOTHING here is created in `fargate`-only mode, so the
+    // default stack is byte-for-byte unchanged.
+    if (wantLambda) {
+      // One image carries BOTH handlers; each function selects its handler via
+      // the image CMD. Gated behind the `-c kiroCliVersion` opt-in exactly like
+      // the ECS image: with no flag the placeholder DockerImageCode is used and
+      // synth needs no Docker. The factory is called once per function with the
+      // handler cmd so each runs its own entry from the ONE image asset.
+      const CONSUMER_CMD = ["lambda-consumer.handler"];
+      const CAPS_CMD = ["caps-publisher.handler"];
+      const buildLambdaImage = (cmd: string[]): DockerImageCode =>
+        props.lambdaImage ? props.lambdaImage(cmd) : placeholderLambdaImage(this, cmd);
+
+      // The serverless bridge env mirrors the Fargate task env MINUS the knobs
+      // that only make sense for a long-running host. CRITICALLY, AWS_REGION is
+      // a RESERVED Lambda environment variable and MUST NOT be set here (the
+      // handlers read the region from the ambient Lambda env / AWS SDK default).
+      // KIRO_API_KEY is NOT a plain env var: the functions resolve it at RUNTIME
+      // from Secrets Manager via KIRO_API_KEY_SECRET_ARN (resolveKiroApiKey),
+      // and the function roles are granted read on that exact secret below.
+      const bridgeLambdaEnv: Record<string, string> = {
         TABLE_NAME: this.table.tableName,
         BUCKET_NAME: this.bucket.bucketName,
-        COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
-        AWS_REGION: region,
-        MAX_CLOUD_SESSIONS: String(maxCloudSessions),
         EVENT_TTL_DAYS: String(eventTtlDays),
-        PERMISSION_TIMEOUT_MS: String(permissionTimeout.toMilliseconds()),
         ALLOWED_REPOS: props.allowedRepos.join(","),
-        // Verbose by default while the ACP child's startup is being
-        // diagnosed: the bridge logger honors BRIDGE_LOG_LEVEL, and serve.ts
-        // passes KIRO_LOG_LEVEL=debug into the spawned kiro-cli so its own
-        // stderr diagnostics surface (the transport logs the stderr tail at
-        // ERROR on a non-zero exit). Dial both back to "info" once stable.
-        BRIDGE_LOG_LEVEL: "debug",
+        KIRO_API_KEY_SECRET_ARN: this.kiroApiKeySecret.secretArn,
         KIRO_LOG_LEVEL: "debug",
-      },
-      // KIRO_API_KEY arrives as an ECS SECRET (not a plain env var).
-      secrets: {
-        KIRO_API_KEY: EcsSecret.fromSecretsManager(this.kiroApiKeySecret),
-      },
-      logging: LogDrivers.awsLogs({ streamPrefix: "bridge", logGroup: bridgeLogGroup }),
-      // Cheap liveness probe: a bare Node exec that only proves the container's
-      // Node runtime is responsive. It deliberately does NOT invoke the bridge
-      // CLI -- the old `node packages/bridge/src/cli.ts healthcheck` both hit
-      // the node_modules .ts type-strip crash and called a `healthcheck`
-      // subcommand the CLI does not implement (cli.ts exits 2 on unknown
-      // commands). This matches the Dockerfile HEALTHCHECK's intent.
-      healthCheck: {
-        command: ["CMD-SHELL", 'node -e "process.exit(0)" || exit 1'],
-        interval: Duration.seconds(30),
-        timeout: Duration.seconds(5),
-        retries: 2,
-        startPeriod: Duration.seconds(20),
-      },
-    });
+        BRIDGE_LOG_LEVEL: "debug",
+      };
 
-    // Task-role grants: scoped to its OWN table/bucket/queue/secret only.
-    this.table.grantReadWriteData(taskDef.taskRole);
-    this.bucket.grantReadWrite(taskDef.taskRole);
-    this.commandQueue.grantConsumeMessages(taskDef.taskRole);
-    this.kiroApiKeySecret.grantRead(taskDef.taskRole);
-    // The execution role needs to pull the secret to inject it at start.
-    const executionRole = taskDef.obtainExecutionRole();
-    this.kiroApiKeySecret.grantRead(executionRole);
-    // Scoped to the execution role only (not the stack): with an ECR asset
-    // image, CDK grants ecr:GetAuthorizationToken on "*", an action that does
-    // not support resource-level permissions. Image pulls stay scoped to the
-    // asset repository.
-    Validations.of(executionRole).acknowledge({
-      id: "AwsSolutions-IAM5[Resource::*]",
-      reason:
-        "ecr:GetAuthorizationToken does not support resource-level permissions and must use Resource '*' (https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerregistry.html); ECR pull actions remain scoped to the CDK asset repository.",
-    });
+      // The SQS FIFO command consumer. 15-minute timeout (the ceiling): one
+      // observed cloud TimeToFirstEvent was ~73s, well under it, and a turn is
+      // AWAITed synchronously so the invocation holds the FIFO MessageGroupId
+      // (= sessionId) for the turn's duration (lambda-consumer.ts). arm64 to
+      // match the Graviton image.
+      //
+      // CONCURRENCY: maxCloudSessions maps to the function's RESERVED
+      // CONCURRENCY. Because the queue is FIFO and the producer sets
+      // MessageGroupId = sessionId, SQS already serializes per session; the
+      // reserved concurrency caps the number of DISTINCT sessions processed in
+      // parallel to the same global cap the Fargate host enforces in-process.
+      this.consumerFn = new DockerImageFunction(this, "BridgeConsumerFn", {
+        code: buildLambdaImage(CONSUMER_CMD),
+        architecture: Architecture.ARM_64,
+        memorySize: 1024,
+        timeout: Duration.minutes(15),
+        reservedConcurrentExecutions: maxCloudSessions,
+        environment: {
+          ...bridgeLambdaEnv,
+          // WORKSPACE_ROOT defaults to /workspace in the ECS image; on Lambda
+          // only /tmp is writable, so the per-turn working directory lives
+          // under it (durable state is in DynamoDB/S3, never on local disk).
+          WORKSPACE_ROOT: "/tmp/workspace",
+        },
+      });
 
-    this.bridgeService = new FargateService(this, "BridgeService", {
-      cluster,
-      taskDefinition: taskDef,
-      desiredCount: 1,
-      assignPublicIp: true,
-      vpcSubnets: { subnetType: SubnetType.PUBLIC },
-      securityGroups: [bridgeSg],
-      minHealthyPercent: 0,
-      maxHealthyPercent: 100,
-      // Fail fast on repeated task start-up failures (and roll back).
-      circuitBreaker: { rollback: true },
-    });
+      // Native SQS event-source mapping on the command queue. FIFO-appropriate
+      // batchSize of 1 so each invocation handles a single command (the handler
+      // AWAITs settlement); reportBatchItemFailures honors the handler's
+      // returned batchItemFailures so only genuinely transient failures are
+      // redelivered (lambda-consumer.ts).
+      this.consumerFn.addEventSource(
+        new SqsEventSource(this.commandQueue, {
+          batchSize: 1,
+          reportBatchItemFailures: true,
+        }),
+      );
+
+      // The caps-publisher runs the SAME image with a different handler CMD.
+      // It is short-lived: spin up the ACP child, `initialize`, write
+      // CONFIG#CAPS, exit. A few minutes of timeout is ample.
+      this.capsPublisherFn = new DockerImageFunction(this, "BridgeCapsPublisherFn", {
+        code: buildLambdaImage(CAPS_CMD),
+        architecture: Architecture.ARM_64,
+        memorySize: 1024,
+        timeout: Duration.minutes(5),
+        environment: bridgeLambdaEnv,
+      });
+
+      // SAME scoped IAM grants the Fargate task role gets, so the serverless
+      // path is behaviorally identical: read/write the table + bucket, consume
+      // the command queue, read the secret. The publisher only needs table
+      // write + secret read (it writes CONFIG#CAPS and spawns an ACP child).
+      this.table.grantReadWriteData(this.consumerFn);
+      this.bucket.grantReadWrite(this.consumerFn);
+      this.commandQueue.grantConsumeMessages(this.consumerFn);
+      this.kiroApiKeySecret.grantRead(this.consumerFn);
+
+      this.table.grantReadWriteData(this.capsPublisherFn);
+      this.kiroApiKeySecret.grantRead(this.capsPublisherFn);
+
+      // Publish CONFIG#CAPS on a schedule so a transient failure self-heals on
+      // the next run; the API serves the empty-caps fallback until the first
+      // success (matching docs/deploy.md's CONFIG#CAPS caveat).
+      new Rule(this, "CapsPublisherSchedule", {
+        schedule: Schedule.rate(Duration.hours(6)),
+        targets: [new LambdaFunctionTarget(this.capsPublisherFn)],
+      });
+
+      // Run the publisher at least once right after deploy (a CDK Trigger =
+      // a custom resource that invokes the function on stack create/update), so
+      // CONFIG#CAPS is populated without waiting for the first scheduled run.
+      new Trigger(this, "CapsPublisherDeployTrigger", {
+        handler: this.capsPublisherFn,
+        // Best-effort: a failed publish must not fail the deploy, since the
+        // scheduled rule (and the API's empty-caps fallback) cover the gap.
+        executeOnHandlerChange: true,
+      });
+    }
   }
 }
