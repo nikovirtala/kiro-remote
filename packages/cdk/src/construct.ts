@@ -73,6 +73,8 @@ import {
   Code,
   DockerImageCode,
   DockerImageFunction,
+  FilterCriteria,
+  FilterRule,
   Function as LambdaFunction,
   Runtime,
 } from "aws-cdk-lib/aws-lambda";
@@ -847,10 +849,34 @@ export class KiroRemote extends Construct {
       // AWAITs settlement); reportBatchItemFailures honors the handler's
       // returned batchItemFailures so only genuinely transient failures are
       // redelivered (lambda-consumer.ts).
+      //
+      // ADOPT ROUTING IN `both` MODE. Fargate is retained as the ONLY host for
+      // the ACP `adopt`/session-load path, but both hosts consume this ONE FIFO
+      // queue and SQS delivers each message to exactly one consumer. Without a
+      // filter the Lambda consumer could grab an `adopt` command first and
+      // reject it, defeating the whole reason Fargate is kept. So in `both`
+      // mode we attach an event-source FILTER that makes the Lambda consumer
+      // IGNORE `adopt` (kind != "adopt"): a filtered-out record is never
+      // delivered to the Lambda, stays on the queue, and is therefore picked up
+      // by the Fargate intake loop -- which honors it via the ACP gateway. This
+      // makes the "adopt goes to Fargate" guarantee actually hold.
+      //
+      // In `lambda`-ONLY mode there is NO Fargate to consume a filtered-out
+      // adopt, so we deliberately do NOT filter: the consumer still receives
+      // `adopt` and rejects it LOUDLY (a client-visible rejection event in
+      // lambda-consumer.ts), rather than letting the message sit unconsumed and
+      // silently expire. `lambda`-only still does not support adopt; it just
+      // fails it visibly instead of silently.
+      const wantAdoptFilter = this.bridgeMode === "both";
       this.consumerFn.addEventSource(
         new SqsEventSource(this.commandQueue, {
           batchSize: 1,
           reportBatchItemFailures: true,
+          ...(wantAdoptFilter
+            ? {
+                filters: [FilterCriteria.filter({ body: { kind: FilterRule.notEquals("adopt") } })],
+              }
+            : {}),
         }),
       );
 

@@ -178,11 +178,11 @@ The cloud command path can be driven by two different hosts, selected per deploy
 with `bridgeMode` (the `bridgeMode` context key, or the `KiroRemoteProps` prop).
 The default is `fargate`, so an existing deploy that passes nothing is unchanged.
 
-| Mode                | What is provisioned                                                                                                                                        | Notes                                                                                                                                                     |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fargate` (default) | The persistent ECS Fargate ACP bridge (VPC, cluster, task, service). No Lambda bridge.                                                                     | The ONLY host for the ACP `adopt`/session-load path, so it is retained deliberately. Backward compatible: omitting `bridgeMode` reproduces today's stack. |
-| `lambda`            | A container-image Lambda (arm64) that consumes the SQS FIFO command queue, plus a second function that publishes `CONFIG#CAPS`. No Fargate service or VPC. | The serverless cloud path. `adopt`/session-load is NOT supported in this mode (there is no live ACP child); use `fargate` or `both` if you need adopt.    |
-| `both`              | The Fargate service AND the Lambda consumer + caps-publisher.                                                                                              | Run both side by side (e.g. to migrate). The Fargate bridge still covers adopt; the Lambda consumer handles the headless cloud turns.                     |
+| Mode                | What is provisioned                                                                                                                                        | Notes                                                                                                                                                                                    |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fargate` (default) | The persistent ECS Fargate ACP bridge (VPC, cluster, task, service). No Lambda bridge.                                                                     | The ONLY host for the ACP `adopt`/session-load path, so it is retained deliberately. Backward compatible: omitting `bridgeMode` reproduces today's stack.                                |
+| `lambda`            | A container-image Lambda (arm64) that consumes the SQS FIFO command queue, plus a second function that publishes `CONFIG#CAPS`. No Fargate service or VPC. | The serverless cloud path. `adopt`/session-load is NOT supported in this mode (there is no live ACP child); use `fargate` or `both` if you need adopt.                                   |
+| `both`              | The Fargate service AND the Lambda consumer + caps-publisher.                                                                                              | Run both side by side (e.g. to migrate). `adopt` is routed to Fargate and the Lambda consumer handles the headless cloud turns (see [adopt routing](#adopt-routing-in-both-mode) below). |
 
 Enable a mode on the command line, for example the serverless path:
 
@@ -221,6 +221,28 @@ A few operational details for the `lambda` and `both` modes:
   ECS-style secret injection on Lambda); the function roles are granted read on
   that exact secret. `AWS_REGION` is a reserved Lambda variable and is never set
   by the construct.
+
+### adopt routing in `both` mode
+
+Both hosts consume the SAME SQS FIFO command queue, and SQS delivers each
+message to exactly one consumer. Fargate is retained as the only host for the
+ACP `adopt`/session-load path, so in `both` mode the Lambda consumer's
+event-source mapping carries a filter that excludes `adopt`
+(`kind` is anything but `"adopt"`). A filtered-out `adopt` command is never
+delivered to the Lambda, stays on the queue, and is therefore picked up by the
+Fargate intake loop, which honors it via the ACP gateway. This makes the "adopt
+goes to Fargate" guarantee hold deterministically rather than depending on which
+consumer polls first.
+
+Every other command kind (`launch`, `prompt`, `steer`, `cancel`,
+`answerPermission`, `setConfig`, `delete`) is handled correctly by either host,
+so those are left unfiltered and go to whichever consumer SQS delivers them to.
+
+In `lambda`-only mode there is no Fargate to serve a filtered-out `adopt`, so
+the consumer is deliberately NOT filtered: it still receives `adopt` and rejects
+it loudly with a client-visible rejection event, rather than letting the message
+sit unconsumed and silently expire. `lambda`-only still does not support
+`adopt`; it just fails it visibly instead of silently.
 
 ## Pointing `publicBaseUrl` at the API
 

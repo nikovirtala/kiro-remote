@@ -577,6 +577,12 @@ describe("KiroRemote bridge mode", () => {
       BatchSize: 1,
     });
 
+    // In `lambda`-ONLY mode there is NO Fargate to serve a filtered-out adopt,
+    // so the consumer is deliberately NOT filtered: it still receives `adopt`
+    // and rejects it loudly. Assert the mapping carries NO FilterCriteria.
+    const esm = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"))[0];
+    expect((esm.Properties as { FilterCriteria?: unknown }).FilterCriteria).toBeUndefined();
+
     // The queue visibility timeout is raised to >= the consumer timeout so a
     // long cloud turn does not get redelivered mid-flight.
     t.hasResourceProperties("AWS::SQS::Queue", { VisibilityTimeout: 900 });
@@ -643,5 +649,27 @@ describe("KiroRemote bridge mode", () => {
     expect(imageFunctions(t).length).toBe(2);
     t.resourceCountIs("AWS::Lambda::EventSourceMapping", 1);
     t.resourceCountIs("AWS::Events::Rule", 1);
+  });
+
+  test("both mode routes adopt to Fargate by filtering it out of the Lambda consumer", () => {
+    const { template: t } = synthMode("both");
+    // The Lambda consumer's event-source mapping carries a FilterCriteria that
+    // excludes `adopt` so SQS never delivers an adopt command to the Lambda;
+    // it stays on the queue for the Fargate intake loop, which honors the ACP
+    // adopt/session-load path. This makes "adopt goes to Fargate" actually hold
+    // in `both` mode rather than being a race between the two consumers.
+    t.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+      BatchSize: 1,
+      FilterCriteria: {
+        Filters: [
+          {
+            // SQS body filtering: the command JSON's `kind` must be anything
+            // but "adopt". The pattern is a JSON string (what Lambda expects).
+            Pattern: Match.stringLikeRegexp('"kind".*"anything-but".*"adopt"'),
+          },
+        ],
+      },
+    });
   });
 });
