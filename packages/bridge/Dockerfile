@@ -12,6 +12,20 @@
 #   node_modules path, which is why running the raw source crashed the
 #   container at module load; bundling inlines the workspace code and sidesteps
 #   that entirely, mirroring the API Lambda in packages/cdk/src/api-asset.ts.)
+#
+# LAMBDA-PATH ENTRYPOINTS (FEAT-003 source; FEAT-004 wires the image).
+#   The serverless bridge adds two more entry shapes that this image's bundle
+#   pattern extends 1:1 (same esbuild invocation, different entry file):
+#     - packages/bridge/src/lambda-consumer.ts exports `handler` (an
+#       SQSEvent -> SQSBatchResponse handler) for the cloud command consumer;
+#     - packages/bridge/src/caps-publisher.ts exports `handler` (the one-shot
+#       CONFIG#CAPS publisher) AND is also reachable as the `caps-publish` CLI
+#       subcommand of this same cli.ts bundle.
+#   FEAT-004 builds the container-image Lambda that runs these: it either bundles
+#   each entry to its own `dist/<name>.cjs` (mirroring this `bridge.cjs` step) or
+#   points the image at the `handler` export, keeping one consistent bundle
+#   story across the ECS image and the Lambda image. This Dockerfile is NOT
+#   changed by FEAT-003 (it remains the ECS `serve` image).
 # - KIRO_API_KEY is injected as an ECS secret at RUNTIME (never baked into the
 #   image, never an ENV/ARG here).
 

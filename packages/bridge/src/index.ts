@@ -17,6 +17,10 @@ export * from "./gateway.ts";
 export * from "./headless.ts";
 export * from "./health.ts";
 export * from "./intake.ts";
+// NOTE: caps-publisher.ts and lambda-consumer.ts are Lambda ENTRYPOINT modules
+// (each exports a `handler`), not composable library pieces, so they are NOT
+// re-exported through this barrel (two `handler` exports would be ambiguous).
+// Tests and the bundle entrypoints import them directly by module path.
 export * from "./logger.ts";
 export * from "./metrics.ts";
 export * from "./secrets.ts";
