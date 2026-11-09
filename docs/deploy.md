@@ -99,6 +99,7 @@ context values, passed with `-c key=value`:
 | `publicBaseUrl`       | `https://kiro.example.com` (synth placeholder only) | The canonical `https://<host>` **without** a trailing slash. Use a custom domain fronting the HTTP API, or the API Gateway default domain `https://<api-id>.execute-api.<region>.amazonaws.com`. Used verbatim for the RFC 9728 PRM, the RFC 8414 AS-metadata issuer, the Cognito resource identifier (`<host>/mcp`), and the CIMD allow-list, so for a real deploy it **must** be the real, reachable host. |
 | `cognitoDomainPrefix` | `kiro-remote`                                       | The Cognito managed-login domain prefix. The hosted UI is served from `<prefix>.auth.<region>.amazoncognito.com`.                                                                                                                                                                                                                                                                                            |
 | `allowedRepos`        | `*/*`                                               | Comma-separated GitHub repo globs the bridge may launch sessions against. Launches outside this list are rejected with 403.                                                                                                                                                                                                                                                                                  |
+| `bridgeMode`          | `fargate`                                           | Which host(s) drive the cloud command path: `fargate` (default), `lambda`, or `both`. Pass with `-c bridgeMode=lambda\|fargate\|both`. See [Choosing the bridge mode](#choosing-the-bridge-mode). The default reproduces the Fargate-only stack exactly.                                                                                                                                                     |
 
 Three more context keys drive the optional custom domain (all unset by default
 except `customDomainName`/`dnsZoneName`, which this repo's `cdk.json` sets to the
@@ -153,6 +154,7 @@ entrypoint only wires the three context keys above; to set the rest you edit
 
 | Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bridgeMode`           | `fargate`                                 | Which host(s) drive the cloud command path: `fargate` (default, the persistent ECS bridge and the ONLY host for the ACP adopt/session-load path), `lambda` (the serverless cloud path; adopt unsupported), or `both`. Also wired from the `bridgeMode` context key. See [Choosing the bridge mode](#choosing-the-bridge-mode).                                                                                                                                                                                             |
 | `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -161,13 +163,64 @@ entrypoint only wires the three context keys above; to set the rest you edit
 | `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade without a CIMD document. Each client presents its `name` as the `client_id` at `/oauth/authorize` and may only use the listed `callbackUrls` as `redirect_uri`. The stack provisions a Cognito app client for each and propagates the id + redirect URIs into the API Lambda so the facade accepts them at runtime.                                                                                  |
 | `kiroApiKeySecretArn`  | — (construct creates an empty secret)     | Full ARN of a **pre-existing** Secrets Manager secret holding the `ksk_` key. **Recommended for real deploys:** the construct imports it, grants the bridge read, and wires it as the `KIRO_API_KEY` ECS secret, and because it is external it **survives a stack rollback**. Omit it and the construct creates an empty secret (synth/dev only) that you must populate and that is destroyed on rollback. Also wired from the `kiroApiKeySecretArn` context key. See [Store the Kiro API key](#4-store-the-kiro-api-key). |
 | `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api).                                                             |
-| `bridgeImage`          | placeholder registry image                | Override the bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `bridgeImage`          | placeholder registry image                | Override the ECS/Fargate bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `lambdaImage`          | placeholder ECR image                     | Override the serverless (Lambda) bridge container image used in `lambda`/`both` modes. A factory `(cmd) => DockerImageCode` called once per function (consumer + caps-publisher) so each runs its own handler from the one image. Production deploys pass a factory wrapping `DockerImageCode.fromImageAsset(repoRoot, { file: "packages/bridge/Dockerfile.lambda", buildArgs: { KIRO_CLI_VERSION }, platform: linux/arm64, cmd })`. Gated behind `-c kiroCliVersion` like `bridgeImage`.                                  |
 | `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
-> The defaults for `bridgeImage` and `apiLambdaCode` are deliberately
-> placeholders so `cdk synth` runs with no Docker build and no bundling step in
-> constrained CI/sandboxes. A production deploy must override them (image + Lambda
-> code) so the stack actually serves traffic.
+> The defaults for `bridgeImage`, `lambdaImage`, and `apiLambdaCode` are
+> deliberately placeholders so `cdk synth` runs with no Docker build and no
+> bundling step in constrained CI/sandboxes. A production deploy must override
+> them (image + Lambda code) so the stack actually serves traffic.
+
+## Choosing the bridge mode
+
+The cloud command path can be driven by two different hosts, selected per deploy
+with `bridgeMode` (the `bridgeMode` context key, or the `KiroRemoteProps` prop).
+The default is `fargate`, so an existing deploy that passes nothing is unchanged.
+
+| Mode                | What is provisioned                                                                                                                                        | Notes                                                                                                                                                     |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fargate` (default) | The persistent ECS Fargate ACP bridge (VPC, cluster, task, service). No Lambda bridge.                                                                     | The ONLY host for the ACP `adopt`/session-load path, so it is retained deliberately. Backward compatible: omitting `bridgeMode` reproduces today's stack. |
+| `lambda`            | A container-image Lambda (arm64) that consumes the SQS FIFO command queue, plus a second function that publishes `CONFIG#CAPS`. No Fargate service or VPC. | The serverless cloud path. `adopt`/session-load is NOT supported in this mode (there is no live ACP child); use `fargate` or `both` if you need adopt.    |
+| `both`              | The Fargate service AND the Lambda consumer + caps-publisher.                                                                                              | Run both side by side (e.g. to migrate). The Fargate bridge still covers adopt; the Lambda consumer handles the headless cloud turns.                     |
+
+Enable a mode on the command line, for example the serverless path:
+
+```bash
+pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
+  -c kiroCliVersion=1.2.3 \
+  -c bridgeMode=lambda \
+  -c publicBaseUrl=https://kiro-remote.nikovirtala.dev
+```
+
+A few operational details for the `lambda` and `both` modes:
+
+- **Image.** The serverless functions run the container image built from
+  [`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)
+  (arm64, `kiro-cli` on PATH, both the consumer and caps-publisher handler
+  bundles). Like the Fargate image, it is built only when you pass
+  `-c kiroCliVersion=<ver>`; without that flag `cdk synth` uses a placeholder
+  image and needs no Docker.
+- **Concurrency.** `maxCloudSessions` maps to the consumer function's RESERVED
+  CONCURRENCY. Because the queue is FIFO and the producer sets
+  `MessageGroupId = sessionId`, SQS already serializes work per session; the
+  reserved concurrency caps how many DISTINCT sessions run in parallel to the
+  same global cap the Fargate host enforces in-process.
+- **Visibility timeout.** When the Lambda path is enabled the command queue's
+  visibility timeout is raised to 15 minutes (the consumer's timeout) so a long
+  cloud turn is not redelivered mid-flight. In `fargate`-only mode it stays at
+  60 seconds.
+- **Capabilities publish.** The caps-publisher writes `CONFIG#CAPS` on a 6-hour
+  schedule and is also invoked once right after deploy (a CDK Trigger custom
+  resource). Until the first publish succeeds, `GET /capabilities` and
+  `GET /models` return the empty-capabilities fallback, exactly like the
+  Fargate bridge's boot-time publish (see the CONFIG#CAPS caveat above). A
+  transient failure self-heals on the next scheduled run.
+- **Secret.** The functions resolve `KIRO_API_KEY` at runtime from Secrets
+  Manager via the `KIRO_API_KEY_SECRET_ARN` environment variable (there is no
+  ECS-style secret injection on Lambda); the function roles are granted read on
+  that exact secret. `AWS_REGION` is a reserved Lambda variable and is never set
+  by the construct.
 
 ## Pointing `publicBaseUrl` at the API
 
