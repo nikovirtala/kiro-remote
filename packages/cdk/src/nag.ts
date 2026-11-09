@@ -32,11 +32,11 @@ export function applyAwsSolutionsChecks(scope: IConstruct): void {
  */
 export function suppressIntentionalFindings(scope: IConstruct): void {
   Validations.of(scope).acknowledge(
-    // Lambda runtime pinned to the latest CDK-supported managed Node runtime.
+    // Lambda runtime pinned to Node 26 (the newest Node runtime) via a shim.
     {
       id: "AwsSolutions-L1",
       reason:
-        "Functions target the latest CDK-supported managed Node runtime (NODEJS_22_X); the runtime is pinned deliberately.",
+        "Functions deliberately target the Node 26 managed runtime (nodejs26.x), the newest Node runtime, via a NODEJS_26_X shim that stands in for the not-yet-shipped CDK `Runtime.NODEJS_26_X` constant (aws/aws-cdk#39021); nodejs26.x is AWS public preview and is pinned intentionally. L1 flags functions that are not on the latest runtime, so acknowledging it stays correct for an intentionally pinned newest runtime.",
     },
     // IAM4: the Lambda execution roles use the AWS-managed basic-execution
     // policy for CloudWatch Logs only.
@@ -171,8 +171,11 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     // ---------------------------------------------------------------------
     // Serverless (Lambda) bridge path -- provisioned only in the `lambda` and
     // `both` bridge modes (FEAT-004). The SQS FIFO consumer and the
-    // caps-publisher are container-image (DockerImageFunction) Lambdas that
-    // reuse the SAME scoped grants the Fargate task role gets
+    // caps-publisher are container-image (DockerImageFunction) Lambdas whose
+    // Node version comes entirely from packages/bridge/Dockerfile.lambda (the
+    // AWS Lambda nodejs:26 base, also public preview) rather than a CDK
+    // `runtime:` prop, so they carry no NODEJS_26_X shim. They reuse the SAME
+    // scoped grants the Fargate task role gets
     // (table.grantReadWriteData / bucket.grantReadWrite /
     // commandQueue.grantConsumeMessages / kiroApiKeySecret.grantRead). Those
     // grants emit the EXACT same wildcard shapes already acknowledged above

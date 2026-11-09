@@ -61,6 +61,12 @@ deployed.
 - Node **26.13.0** and pnpm **12.18.0**, pinned in [`.mise.toml`](../.mise.toml).
 - ESM throughout; TypeScript is executed directly via Node 26 native type
   stripping, so there is no separate compile step.
+- The deployed Lambdas target the matching **Node 26** runtime (`nodejs26.x`),
+  which AWS lists as **public preview** (not SLA/Support-covered, not for
+  production, GA targeted ~Nov 2026). CDK has no `Runtime.NODEJS_26_X` constant
+  yet ([aws/aws-cdk#39021](https://github.com/aws/aws-cdk/issues/39021)) so a
+  shim is used. See [`deploy.md`](./deploy.md#lambda-runtime-node-26-public-preview)
+  for the full note.
 - [mise](https://mise.jdx.dev) provisions the pinned Node and pnpm. The examples
   below use `mise exec -- pnpm ...`; if you manage Node/pnpm yourself you can drop
   the `mise exec --` prefix.
