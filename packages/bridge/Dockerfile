@@ -153,8 +153,8 @@ RUN apt-get update \
     && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | Q_INSTALL_GLOBAL=1 bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
     && { [ -x /usr/local/bin/kiro-cli ] || { [ -d /root/.local/bin ] && cp -a /root/.local/bin/. /usr/local/bin/; }; } \
     && { [ -x /usr/local/bin/kiro-cli ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
-    && command -v kiro-cli-chat >/dev/null 2>&1 \
-      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; } \
+    && { command -v kiro-cli-chat >/dev/null 2>&1 \
+      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; }; } \
     && chmod 0755 /usr/local/bin/kiro-cli /usr/local/bin/kiro-cli-chat \
     && apt-get purge -y curl unzip \
     && apt-get autoremove -y \
