@@ -99,6 +99,28 @@ describe("buildContextFromEnv", () => {
     await expect(ctx.kiroCliVersion()).resolves.toBeNull();
   });
 
+  it("kiroCliVersion reads agentInfo.version from the persisted CONFIG#CAPS", async () => {
+    const c = clients();
+    c.ddb.send = async () => ({
+      Item: {
+        PK: "CONFIG",
+        SK: "CAPS",
+        initializeResult: { agentInfo: { name: "kiro-cli", version: "2.4.6" } },
+      },
+    });
+    const ctx = buildContextFromEnv({ env: env(), clients: c });
+    await expect(ctx.kiroCliVersion()).resolves.toBe("2.4.6");
+  });
+
+  it("kiroCliVersion stays null when CONFIG#CAPS carries no agentInfo.version", async () => {
+    const c = clients();
+    c.ddb.send = async () => ({
+      Item: { PK: "CONFIG", SK: "CAPS", initializeResult: { protocolVersion: 1 } },
+    });
+    const ctx = buildContextFromEnv({ env: env(), clients: c });
+    await expect(ctx.kiroCliVersion()).resolves.toBeNull();
+  });
+
   it("capabilities falls back to the empty set when CONFIG#CAPS is absent", async () => {
     const ctx = buildContextFromEnv({ env: env(), clients: clients() });
     // FakeClient.send returns {} so getCaps() resolves to null -> empty caps.
