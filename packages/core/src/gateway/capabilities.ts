@@ -85,7 +85,29 @@ export interface InitializeResult {
    * canonical agentCapabilities._meta.kiro.executionTargets location.
    */
   executionTargets?: unknown;
+  /**
+   * ACP `agentInfo` (name/title/version) the agent reports about itself. Its
+   * `version` is the kiro-cli version; see {@link kiroCliVersion}.
+   */
+  agentInfo?: { name?: unknown; title?: unknown; version?: unknown; [key: string]: unknown };
   [key: string]: unknown;
+}
+
+/**
+ * The kiro-cli version the agent reported in its `initialize` result
+ * (`agentInfo.version`), or `null` when none is known.
+ *
+ * `null` is the honest answer when no bridge has ever initialized (so no
+ * CONFIG#CAPS item exists) or when the agent did not advertise a non-blank
+ * string version. Never substitute a guessed value.
+ */
+export function kiroCliVersion(init: InitializeResult | null | undefined): string | null {
+  const version = init?.agentInfo?.version;
+  if (typeof version !== "string") {
+    return null;
+  }
+  const trimmed = version.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function asStringArray(value: unknown): string[] {

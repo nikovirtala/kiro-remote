@@ -37,6 +37,7 @@ import {
 import {
   CognitoTokenVerifier,
   capabilities as deriveCapabilities,
+  kiroCliVersion as kiroCliVersionFromInit,
   Repository,
   SqsCommandQueue,
 } from "@nikovirtala/kiro-remote-core";
@@ -260,9 +261,14 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
       // when CONFIG#CAPS is absent (the bridge has not initialized yet).
       return caps ? deriveCapabilities(caps.initializeResult) : deriveCapabilities({});
     },
-    // CONFIG#CAPS is not populated until the bridge initializes, and the CLI
-    // version is surfaced there; until then there is no version to report.
-    kiroCliVersion: async () => null,
+    // The kiro-cli version comes from `agentInfo.version` in the initialize
+    // result the bridge persists as CONFIG#CAPS. It is `null` (never a guess)
+    // until a bridge has initialized at least once, or if the agent did not
+    // report a version.
+    kiroCliVersion: async () => {
+      const caps = await repo.getCaps();
+      return kiroCliVersionFromInit(caps?.initializeResult);
+    },
     facade,
     publicBaseUrl,
     obs: new PowertoolsObservability(),
