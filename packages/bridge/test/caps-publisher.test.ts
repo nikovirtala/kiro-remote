@@ -9,6 +9,8 @@
  * exactly the one realized job the live ACP child performed.
  */
 
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   capabilities as deriveCapabilities,
@@ -16,11 +18,37 @@ import {
   Repository,
 } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
-import { publishCaps } from "../src/caps-publisher.ts";
+import { publishCaps, runCapsPublish } from "../src/caps-publisher.ts";
 import type { AcpGateway } from "../src/gateway.ts";
 import { createLogger } from "../src/logger.ts";
+import { defaultSpawn, type SpawnFn } from "../src/transport.ts";
 import { FakeDocClient, FakeS3Client } from "./fakes.ts";
 import { initResult } from "./scenarios.ts";
+
+const FAKE_AGENT = fileURLToPath(new URL("./fake-acp-agent.ts", import.meta.url));
+
+/**
+ * A SpawnFn that launches the real fake ACP agent as a Node child (exactly the
+ * harness pattern) but routes its advertisement through FAKE_ACP_SCENARIO. It
+ * records the spawned child so a test can assert the transport actually killed
+ * it (the SIGTERM in runCapsPublish's finally).
+ */
+function recordingFakeAgentSpawn(scenario: unknown): {
+  spawnFn: SpawnFn;
+  children: ChildProcessWithoutNullStreams[];
+} {
+  const children: ChildProcessWithoutNullStreams[] = [];
+  const spawnFn: SpawnFn = (spec) => {
+    const child = defaultSpawn({
+      command: process.execPath,
+      args: [FAKE_AGENT],
+      env: { ...spec.env, FAKE_ACP_SCENARIO: JSON.stringify(scenario) },
+    });
+    children.push(child);
+    return child;
+  };
+  return { spawnFn, children };
+}
 
 function wireRepo(): { repo: Repository; ddb: FakeDocClient } {
   const ddb = new FakeDocClient();
@@ -108,6 +136,65 @@ describe("caps-publisher publishCaps", () => {
     await publishCaps(repo, gateway as any, logger);
 
     const caps = await repo.getCaps();
+    expect(JSON.stringify(caps)).not.toContain("ksk_");
+    expect(logLines.join("\n")).not.toContain("ksk_");
+  });
+});
+
+describe("caps-publisher runCapsPublish lifecycle", () => {
+  test("spawns the ACP child, publishes CONFIG#CAPS, and stops the child on finish", async () => {
+    const { ddb } = wireRepo();
+    const logLines: string[] = [];
+    const logger = createLogger({ level: "debug", sink: (l) => logLines.push(l) });
+    const { spawnFn, children } = recordingFakeAgentSpawn({
+      initialize: initResult({
+        extensionMethods: ["_kiro/openExternalUrl", "_kiro/session/context"],
+        executionTargets: ["cloud", "local"],
+      }),
+    });
+
+    await runCapsPublish({
+      config: { tableName: "kiro-remote-test", bucketName: "kiro-remote-test-bucket" },
+      ddb: ddb as unknown as DynamoDBDocumentClient,
+      // biome-ignore lint/suspicious/noExplicitAny: fake S3 client (unused on the publish path).
+      s3: new FakeS3Client() as any,
+      // The real transport+gateway run; only the child process is faked.
+      spawnFn,
+      logger,
+      // No real Secrets Manager: resolveKiroApiKey falls back to the env key so
+      // the publish runs fully offline (the key is still placed in the child env).
+      env: { KIRO_API_KEY: "ksk_test_key" },
+    });
+
+    // The child was actually spawned (the real transport ran against it).
+    expect(children.length).toBe(1);
+    const child = children[0];
+
+    // runCapsPublish SIGTERMs the child in its finally; wait for the exit to
+    // land so the assertion is not racy, then confirm it is no longer running.
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    }
+    expect(child.killed).toBe(true);
+
+    // CONFIG#CAPS was written via the real initialize handshake over the
+    // transport (not a fake gateway), proving the spawn->initialize->persist
+    // ->stop lifecycle end to end.
+    const caps = await new Repository({
+      ddb: ddb as unknown as DynamoDBDocumentClient,
+      // biome-ignore lint/suspicious/noExplicitAny: fake S3 client (unused for getCaps).
+      s3: new FakeS3Client() as any,
+      tableName: "kiro-remote-test",
+      bucketName: "kiro-remote-test-bucket",
+    }).getCaps();
+    expect(caps).not.toBeNull();
+    const derived = deriveCapabilities((caps as { initializeResult: object }).initializeResult);
+    expect(derived.extensionMethods).toEqual(["_kiro/openExternalUrl", "_kiro/session/context"]);
+    expect(derived.cloudExecution).toBe(true);
+
+    // The transport logged the child's clean exit (the SIGTERM stop path).
+    expect(logLines.some((l) => l.includes("acp_child_exit"))).toBe(true);
+    // No secret leaked through the real child env into the persisted item or logs.
     expect(JSON.stringify(caps)).not.toContain("ksk_");
     expect(logLines.join("\n")).not.toContain("ksk_");
   });
