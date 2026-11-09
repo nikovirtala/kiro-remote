@@ -17,6 +17,10 @@ cdk.context.json
 .mise-cache/
 .extralib/
 
+# pnpm store (sandbox-local; relocated off read-only HOME)
+.pnpm-store/
+.pnpm-home/
+
 # Test coverage
 coverage/
 
