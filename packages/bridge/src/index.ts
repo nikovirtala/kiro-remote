@@ -12,6 +12,7 @@
 
 export const PACKAGE_NAME = "@nikovirtala/kiro-remote-bridge";
 
+export * from "./cloud-session.ts";
 export * from "./gateway.ts";
 export * from "./headless.ts";
 export * from "./health.ts";

@@ -5,132 +5,57 @@
  *  - route session/update + request_permission by sessionId;
  *  - normalize updates (core normalizer), coalesce chunk streams, dedupe replay,
  *    and append events to the DynamoDB log via the repository;
- *  - drive the pure state machine (core transition) -- the ONLY place a turn
- *    or session changes status;
- *  - PROVISION and DRIVE cloud sessions entirely through `kiro-cli chat
- *    --cloud` subprocesses (chat-only == cloud-only, for now): launch runs
- *    `chat --cloud --repo ... --no-interactive "<prompt>"` and follow-up turns
- *    run `chat --resume-id <id> --no-interactive "<prompt>"` (NO --cloud/--repo
- *    on resume -- kiro-cli rejects those combined with --resume-id). ACP cannot
- *    drive a cloud session (session/load+prompt against a real cloud id returns
- *    `Session not found`), so the cloud path never uses gateway.newSession/
- *    prompt;
- *  - run the long (~30-40s) subprocess as BACKGROUND work so launch returns
- *    promptly and intake acks the SQS message on dispatch (no head-of-line
- *    blocking);
- *  - record the launch path into the LaunchPath metric;
- *  - emit the operational metrics.
+ *  - own the ACP-only concerns: adopt/loadSession, the gateway update/
+ *    permission/notification hooks, reconnect/replay (registerLoaded,
+ *    drainUpdates, awaitAllSettled), setConfig, and answerPermission;
+ *  - DELEGATE the gateway-free cloud path -- provisioning + follow-up turns via
+ *    `kiro-cli chat --cloud` subprocesses, persistTurnResult, the per-session
+ *    idempotency bookkeeping, and the UnsupportedCloudOperationError decisions
+ *    -- to the shared {@link CloudSession} engine (see cloud-session.ts), so the
+ *    ECS bridge and the future Lambda consumer stay behaviorally identical. ACP
+ *    cannot drive a cloud session (session/load+prompt against a real cloud id
+ *    returns `Session not found`), so the cloud path never uses the gateway.
+ *  - run the long (~30-40s) cloud subprocess's settlement as BACKGROUND work
+ *    (tracked on rt.settling) so launch/prompt return promptly and intake acks
+ *    the SQS message on dispatch (no head-of-line blocking); the SAME settlement
+ *    primitive is awaited synchronously by the Lambda consumer. Only this
+ *    sync-vs-background wrapping differs between the two hosts.
  */
 
 import {
   type Capabilities,
-  Coalescer,
   type MachineState,
   type NormalizedEvent,
   normalizeRequest,
   normalizeUpdate,
   type PermissionAnswer,
-  ReplayDeduper,
   type Repository,
   type SessionInputs,
-  type SessionMetaItem,
-  transition,
 } from "@nikovirtala/kiro-remote-core";
 import { ulid } from "ulid";
-import type { AcpGateway } from "./gateway.ts";
 import {
-  type HeadlessRunner,
-  type HeadlessTurnResult,
-  headlessDelete,
-  headlessLaunch,
-  headlessResume,
-} from "./headless.ts";
+  type CloudLaunchArgs,
+  CloudSession,
+  createRuntime,
+  type LaunchPath,
+  type SessionRuntime,
+  stateOf,
+} from "./cloud-session.ts";
+import type { AcpGateway } from "./gateway.ts";
+import type { HeadlessRunner } from "./headless.ts";
 import type { Logger } from "./logger.ts";
 import type { Metrics } from "./metrics.ts";
 
-/**
- * Which launch path was taken for a session. Cloud launch + follow-up turns go
- * through `kiro-cli chat --cloud` subprocesses ("headless"); adopt reconnects an
- * existing cloud id over ACP ("adopt").
- */
-export type LaunchPath = "headless" | "adopt";
-
-/**
- * A PERMANENT "this operation cannot be honored for a cloud session" rejection.
- *
- * A cloud turn runs in a detached `chat --cloud` subprocess that ACP cannot
- * drive, so a mid-turn steer/cancel (and a `whenBusy=queue` follow-up, which has
- * no drain mechanism) genuinely cannot be honored. This is NOT a transient
- * dispatch failure: redelivering the same command will reject identically every
- * time. {@link CommandIntake} recognizes this sentinel and treats it as
- * "log + persist a client-visible rejection + DELETE the message" rather than
- * leaving the message for SQS redelivery (which on the DLQ-less FIFO command
- * queue would head-of-line-block the session's entire command stream and loop
- * ~every visibility timeout until the turn happens to settle). Genuine transient
- * failures throw a plain Error and keep the redelivery semantics.
- */
-export class UnsupportedCloudOperationError extends Error {
-  /** The command kind that was rejected (for the client-visible event). */
-  readonly operation: string;
-  constructor(operation: string, message: string) {
-    super(message);
-    this.name = "UnsupportedCloudOperationError";
-    this.operation = operation;
-  }
-}
-
-/**
- * Cap on {@link SessionRuntime.issuedTurns}. The set exists only for follow-up
- * idempotency (dedupe a redelivered `prompt` command by turn id); a redelivery
- * is only possible within the SQS retention window, so retaining the most
- * recent ids is sufficient. Bounding the set keeps a long-lived session with
- * many turns from growing it without limit (it is otherwise freed only on
- * session delete). FIFO eviction of the oldest id is safe: an id old enough to
- * be evicted is far past any plausible redelivery.
- */
-const MAX_ISSUED_TURNS = 512;
-
-/** Per-session runtime state held in the bridge (not the durable store). */
-interface SessionRuntime {
-  id: string;
-  machine: MachineState;
-  coalescer: Coalescer;
-  deduper: ReplayDeduper;
-  inputs: SessionInputs;
-  kiroSessionId: string | null;
-  /** The in-flight turn id, or null. */
-  activeTurnId: string | null;
-  /** Timing for metrics. */
-  turnStartedAt: number | null;
-  firstEventAt: number | null;
-  launchStartedAt: number;
-  /** Pending permission requestId -> arrival time (for PermissionWait). */
-  permissionStartedAt: Map<string, number>;
-  /**
-   * True once this runtime has issued its launch (session/new or headless) so a
-   * redelivered launch command is a logged no-op rather than a second cloud
-   * session / second first-turn (SQS at-least-once + visibility-timeout
-   * redelivery). Set as soon as launch() begins issuing the launch path.
-   */
-  launched: boolean;
-  /**
-   * The in-flight background turn settlement promise (the part of a turn that
-   * runs AFTER the session/prompt has been dispatched: awaiting the prompt
-   * response, draining updates, flushing coalesced chunks, and persisting the
-   * final status). Null when no turn is settling. Tracked so shutdown/tests can
-   * await the turn actually completing even though the SQS ack happened on
-   * dispatch, not on settlement.
-   */
-  settling: Promise<void> | null;
-  /**
-   * Follow-up turn ids this runtime has already accepted, so a redelivered
-   * `prompt` command (SQS at-least-once) does NOT spawn a second
-   * `chat --resume-id` turn and, if it lands mid-turn, is NOT
-   * reinterpreted as a steer. A turn id is recorded the moment prompt() accepts
-   * it and never removed (idempotency, not a queue).
-   */
-  issuedTurns: Set<string>;
-}
+// Re-export the shared cloud-path types/sentinel from their original location so
+// intake.ts (and the future Lambda consumer) can keep importing them from
+// session-manager.ts without churn, while the implementation lives in the
+// gateway-free shared module.
+export {
+  type CloudLaunchArgs,
+  type LaunchPath,
+  type SessionRuntime,
+  UnsupportedCloudOperationError,
+} from "./cloud-session.ts";
 
 export interface SessionManagerDeps {
   gateway: AcpGateway;
@@ -147,29 +72,24 @@ export interface SessionManagerDeps {
   now?: () => number;
 }
 
-function stateOf(item: SessionMetaItem): MachineState {
-  if (item.status === "deleted" || item.status === "failed" || item.status === "provisioning") {
-    return { session: item.status, turn: null };
-  }
-  if (item.status === "awaiting_permission") {
-    return { session: "awaiting_permission", turn: "running" };
-  }
-  if (item.status === "running") {
-    return { session: "running", turn: "running" };
-  }
-  return { session: "idle", turn: null };
-}
-
 export class SessionManager {
   private readonly gateway: AcpGateway;
   private readonly repo: Repository;
   private readonly logger: Logger;
   private readonly metrics: Metrics;
-  private readonly headlessRunner: HeadlessRunner;
   private readonly workspaceRoot: string;
   private readonly additionalDirectories?: string[];
   private readonly mcpServers: unknown[];
   private readonly now: () => number;
+
+  /**
+   * The gateway-free cloud-path engine. SessionManager delegates every cloud
+   * turn-execution + persistence + idempotency primitive to it so the ECS
+   * bridge and the Lambda consumer (FEAT-003) share identical logic; only the
+   * sync-vs-background wrapping of settlement differs (here it runs in the
+   * BACKGROUND, tracked on rt.settling, to preserve ack-on-dispatch).
+   */
+  private readonly cloud: CloudSession;
 
   private readonly runtimes = new Map<string, SessionRuntime>();
   /** Maps the cloud (Kiro) session id back to our session id for update routing. */
@@ -188,11 +108,18 @@ export class SessionManager {
     this.repo = deps.repo;
     this.logger = deps.logger;
     this.metrics = deps.metrics;
-    this.headlessRunner = deps.headlessRunner;
     this.workspaceRoot = deps.workspaceRoot;
     this.additionalDirectories = deps.additionalDirectories;
     this.mcpServers = deps.mcpServers ?? [];
     this.now = deps.now ?? (() => Date.now());
+    this.cloud = new CloudSession({
+      repo: this.repo,
+      logger: this.logger,
+      metrics: this.metrics,
+      headlessRunner: deps.headlessRunner,
+      kiroToLocal: this.kiroToLocal,
+      now: this.now,
+    });
   }
 
   capabilities(): Capabilities {
@@ -211,22 +138,7 @@ export class SessionManager {
   private runtimeFor(id: string): SessionRuntime {
     let rt = this.runtimes.get(id);
     if (!rt) {
-      rt = {
-        id,
-        machine: { session: "provisioning", turn: null },
-        coalescer: new Coalescer(),
-        deduper: new ReplayDeduper(),
-        inputs: this.inputsFor(),
-        kiroSessionId: null,
-        activeTurnId: null,
-        turnStartedAt: null,
-        firstEventAt: null,
-        launchStartedAt: this.now(),
-        permissionStartedAt: new Map(),
-        launched: false,
-        settling: null,
-        issuedTurns: new Set(),
-      };
+      rt = createRuntime(id, this.inputsFor(), this.now);
       this.runtimes.set(id, rt);
     }
     return rt;
@@ -351,7 +263,7 @@ export class SessionManager {
     rt.permissionStartedAt.set(requestId, this.now());
 
     // Drive the machine to awaiting_permission.
-    this.applyMachine(rt, { kind: "permission.requested" });
+    this.cloud.applyMachine(rt, { kind: "permission.requested" });
     await this.persistEvent(rt, ev);
   }
 
@@ -364,46 +276,9 @@ export class SessionManager {
         // Deduped replay event; skip persisting a duplicate.
         continue;
       }
-      await this.writeEvent(rt, out, now);
+      // The event append + metric path is shared with the cloud path.
+      await this.cloud.writeEvent(rt, out, now);
     }
-  }
-
-  private async writeEvent(rt: SessionRuntime, ev: NormalizedEvent, now: number): Promise<void> {
-    await this.repo.appendEvent(rt.id, {
-      turnId: ev.turnId ?? rt.activeTurnId,
-      ts: new Date(now).toISOString(),
-      type: ev.type,
-      rawType: ev.rawType,
-      replay: ev.replay,
-      payload: ev as unknown,
-    });
-    this.metrics.count("EventsWritten");
-    if (rt.firstEventAt === null) {
-      rt.firstEventAt = now;
-      this.metrics.duration("TimeToFirstEvent", now - rt.launchStartedAt);
-    }
-  }
-
-  /* -------------------------------- machine -------------------------------- */
-
-  private applyMachine(rt: SessionRuntime, event: Parameters<typeof transition>[1]): void {
-    try {
-      rt.machine = transition(rt.machine, event);
-    } catch (err) {
-      this.logger.warn("illegal_transition", { sessionId: rt.id, error: String(err) });
-    }
-  }
-
-  private async persistSessionStatus(rt: SessionRuntime): Promise<void> {
-    const item = await this.repo.getSession(rt.id);
-    if (!item) {
-      return;
-    }
-    await this.repo.updateSession(rt.id, item.version, {
-      status: rt.machine.session,
-      activeTurnId: rt.activeTurnId,
-      ...(rt.kiroSessionId ? { kiroSessionId: rt.kiroSessionId } : {}),
-    });
   }
 
   /* --------------------------------- launch -------------------------------- */
@@ -427,231 +302,51 @@ export class SessionManager {
    */
   async launch(
     id: string,
-    args: { prompt: string; repos: string[]; mode?: string; model?: string; effort?: string },
+    args: CloudLaunchArgs,
   ): Promise<{ path: LaunchPath; kiroSessionId: string }> {
     const rt = this.runtimeFor(id);
 
-    // Idempotency: a redelivered launch (SQS at-least-once, or a visibility-
-    // timeout redelivery that raced the ack) must NOT spawn a second chat
-    // --cloud / create a second cloud Space / start a second first-turn. Treat
-    // it as a logged success so the message is still deleted and the FIFO group
-    // unblocks.
-    if (await this.launchAlreadyIssued(id, rt)) {
-      this.logger.info("launch_idempotent_skip", { sessionId: id });
-      return { path: "headless", kiroSessionId: rt.kiroSessionId ?? id };
-    }
-    // Mark launched up front so a redelivery that arrives WHILE this launch is
-    // still spawning the subprocess is also deduped (the in-memory runtime is
-    // the authoritative guard; the durable row catches the runtime-reset case).
-    rt.launched = true;
-    rt.launchStartedAt = this.now();
-
+    // Set the per-launch inputs BEFORE delegating so a replay/reconnect of this
+    // runtime carries the right modeId/modelId/effort/repos.
     const inputs: SessionInputs = this.inputsFor({
       ...(args.mode ? { modeId: args.mode } : {}),
       ...(args.model ? { modelId: args.model } : {}),
       ...(args.effort ? { effortLevel: args.effort } : {}),
       ...(args.repos.length > 0 ? { repos: args.repos } : {}),
     });
+
+    // Delegate the idempotency guard + launch-path decision to the shared
+    // engine. A null result means this was an idempotent redelivery (logged
+    // skip) so the message is still deleted and the FIFO group unblocks.
+    const begun = await this.cloud.beginLaunch(rt, id, args);
+    if (!begun) {
+      return { path: "headless", kiroSessionId: rt.kiroSessionId ?? id };
+    }
     rt.inputs = inputs;
-
-    const path: LaunchPath = "headless";
-    const turnId = ulid();
-    rt.activeTurnId = turnId;
-    rt.turnStartedAt = this.now();
-
-    this.logger.info("launch_path_decision", {
-      sessionId: id,
-      path,
-      repoCount: args.repos.length,
-    });
+    rt.activeTurnId = ulid();
 
     // Run the chat --cloud subprocess (provision + first turn) as BACKGROUND
     // work so launch() returns promptly and intake acks the SQS message on
-    // dispatch. Settlement (parse cloud id, persist events, idle/failed) runs on
-    // rt.settling exactly like turn settlement does.
-    rt.settling = this.settleLaunch(rt, id, args);
+    // dispatch. The SAME settlement primitive is awaited synchronously by the
+    // Lambda consumer; only this background wrapping differs.
+    rt.settling = begun.settle();
 
-    return { path, kiroSessionId: rt.kiroSessionId ?? id };
-  }
-
-  /**
-   * Background settlement for a chat --cloud launch: await the subprocess, parse
-   * the real cloud id + assistant/tool output, persist them, and drive the
-   * machine to idle (or failed, loudly). Never throws (mirrors settleTurn).
-   */
-  private async settleLaunch(
-    rt: SessionRuntime,
-    id: string,
-    args: { prompt: string; repos: string[]; mode?: string; model?: string; effort?: string },
-  ): Promise<void> {
-    try {
-      const result = await headlessLaunch(this.headlessRunner, this.logger, {
-        prompt: args.prompt,
-        repos: args.repos,
-      });
-      // Adopt the real cloud id parsed from the `[cloud] session <uuid>` line.
-      rt.kiroSessionId = result.cloudSessionId;
-      this.kiroToLocal.set(result.cloudSessionId, id);
-
-      // Persist the assistant text + tool activity as normalized events so GET
-      // /v1/sessions/{id}/events returns the turn.
-      await this.persistTurnResult(rt, result);
-
-      // provisioning -> idle.
-      this.applyMachine(rt, { kind: "provisioned" });
-
-      const item = await this.repo.getSession(id);
-      if (item) {
-        await this.repo.updateSession(id, item.version, {
-          status: rt.machine.session,
-          kiroSessionId: rt.kiroSessionId,
-          model: args.model ?? item.model,
-          mode: args.mode ?? item.mode,
-          effort: args.effort ?? item.effort,
-        });
-      }
-      this.metrics.count("SessionsLaunched");
-      this.metrics.count("LaunchPath", 1, { path: "headless" });
-      if (rt.turnStartedAt !== null) {
-        this.metrics.duration("TurnDuration", this.now() - rt.turnStartedAt);
-      }
-      this.logger.info("session_launched", {
-        sessionId: id,
-        path: "headless",
-        kiroSessionId: rt.kiroSessionId,
-      });
-    } catch (err) {
-      // LOUD FAILURE: no `[cloud] session` line OR non-zero exit. Drive the
-      // session to `failed`, log an error, emit the loud-failure metric. Never
-      // leave a silent/idle session.
-      this.applyMachine(rt, { kind: "provision_failed" });
-      this.metrics.count("CloudLaunchFailed");
-      this.logger.error("cloud_launch_failed", { sessionId: id, error: String(err) });
-      const failed = await this.repo.getSession(id);
-      if (failed) {
-        await this.repo.updateSession(id, failed.version, {
-          status: rt.machine.session,
-          activeTurnId: null,
-        });
-      }
-    } finally {
-      rt.activeTurnId = null;
-      rt.turnStartedAt = null;
-      rt.settling = null;
-    }
-  }
-
-  /**
-   * Persist a chat --cloud turn's parsed output as normalized events under the
-   * active turn id: a tool.call (+ tool.update when a status was observed) per
-   * `[tool]` line, then the assistant's final answer as a message.chunk. Uses
-   * the same writeEvent/appendEvent path as ACP-sourced events.
-   */
-  private async persistTurnResult(rt: SessionRuntime, result: HeadlessTurnResult): Promise<void> {
-    const now = this.now();
-    for (const tool of result.tools) {
-      const callEvent: NormalizedEvent = {
-        type: "tool.call",
-        sessionId: rt.id,
-        turnId: rt.activeTurnId,
-        replay: false,
-        rawType: "tool_call",
-        toolCallId: tool.id,
-        title: tool.title,
-        status: tool.status ?? "pending",
-        payload: { source: "chat-cloud", title: tool.title },
-      };
-      await this.writeEvent(rt, callEvent, now);
-      if (tool.status) {
-        const updateEvent: NormalizedEvent = {
-          type: "tool.update",
-          sessionId: rt.id,
-          turnId: rt.activeTurnId,
-          replay: false,
-          rawType: "tool_call_update",
-          toolCallId: tool.id,
-          status: tool.status,
-          payload: { source: "chat-cloud", status: tool.status },
-        };
-        await this.writeEvent(rt, updateEvent, now);
-      }
-    }
-    if (result.assistantText.length > 0) {
-      const messageEvent: NormalizedEvent = {
-        type: "message.chunk",
-        sessionId: rt.id,
-        turnId: rt.activeTurnId,
-        replay: false,
-        rawType: "agent_message_chunk",
-        content: { type: "text", text: result.assistantText },
-      };
-      await this.writeEvent(rt, messageEvent, now);
-    }
-  }
-
-  /**
-   * Record a follow-up turn id for idempotency, evicting the oldest id once the
-   * set reaches {@link MAX_ISSUED_TURNS} so it never grows without bound over a
-   * long-lived session. A Set preserves insertion order, so the first key is the
-   * oldest.
-   */
-  private recordIssuedTurn(rt: SessionRuntime, turnId: string): void {
-    rt.issuedTurns.add(turnId);
-    while (rt.issuedTurns.size > MAX_ISSUED_TURNS) {
-      const oldest = rt.issuedTurns.values().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      rt.issuedTurns.delete(oldest);
-    }
+    return { path: begun.path, kiroSessionId: rt.kiroSessionId ?? id };
   }
 
   /**
    * Persist a client-visible rejection for an operation that cannot be honored
    * for a cloud session (mid-turn steer/cancel, or a queued follow-up with no
-   * drain). This runs OFF the command-dispatch error path (intake calls it after
-   * catching an {@link UnsupportedCloudOperationError}) so a polling client sees,
-   * via GET /v1/sessions/{id}/events, WHY the steer/cancel/queue did nothing
-   * instead of silence -- WITHOUT turning the SQS message into a redelivery loop.
-   * It does NOT mutate the state machine (the in-flight turn keeps running and
-   * settles on its own subprocess result).
+   * drain). Delegates to the shared engine so the ECS bridge and the Lambda
+   * consumer persist the identical rejection event; a no-op when the runtime is
+   * gone.
    */
   async recordUnsupportedRejection(id: string, operation: string, reason: string): Promise<void> {
     const rt = this.runtimes.get(id);
     if (!rt) {
       return;
     }
-    await this.writeEvent(
-      rt,
-      {
-        type: "turn.failed",
-        sessionId: rt.id,
-        turnId: rt.activeTurnId,
-        replay: false,
-        rawType: "operation_rejected",
-        failureReason: "generic",
-        payload: { source: "chat-cloud", operation, reason },
-      },
-      this.now(),
-    );
-  }
-
-  /**
-   * Decide whether a launch for this session has ALREADY been issued, so a
-   * redelivery is a no-op. True when either the in-memory runtime has already
-   * launched (still-present case) OR the durable session row is past
-   * 'provisioning' / already carries a kiroSessionId (runtime-reset case, e.g.
-   * after a bridge restart where the row survived but the runtime map did not).
-   */
-  private async launchAlreadyIssued(id: string, rt: SessionRuntime): Promise<boolean> {
-    if (rt.launched || rt.kiroSessionId !== null) {
-      return true;
-    }
-    const item = await this.repo.getSession(id);
-    if (!item) {
-      return false;
-    }
-    return item.status !== "provisioning" || item.kiroSessionId !== null;
+    await this.cloud.recordUnsupportedRejection(rt, operation, reason);
   }
 
   /**
@@ -672,7 +367,7 @@ export class SessionManager {
     rt.inputs = inputs;
     this.kiroToLocal.set(kiroSessionId, id);
 
-    this.applyMachine(rt, { kind: "provisioned" });
+    this.cloud.applyMachine(rt, { kind: "provisioned" });
 
     const item = await this.repo.getSession(id);
     if (item) {
@@ -704,81 +399,16 @@ export class SessionManager {
     const rt = this.runtimeFor(id);
     const tid = turnId ?? ulid();
 
-    // Idempotency: a redelivered `prompt` command (SQS at-least-once, or a
-    // visibility-timeout redelivery) must NOT spawn a second
-    // `chat --resume-id` turn. When a turn id is supplied (the command
-    // carries one) and we have already accepted it, this is a logged no-op --
-    // never a duplicate resume subprocess and never a mid-turn re-dispatch. A
-    // dedupe is only meaningful with a stable turn id from the command; a bare
-    // prompt with no id is always a fresh turn.
-    if (turnId !== undefined && rt.issuedTurns.has(turnId)) {
-      this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
+    // Delegate the idempotency guard + idle->running transition + durable-row
+    // persist to the shared engine. A null result means this was an idempotent
+    // redelivery (logged skip). Otherwise run the follow-up turn's settlement as
+    // BACKGROUND work (tracked on rt.settling) so intake acks the SQS message on
+    // dispatch; the Lambda consumer awaits the SAME settlement primitive.
+    const begun = await this.cloud.beginResume(rt, id, prompt, turnId, tid);
+    if (!begun) {
       return;
     }
-    this.recordIssuedTurn(rt, tid);
-
-    rt.activeTurnId = tid;
-    rt.turnStartedAt = this.now();
-    this.applyMachine(rt, { kind: "prompt.sent" });
-    await this.persistSessionStatus(rt);
-
-    // A follow-up turn on a cloud session is driven by a NEW `kiro-cli chat
-    // --resume-id <cloudSessionId> --no-interactive "<prompt>"` subprocess
-    // (NO --cloud/--repo on resume) -- ACP CANNOT drive a cloud session
-    // (session/load+prompt
-    // against a real cloud id returns `Session not found`), so the gateway
-    // prompt path is never used for cloud. Run the subprocess as BACKGROUND work
-    // (tracked on rt.settling), exactly like the launch turn, so intake acks the
-    // SQS message on dispatch.
-    rt.settling = this.settleResume(rt, id, prompt);
-  }
-
-  /**
-   * Background settlement for a follow-up cloud turn via headlessResume: await
-   * the subprocess, persist its assistant/tool output as events, and settle the
-   * turn (prompt.response on success, prompt.error on failure). Never throws
-   * (mirrors settleTurn). Targets the SAME cloud id with --resume-id.
-   */
-  private async settleResume(rt: SessionRuntime, id: string, prompt: string): Promise<void> {
-    const cloudSessionId = rt.kiroSessionId;
-    try {
-      if (!cloudSessionId) {
-        throw new Error("no cloud session id to resume");
-      }
-      const result = await headlessResume(this.headlessRunner, this.logger, cloudSessionId, prompt);
-      await this.persistTurnResult(rt, result);
-      this.applyMachine(rt, { kind: "prompt.response", stopReason: "end_turn" });
-    } catch (err) {
-      // LOUD FAILURE, mirroring the launch path: a failed follow-up resume must
-      // NOT be dropped on a warn alone (a client polling events would see the
-      // session flip back to idle with no answer and no signal the turn failed).
-      // Emit a failure metric AND persist a client-visible turn.failed event so
-      // GET /v1/sessions/{id}/events surfaces the failure.
-      this.metrics.count("CloudTurnFailed");
-      this.logger.error("cloud_turn_failed", { sessionId: id, error: String(err) });
-      await this.writeEvent(
-        rt,
-        {
-          type: "turn.failed",
-          sessionId: rt.id,
-          turnId: rt.activeTurnId,
-          replay: false,
-          rawType: "turn_failed",
-          failureReason: "error",
-          payload: { source: "chat-cloud", error: String(err) },
-        },
-        this.now(),
-      );
-      this.applyMachine(rt, { kind: "prompt.error" });
-    } finally {
-      if (rt.turnStartedAt !== null) {
-        this.metrics.duration("TurnDuration", this.now() - rt.turnStartedAt);
-      }
-      rt.activeTurnId = null;
-      rt.turnStartedAt = null;
-      await this.persistSessionStatus(rt);
-      rt.settling = null;
-    }
+    rt.settling = begun.settle();
   }
 
   /**
@@ -834,76 +464,24 @@ export class SessionManager {
     turnId?: string,
   ): Promise<void> {
     const rt = this.runtimeFor(id);
-
-    // Idempotency for a redelivered `prompt` command (which routes through
-    // steer): if this turn id was already accepted, it is a logged no-op --
-    // never a duplicate resume turn and never a mid-turn re-dispatch as a steer.
-    // The guard runs BEFORE the busy check so a redelivery that lands mid-turn
-    // is not reinterpreted as a steer. Checked here (not only in prompt()) so it
-    // also covers the just-settled-into-idle case.
-    if (turnId !== undefined && rt.issuedTurns.has(turnId)) {
-      this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
-      return;
-    }
-
-    const busy = rt.machine.turn === "running";
-    if (!busy) {
+    // The shared engine encodes the "a cloud turn is effectively non-interactive"
+    // rule: an already-issued turn id is a logged no-op, an idle session takes a
+    // fresh prompt, whenBusy=reject is a quiet skip, and a mid-turn steer /
+    // whenBusy=queue throws UnsupportedCloudOperationError (handled here).
+    const decision = this.cloud.classifySteer(rt, id, whenBusy, turnId);
+    if (decision === "prompt") {
       // Idle session: a follow-up is a new prompt (_message/send -> session/prompt).
       await this.prompt(id, content, turnId);
-      return;
     }
-    if (whenBusy === "reject") {
-      this.logger.info("steer_rejected", { sessionId: id });
-      return;
-    }
-    if (whenBusy === "queue") {
-      // `whenBusy=queue` is NOT drainable on the cloud path. There is no
-      // queue-drain mechanism, and a cloud turn runs in a detached subprocess
-      // we cannot interleave with, so a "queued" follow-up would never actually
-      // run. Reject it the SAME visible, non-state-mutating way as a mid-turn
-      // steer (for now): do NOT apply `prompt.queued` (telling the client the
-      // turn is queued when it will never drain is worse than a clean
-      // rejection). The user should wait for the active turn to settle, then
-      // send a new prompt.
-      this.logger.warn("steer_queue_unsupported_cloud", { sessionId: id });
-      throw new UnsupportedCloudOperationError(
-        "queue",
-        "queuing a follow-up turn is not supported for cloud sessions; wait for the active turn to complete, then send a new prompt",
-      );
-    }
-    // Mid-turn steering is NOT supported on a cloud session. A cloud turn runs
-    // in a detached `chat --resume-id` subprocess, and ACP cannot drive
-    // a cloud session (session/load+prompt against a real cloud id returns
-    // `Session not found`), so issuing gateway.steer here would silently no-op.
-    // Reject LOUDLY (sentinel error -> intake logs + persists a client-visible
-    // rejection event + DELETES the message) instead of firing a doomed ACP
-    // request OR looping the command through SQS redelivery; the user should
-    // wait for the turn to settle, then send a new prompt.
-    this.logger.warn("steer_unsupported_cloud", { sessionId: id });
-    throw new UnsupportedCloudOperationError(
-      "steer",
-      "mid-turn steering is not supported for cloud sessions; wait for the turn to complete, then send a new prompt",
-    );
+    // "idempotent" and "reject" are logged no-ops inside classifySteer.
   }
 
   async cancel(id: string): Promise<void> {
     const rt = this.runtimeFor(id);
-    if (rt.machine.turn !== "running") {
-      this.logger.info("cancel_no_active_turn", { sessionId: id });
-      return;
-    }
-    // Cancellation is NOT supported for a cloud turn. The turn runs in a
-    // detached `chat --cloud` subprocess and ACP cannot drive a cloud session
-    // (session/load+cancel against a real cloud id returns `Session not found`),
-    // so issuing gateway.cancel would silently no-op while the subprocess runs
-    // to completion. Reject LOUDLY rather than firing a doomed ACP request and
-    // DO NOT mutate the machine (a swallowed cancel must not fake a cancelling
-    // state); the turn settles on its own subprocess result.
-    this.logger.warn("cancel_unsupported_cloud", { sessionId: id });
-    throw new UnsupportedCloudOperationError(
-      "cancel",
-      "cancellation is not supported for cloud sessions; the in-flight turn will run to completion",
-    );
+    // Delegate to the shared engine: a no-op when no turn is running, otherwise
+    // a LOUD UnsupportedCloudOperationError (a detached cloud turn cannot be
+    // cancelled).
+    this.cloud.classifyCancel(rt, id);
   }
 
   /* --------------------------------- config -------------------------------- */
@@ -964,8 +542,8 @@ export class SessionManager {
       this.metrics.duration("PermissionWait", this.now() - started);
       rt.permissionStartedAt.delete(requestId);
     }
-    this.applyMachine(rt, { kind: "permission.answered" });
-    await this.persistSessionStatus(rt);
+    this.cloud.applyMachine(rt, { kind: "permission.answered" });
+    await this.cloud.persistSessionStatus(rt);
   }
 
   /* -------------------------------- delete --------------------------------- */
@@ -975,16 +553,11 @@ export class SessionManager {
     const item = await this.repo.getSession(id);
     const kiroSessionId = rt.kiroSessionId ?? item?.kiroSessionId ?? null;
 
-    // Run `kiro-cli chat --delete-session <kiroSessionId>` first, then mark it.
-    if (kiroSessionId) {
-      try {
-        await headlessDelete(this.headlessRunner, this.logger, kiroSessionId);
-      } catch (err) {
-        this.logger.warn("delete_session_cli_failed", { sessionId: id, error: String(err) });
-      }
-    }
+    // Run `kiro-cli chat --delete-session <kiroSessionId>` first (via the shared
+    // engine, which logs rather than throws on a CLI failure), then mark it.
+    await this.cloud.deleteCloud(id, kiroSessionId);
 
-    this.applyMachine(rt, { kind: "deleted" });
+    this.cloud.applyMachine(rt, { kind: "deleted" });
     if (item) {
       await this.repo.updateSession(id, item.version, { status: "deleted", activeTurnId: null });
     }
