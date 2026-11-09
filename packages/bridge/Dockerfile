@@ -13,6 +13,14 @@
 #   container at module load; bundling inlines the workspace code and sidesteps
 #   that entirely, mirroring the API Lambda in packages/cdk/src/api-asset.ts.)
 #
+# NODE_VERSION pins the Node base image. It is a REAL, published Docker tag
+# (node:<version>-bookworm-slim on Docker Hub), which is a DIFFERENT concern
+# from the Node the repo's .mise.toml pins for local type-stripping. The esbuild
+# bundle below targets node22, the API Lambda runtime is NODEJS_22_X, and the
+# serverless image (Dockerfile.lambda) uses the Node 22 Lambda base, so the
+# build+runtime toolchain is uniformly Node 22 here; pin a real Node 22 tag (not
+# an unpublished 26.x, which would fail the build at `FROM`).
+#
 # LAMBDA-PATH ENTRYPOINTS (FEAT-003 source; FEAT-004 wires the image).
 #   The serverless bridge adds two more entry shapes that this image's bundle
 #   pattern extends 1:1 (same esbuild invocation, different entry file):
@@ -29,7 +37,7 @@
 # - KIRO_API_KEY is injected as an ECS secret at RUNTIME (never baked into the
 #   image, never an ENV/ARG here).
 
-ARG NODE_VERSION=26.13.0
+ARG NODE_VERSION=22
 
 ############################
 # deps: install workspace node_modules with pnpm and bundle the bridge
