@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilities, hasExtensionMethod, supportsModel } from "../src/index.ts";
+import { capabilities, hasExtensionMethod, kiroCliVersion, supportsModel } from "../src/index.ts";
 
 const fullInit = {
   agentCapabilities: {
@@ -185,5 +185,20 @@ describe("capabilities() cloudExecution derivation", () => {
       },
     });
     expect(caps.cloudExecution).toBe(false);
+  });
+});
+
+describe("kiroCliVersion()", () => {
+  it("returns agentInfo.version, trimmed", () => {
+    expect(kiroCliVersion({ agentInfo: { name: "kiro-cli", version: " 1.2.3 " } })).toBe("1.2.3");
+  });
+
+  it("returns null when no version is known", () => {
+    expect(kiroCliVersion(undefined)).toBeNull();
+    expect(kiroCliVersion(null)).toBeNull();
+    expect(kiroCliVersion({})).toBeNull();
+    expect(kiroCliVersion({ agentInfo: {} })).toBeNull();
+    expect(kiroCliVersion({ agentInfo: { version: "  " } })).toBeNull();
+    expect(kiroCliVersion({ agentInfo: { version: 3 } })).toBeNull();
   });
 });

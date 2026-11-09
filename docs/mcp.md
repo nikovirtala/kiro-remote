@@ -137,22 +137,22 @@ store (see [`docs/testing.md`](testing.md#the-live-end-to-end-harness)).
 Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 `destructiveHint` (from [`packages/mcp/src/tools.ts`](../packages/mcp/src/tools.ts)):
 
-| #   | Tool                     | Annotation  | What it does                                                              |
-| --- | ------------------------ | ----------- | ------------------------------------------------------------------------- |
-| 1   | `kiro_capabilities`      | RO          | Advertised capabilities, `kiro-cli` version, your active session count.   |
-| 2   | `kiro_list_models`       | RO          | Model ids the agent advertises.                                           |
-| 3   | `kiro_launch_session`    | —           | Launch a session against one or more repos with an initial prompt.        |
-| 4   | `kiro_list_sessions`     | RO          | List your sessions, newest first, with status filter + cursor.            |
-| 5   | `kiro_adopt_session`     | —           | Adopt an existing Kiro cloud session.                                     |
-| 6   | `kiro_get_session`       | RO          | Fetch one session you own.                                                |
-| 7   | `kiro_send_prompt`       | —           | Send a prompt; steer/queue/reject when busy.                              |
-| 8   | `kiro_wait_for_events`   | RO          | Long-poll the event log (see limits below).                               |
-| 9   | `kiro_get_transcript`    | RO          | The assistant's final text per completed turn.                            |
-| 10  | `kiro_list_permissions`  | RO          | List permission requests (optionally by status).                          |
-| 11  | `kiro_answer_permission` | —           | Answer a pending request with an offered `optionId` (+ optional consent). |
-| 12  | `kiro_set_config`        | —           | Change a session's `model` / `effort` / `mode`.                           |
-| 13  | `kiro_cancel_turn`       | DESTRUCTIVE | Cancel the active turn.                                                   |
-| 14  | `kiro_delete_session`    | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                       |
+| #   | Tool                     | Annotation  | What it does                                                                                                    |
+| --- | ------------------------ | ----------- | --------------------------------------------------------------------------------------------------------------- |
+| 1   | `kiro_capabilities`      | RO          | Advertised capabilities, `kiro-cli` version (`null` until a bridge has initialized), your active session count. |
+| 2   | `kiro_list_models`       | RO          | Model ids the agent advertises.                                                                                 |
+| 3   | `kiro_launch_session`    | —           | Launch a session against one or more repos with an initial prompt.                                              |
+| 4   | `kiro_list_sessions`     | RO          | List your sessions, newest first, with status filter + cursor.                                                  |
+| 5   | `kiro_adopt_session`     | —           | Adopt an existing Kiro cloud session.                                                                           |
+| 6   | `kiro_get_session`       | RO          | Fetch one session you own.                                                                                      |
+| 7   | `kiro_send_prompt`       | —           | Send a prompt; steer/queue/reject when busy.                                                                    |
+| 8   | `kiro_wait_for_events`   | RO          | Long-poll the event log (see limits below).                                                                     |
+| 9   | `kiro_get_transcript`    | RO          | The assistant's final text per completed turn.                                                                  |
+| 10  | `kiro_list_permissions`  | RO          | List permission requests (optionally by status).                                                                |
+| 11  | `kiro_answer_permission` | —           | Answer a pending request with an offered `optionId` (+ optional consent).                                       |
+| 12  | `kiro_set_config`        | —           | Change a session's `model` / `effort` / `mode`.                                                                 |
+| 13  | `kiro_cancel_turn`       | DESTRUCTIVE | Cancel the active turn.                                                                                         |
+| 14  | `kiro_delete_session`    | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                             |
 
 ### `kiro_wait_for_events` limits
 
