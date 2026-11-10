@@ -91,7 +91,7 @@ known, usable password.
 3. Cognito does **not** prompt admin-created users to register a passkey. After
    signing in, open
    `https://<cognitoDomainPrefix>.auth.<region>.amazoncognito.com/passkeys/add?client_id=<facade-client-id>&redirect_uri=<host>/oauth/callback`
-   (the invitation email points to the same page) while the session is active,
+   (the invitation email links to `<host>/passkeys/add`, which redirects to this page with the right `client_id` and `redirect_uri`) while the session is active,
    and complete the biometric/PIN prompt.
 4. From then on, choose the passkey option at sign-in.
 

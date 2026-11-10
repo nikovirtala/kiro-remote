@@ -30,7 +30,7 @@
  */
 
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
-import { Duration, RemovalPolicy } from "aws-cdk-lib";
+import { Annotations, Duration, RemovalPolicy } from "aws-cdk-lib";
 import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import {
@@ -38,6 +38,7 @@ import {
   CertificateValidation,
   type ICertificate,
 } from "aws-cdk-lib/aws-certificatemanager";
+import { UserPoolEmail } from "aws-cdk-lib/aws-cognito";
 import {
   AttributeType,
   BillingMode,
@@ -126,6 +127,18 @@ export interface KiroRemoteProps {
 
   /** Cognito managed-login domain prefix (<prefix>.auth.<region>...). */
   cognitoDomainPrefix: string;
+
+  /**
+   * SES sender for the user pool (e.g. "no-reply@example.com"). Cognito's
+   * default sender does not deliver the email one-time code that invited
+   * users sign in with, so set this for a usable invite-only bootstrap. The
+   * address (or its domain) must be verified in SES in the stack's region.
+   * When omitted, Cognito's default sender is used and synth warns.
+   */
+  sesFromEmail?: string;
+
+  /** SES verified domain for {@link sesFromEmail}, when it differs from the address's domain. */
+  sesVerifiedDomain?: string;
 
   /** GitHub repo glob allow-list the bridge may launch sessions against. */
   allowedRepos: string[];
@@ -396,9 +409,24 @@ export class KiroRemote extends Construct {
 
     /* ----------------------------- Cognito auth -------------------------- */
 
+    if (!props.sesFromEmail) {
+      Annotations.of(this).addWarningV2(
+        "kiro-remote:no-ses-sender",
+        "No sesFromEmail set: Cognito's default sender does not deliver the email one-time code invited users sign in with. Set sesFromEmail (SES_FROM_EMAIL).",
+      );
+    }
+
     this.auth = new KiroRemoteAuth(this, "Auth", {
       publicBaseUrl: base,
       cognitoDomainPrefix: props.cognitoDomainPrefix,
+      ...(props.sesFromEmail
+        ? {
+            email: UserPoolEmail.withSES({
+              fromEmail: props.sesFromEmail,
+              ...(props.sesVerifiedDomain ? { sesVerifiedDomain: props.sesVerifiedDomain } : {}),
+            }),
+          }
+        : {}),
       ...(props.preRegisteredClients ? { preRegisteredClients: props.preRegisteredClients } : {}),
     });
 
@@ -571,6 +599,9 @@ export class KiroRemote extends Construct {
       integration,
     });
     this.httpApi.addRoutes({ path: "/openapi.json", methods: [HttpMethod.GET], integration });
+    // Public redirect to the Cognito managed-login passkey registration page
+    // (the invitation email links here; see the router).
+    this.httpApi.addRoutes({ path: "/passkeys/add", methods: [HttpMethod.GET], integration });
     // The OAuth facade endpoints route to their dedicated KMS-scoped handlers.
     this.httpApi.addRoutes({
       path: "/oauth/callback",

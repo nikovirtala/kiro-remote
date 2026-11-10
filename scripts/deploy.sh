@@ -164,6 +164,8 @@ HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
 HOSTED_ZONE_NAME="${HOSTED_ZONE_NAME:-}"
 CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
 KIRO_API_KEY_SECRET_ARN="${KIRO_API_KEY_SECRET_ARN:-}"
+SES_FROM_EMAIL="${SES_FROM_EMAIL:-}"
+SES_VERIFIED_DOMAIN="${SES_VERIFIED_DOMAIN:-}"
 
 if [ -n "${BRIDGE_MODE:-}" ]; then
   printf 'WARNING: BRIDGE_MODE in %s is obsolete and ignored (the Lambda bridge is the only bridge); remove the line.\n' "$CONFIG_FILE" >&2
@@ -202,6 +204,8 @@ add_opt hostedZoneId         "$HOSTED_ZONE_ID"
 add_opt hostedZoneName       "$HOSTED_ZONE_NAME"
 add_opt certificateArn       "$CERTIFICATE_ARN"
 add_opt kiroApiKeySecretArn  "$KIRO_API_KEY_SECRET_ARN"
+add_opt sesFromEmail         "$SES_FROM_EMAIL"
+add_opt sesVerifiedDomain    "$SES_VERIFIED_DOMAIN"
 
 # synth and diff cover every stack by default (synth rejects --all); deploy
 # needs --all.

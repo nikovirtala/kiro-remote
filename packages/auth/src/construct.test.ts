@@ -45,7 +45,7 @@ describe("KiroRemoteAuth", () => {
         AllowAdminCreateUserOnly: true,
         InviteMessageTemplate: Match.objectLike({
           EmailSubject: Match.stringLikeRegexp("passkey"),
-          EmailMessage: Match.stringLikeRegexp("passkeys/add"),
+          EmailMessage: Match.stringLikeRegexp("https://kiro\\.example\\.com/passkeys/add"),
         }),
       }),
       Policies: Match.objectLike({
