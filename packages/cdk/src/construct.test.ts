@@ -571,6 +571,8 @@ describe("KiroRemote bridge mode", () => {
     t.resourceCountIs("AWS::Events::Rule", 0);
     // The queue visibility timeout is unchanged at 60s in the default stack.
     t.hasResourceProperties("AWS::SQS::Queue", { VisibilityTimeout: 60 });
+    // Only the command queue: the catch-up queue is Lambda-path only.
+    t.resourceCountIs("AWS::SQS::Queue", 1);
   });
 
   test("explicit fargate mode equals the default (one FargateService, no Lambda bridge)", () => {
@@ -603,23 +605,46 @@ describe("KiroRemote bridge mode", () => {
     expect(consumer).toBeDefined();
     expect(consumer?.Properties.ReservedConcurrentExecutions).toBe(10);
 
-    // A native SQS event-source mapping to the command queue with partial-batch
-    // failure reporting and a FIFO-appropriate batch size.
-    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 1);
-    t.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
-      FunctionResponseTypes: ["ReportBatchItemFailures"],
-      BatchSize: 1,
+    // Two native SQS event-source mappings (command queue + catch-up queue),
+    // each with partial-batch failure reporting and a batch size of 1.
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 2);
+    const mappings = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"));
+    for (const esm of mappings) {
+      const props = esm.Properties as {
+        FunctionResponseTypes?: string[];
+        BatchSize?: number;
+        FilterCriteria?: unknown;
+      };
+      expect(props.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
+      expect(props.BatchSize).toBe(1);
+      // In `lambda`-ONLY mode there is NO Fargate to serve a filtered-out
+      // adopt, so the consumer is deliberately NOT filtered: it still receives
+      // `adopt` and rejects it loudly. The catch-up mapping is never filtered.
+      expect(props.FilterCriteria).toBeUndefined();
+    }
+
+    // The command queue visibility timeout is raised to >= the consumer timeout
+    // so a long cloud turn does not get redelivered mid-flight.
+    t.hasResourceProperties("AWS::SQS::Queue", { FifoQueue: true, VisibilityTimeout: 900 });
+    // The catch-up queue is a STANDARD queue (per-message delay) with the same
+    // visibility timeout.
+    t.resourceCountIs("AWS::SQS::Queue", 2);
+    t.hasResourceProperties("AWS::SQS::Queue", {
+      FifoQueue: Match.absent(),
+      VisibilityTimeout: 900,
     });
 
-    // In `lambda`-ONLY mode there is NO Fargate to serve a filtered-out adopt,
-    // so the consumer is deliberately NOT filtered: it still receives `adopt`
-    // and rejects it loudly. Assert the mapping carries NO FilterCriteria.
-    const esm = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"))[0];
-    expect((esm.Properties as { FilterCriteria?: unknown }).FilterCriteria).toBeUndefined();
-
-    // The queue visibility timeout is raised to >= the consumer timeout so a
-    // long cloud turn does not get redelivered mid-flight.
-    t.hasResourceProperties("AWS::SQS::Queue", { VisibilityTimeout: 900 });
+    // CATCH_UP_QUEUE_URL is on the consumer only, not the caps publisher.
+    const envOf = (fn: { Properties: Record<string, unknown> }) =>
+      (fn.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables ?? {};
+    expect(
+      envOf(consumer as { Properties: Record<string, unknown> }).CATCH_UP_QUEUE_URL,
+    ).toBeDefined();
+    const publisher = images.find((fn) => (fn.Properties.Timeout as number) === 300);
+    expect(publisher).toBeDefined();
+    expect(
+      envOf(publisher as { Properties: Record<string, unknown> }).CATCH_UP_QUEUE_URL,
+    ).toBeUndefined();
 
     // The caps-publisher is invoked on a schedule.
     t.resourceCountIs("AWS::Events::Rule", 1);
@@ -701,7 +726,8 @@ describe("KiroRemote bridge mode", () => {
     t.resourceCountIs("AWS::ECS::Service", 1);
     // AND the serverless bridge (consumer + publisher) exists.
     expect(imageFunctions(t).length).toBe(2);
-    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 1);
+    // Command-queue mapping + catch-up-queue mapping.
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 2);
     t.resourceCountIs("AWS::Events::Rule", 1);
   });
 
@@ -725,5 +751,12 @@ describe("KiroRemote bridge mode", () => {
         ],
       },
     });
+    // Exactly one mapping carries the filter; the catch-up mapping has none.
+    const mappings = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"));
+    expect(mappings.length).toBe(2);
+    const filtered = mappings.filter(
+      (esm) => (esm.Properties as { FilterCriteria?: unknown }).FilterCriteria !== undefined,
+    );
+    expect(filtered.length).toBe(1);
   });
 });
