@@ -50,26 +50,6 @@ describe("cdk-nag AwsSolutions", () => {
     expect(() => app.synth()).not.toThrow();
   });
 
-  test("synth in lambda mode stays green (the SQS consumer + caps publisher add no un-acknowledged finding)", () => {
-    const app = new App();
-    new KiroRemoteStack(app, "KiroRemoteStack", {
-      env: ENV,
-      kiroRemote: { ...KIRO_REMOTE_PROPS, bridgeMode: "lambda" },
-    });
-    applyAwsSolutionsChecks(app);
-    expect(() => app.synth()).not.toThrow();
-  });
-
-  test("synth in both mode stays green (Fargate + the Lambda bridge add no un-acknowledged finding)", () => {
-    const app = new App();
-    new KiroRemoteStack(app, "KiroRemoteStack", {
-      env: ENV,
-      kiroRemote: { ...KIRO_REMOTE_PROPS, bridgeMode: "both" },
-    });
-    applyAwsSolutionsChecks(app);
-    expect(() => app.synth()).not.toThrow();
-  });
-
   test("synth with a custom domain stays green (ACM cert + DomainName add no un-acknowledged finding)", () => {
     const app = new App();
     new KiroRemoteStack(app, "KiroRemoteStack", {

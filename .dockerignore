@@ -1,8 +1,9 @@
 # Docker build context ignore for the bridge image asset.
 #
-# The bridge image's `ContainerImage.fromAsset` build context is the MONOREPO
-# ROOT (the Dockerfile COPYs package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
-# tsconfig.base.json and the whole packages/core + packages/bridge trees). Docker
+# The Lambda bridge image asset (`DockerImageCode.fromImageAsset`, built from
+# packages/bridge/Dockerfile.lambda) uses the MONOREPO ROOT as its build context
+# (the Dockerfile COPYs package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
+# tsconfig.base.json and the packages/core + packages/bridge trees). Docker
 # reads the `.dockerignore` from the CONTEXT root, so it must live HERE -- the
 # packages/bridge/.dockerignore is never consulted for this context.
 #

@@ -1,20 +1,19 @@
 /**
- * Guard test for the bridge image's build-time esbuild bundling.
+ * Guard tests for the Lambda bridge image (packages/bridge/Dockerfile.lambda).
  *
- * The bridge container used to run the RAW workspace entry
- * `node packages/bridge/src/cli.ts`, which imports `@nikovirtala/kiro-remote-core`
- * whose package.json exports `./src/index.ts` -- a raw `.ts` file resolved
- * under pnpm's node_modules symlink. Node refuses to type-strip `.ts` files
- * under a node_modules path, so the container crashed at module load before
- * logging anything. The fix bundles the CLI into a single self-contained
- * CommonJS file at image-build time (mirroring the API Lambda in
- * `api-asset.ts`), inlining the `@nikovirtala/*` workspace code so there is no
- * bare `@nikovirtala` import -- and no `.ts` under node_modules -- at runtime.
+ * The bridge entries import `@nikovirtala/kiro-remote-core`, whose package.json
+ * exports `./src/index.ts` -- a raw `.ts` file resolved under pnpm's
+ * node_modules symlink. Node refuses to type-strip `.ts` files under a
+ * node_modules path, so running the raw entries would crash at module load.
+ * Dockerfile.lambda therefore esbuild-bundles both Lambda entries
+ * (`lambda-consumer.ts`, `caps-publisher.ts`) into self-contained CommonJS
+ * files at image-build time, inlining the `@nikovirtala/*` workspace code.
  *
- * This test reproduces that exact esbuild invocation in-process (no Docker) and
- * asserts the produced bundle inlines the workspace code: it contains NO bare
- * `require("@nikovirtala/...")`. That is the deterministic, fast proof that the
- * container can no longer crash on the type-strip path.
+ * The bundle tests reproduce that esbuild invocation in-process (no Docker) and
+ * assert the bundles inline the workspace code (no bare `@nikovirtala/...`
+ * import). The content tests pin the Dockerfile.lambda lines that earlier
+ * builds got wrong: the esbuild bin path, the kiro-cli install invocation, a
+ * writable HOME, and no redundant per-FROM `--platform`.
  */
 
 import { readFileSync } from "node:fs";
@@ -25,176 +24,96 @@ import { describe, expect, test } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** The repo-root-relative path to the bridge CLI entry (packages/cdk/src -> repo root). */
-const CLI_ENTRY = join(here, "..", "..", "bridge", "src", "cli.ts");
-
-/** The bridge Dockerfile (packages/cdk/src -> packages/bridge/Dockerfile). */
-const DOCKERFILE = join(here, "..", "..", "bridge", "Dockerfile");
-
-describe("bridge image bundle", () => {
-  test("bundling packages/bridge/src/cli.ts inlines the @nikovirtala/* workspace code (no bare require)", async () => {
-    // EXACTLY the Dockerfile `deps`-stage invocation: bundle, node platform,
-    // cjs, resolve .ts specifiers, @aws-sdk/* bundled IN (no external). Write to
-    // an in-memory result instead of disk so the test stays hermetic.
-    const result = await build({
-      entryPoints: [CLI_ENTRY],
-      bundle: true,
-      platform: "node",
-      target: "node22",
-      format: "cjs",
-      resolveExtensions: [".ts", ".js", ".mjs", ".json"],
-      write: false,
-      logLevel: "silent",
-    });
-
-    const code = result.outputFiles.map((f) => f.text).join("\n");
-
-    // The whole point: the workspace entry is INLINED, so there is no bare
-    // `@nikovirtala/...` module left to resolve under node_modules at runtime.
-    expect(code).not.toMatch(/require\(["']@nikovirtala\//);
-    expect(code).not.toMatch(/\bfrom\s+["']@nikovirtala\//);
-
-    // Sanity: the bundle actually contains the bridge's own runtime surface
-    // (it reached and inlined the application code, not just an empty shell).
-    expect(code).toContain("bridge_starting");
-  });
-
-  // This guards a DIFFERENT failure class than the in-process bundle test
-  // above: the Dockerfile's esbuild *bin path*. esbuild is a devDependency of
-  // @nikovirtala/kiro-remote-cdk, so under pnpm's default isolated layout its
-  // bin is linked ONLY into packages/cdk/node_modules/.bin -- NOT the
-  // workspace-root node_modules/.bin. A `RUN node_modules/.bin/esbuild ...`
-  // line (resolving to /app/node_modules/.bin/esbuild) therefore does not exist
-  // in the image and the docker build fails before producing the bundle. The
-  // in-process build() above cannot catch that because it imports esbuild as a
-  // module. This cheap content assertion closes the gap.
-  test("the Dockerfile invokes esbuild via a resolvable bin path (not the non-existent root node_modules/.bin)", () => {
-    const dockerfile = readFileSync(DOCKERFILE, "utf8");
-
-    // The esbuild invocation must exist and bundle the bridge CLI entry.
-    expect(dockerfile).toMatch(/esbuild\s+packages\/bridge\/src\/cli\.ts/);
-
-    // It must NOT use the bare root bin path, which pnpm does not create for a
-    // devDependency owned by a workspace package.
-    expect(dockerfile).not.toMatch(/(?:RUN\s+|&&\s*)node_modules\/\.bin\/esbuild/);
-
-    // It MUST resolve esbuild through the owning package's bin or via
-    // `pnpm --filter <owning-pkg> exec esbuild`, both of which resolve under
-    // the filtered install the Dockerfile performs.
-    const resolvableInvocation =
-      /packages\/cdk\/node_modules\/\.bin\/esbuild/.test(dockerfile) ||
-      /pnpm\s+--filter\s+@nikovirtala\/kiro-remote-cdk\s+exec\s+esbuild/.test(dockerfile);
-    expect(resolvableInvocation).toBe(true);
-  });
-
-  // This guards a THIRD failure class: `kiro-cli` must land in a
-  // world-executable system path reachable by the non-root `bridge` user. The
-  // official install script drops binaries into HOME's `.local/bin`
-  // (/root/.local/bin, mode 0700) by default. The fix installs GLOBALLY
-  // (`Q_INSTALL_GLOBAL=1`, which makes the script's inner install.sh target
-  // /usr/local/bin directly), chmods kiro-cli 0755, and proves the bridge user
-  // can run it. kiro-cli 3.x ships one binary (`acp` and `chat` are
-  // subcommands), so nothing may reference the old `kiro-cli-chat` sibling.
-  test("the Dockerfile installs the single kiro-cli binary GLOBALLY into a world-executable path", () => {
-    const dockerfile = readFileSync(DOCKERFILE, "utf8");
-
-    // The install must run with Q_INSTALL_GLOBAL=1 so the script targets
-    // /usr/local/bin ($GLOBAL_INSTALL_DIR) directly.
-    expect(dockerfile).toMatch(
-      /Q_INSTALL_GLOBAL=1\s+bash\s+-s\s+--\s+--version\s+"?\$\{?KIRO_CLI_VERSION\}?"?/,
-    );
-
-    // The binary must be made world-executable.
-    expect(dockerfile).toMatch(/chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli/);
-
-    // 3.x has no kiro-cli-chat; a leftover assert would fail the build.
-    expect(dockerfile).not.toMatch(/kiro-cli-chat/);
-
-    // The brittle single-binary cherry-pick must be GONE: the build must not
-    // relocate kiro-cli via `cp -L "$KIRO_BIN" /usr/local/bin/kiro-cli`.
-    expect(dockerfile).not.toMatch(/cp\s+-L\s+"?\$\{?KIRO_BIN\}?"?\s+\/usr\/local\/bin\/kiro-cli/);
-
-    // It must NOT keep kiro-cli reachable only via /root: no symlink target
-    // under /root and no /root/.local/bin on PATH for the runtime user.
-    expect(dockerfile).not.toMatch(/ENV\s+PATH="\/root\/\.local\/bin/);
-    expect(dockerfile).not.toMatch(/ln\s+-sf\s+"?\$\(command\s+-v\s+kiro-cli/);
-
-    // A build-time exec check must prove the non-root `bridge` user can run
-    // kiro-cli, so a future regression fails the image build loudly.
-    expect(dockerfile).toMatch(/runuser\s+-u\s+bridge\s+--\s+kiro-cli\s+--version/);
-  });
-
-  // This guards a FOURTH failure class: the kiro-cli install invocation itself.
-  // The previous default `https://kiro.dev/install.sh` returned HTTP 404 and
-  // the script was piped to `sh` (dash) even though it has a `#!/bin/bash`
-  // shebang and uses bash-only features, and `unzip` (a dependency the script
-  // requires on Linux) was never installed -- so the install RUN failed with
-  // `curl: (22) ... 404` and `cp: cannot stat '/root/.local/bin/kiro-cli'`.
-  // These cheap content assertions pin the corrected invocation.
-  test("the Dockerfile installs kiro-cli from the official URL, piped to bash, with unzip available", () => {
-    const dockerfile = readFileSync(DOCKERFILE, "utf8");
-
-    // The official install URL is `https://cli.kiro.dev/install` (no `.sh`),
-    // never the 404ing `kiro.dev/install.sh`.
-    expect(dockerfile).toMatch(/KIRO_CLI_INSTALL_URL=https:\/\/cli\.kiro\.dev\/install\b/);
-    expect(dockerfile).not.toMatch(/kiro\.dev\/install\.sh/);
-
-    // The script has a bash shebang and bash-only features, so it must be piped
-    // to `bash`, not `sh`. (An optional `Q_INSTALL_GLOBAL=1` env assignment may
-    // precede `bash` so the install targets /usr/local/bin globally.)
-    expect(dockerfile).toMatch(
-      /curl\s+-fsSL\s+"?\$\{?KIRO_CLI_INSTALL_URL\}?"?\s*\|\s*(?:Q_INSTALL_GLOBAL=1\s+)?bash\s+-s\s+--/,
-    );
-    expect(dockerfile).not.toMatch(/\|\s*(?:\S+\s+)?sh\s+-s\s+--/);
-
-    // The script's Linux dependency `unzip` must be installed alongside curl.
-    expect(dockerfile).toMatch(/apt-get\s+install\b[^\n]*\bunzip\b/);
-
-    // The version pin is still passed as `--version` and a blank version still
-    // fails fast via the `test -n` guard.
-    expect(dockerfile).toMatch(/--version\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
-    expect(dockerfile).toMatch(/test\s+-n\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
-  });
-
-  // This guards a SIXTH failure class: kiro-cli needs a WRITABLE HOME/KIRO_HOME
-  // as the non-root uid 10001. ECS/Fargate may launch the ENTRYPOINT with HOME
-  // unset (or HOME=/, unwritable by uid 10001), and kiro-cli writing its
-  // config/state to a missing or unwritable HOME is a classic exit-1-on-startup
-  // (observed as `acp_child_exit code=1` with the circuit breaker tripping).
-  // The runtime stage must pin HOME to the created, bridge-owned home and point
-  // KIRO_HOME at a writable dir under it.
-  test("the Dockerfile pins a writable HOME/KIRO_HOME for the non-root bridge user", () => {
-    const dockerfile = readFileSync(DOCKERFILE, "utf8");
-
-    // HOME must be set to the user's created home (not left unset / HOME=/).
-    expect(dockerfile).toMatch(/\bENV\b[\s\S]*?\bHOME=\/home\/bridge\b/);
-    // KIRO_HOME (the Kiro CLI's state dir override) must live under that home.
-    expect(dockerfile).toMatch(/KIRO_HOME=\/home\/bridge\/\.kiro\b/);
-    // The home must be owned by the bridge user so uid 10001 can write it.
-    expect(dockerfile).toMatch(/chown\s+-R\s+bridge:bridge\b[^\n]*\/home\/bridge/);
-    // The user is still created with its home (useradd --create-home).
-    expect(dockerfile).toMatch(/useradd\s+--create-home\s+--uid\s+10001\s+bridge/);
-  });
-
-  // This guards a FIFTH concern: both FROM lines must NOT pin a per-stage
-  // `--platform`, since CDK's build-level `--platform linux/arm64` already sets
-  // the target platform (buildkit warns RedundantTargetPlatform otherwise).
-  test("the Dockerfile does not set a redundant per-FROM --platform", () => {
-    const dockerfile = readFileSync(DOCKERFILE, "utf8");
-
-    expect(dockerfile).not.toMatch(/FROM\s+--platform=/);
-    expect(dockerfile).not.toMatch(/TARGETPLATFORM/);
-  });
-});
+/** The bridge sources (packages/cdk/src -> packages/bridge/src). */
+const BRIDGE_SRC = join(here, "..", "..", "bridge", "src");
 
 /** The Lambda bridge Dockerfile (packages/cdk/src -> packages/bridge/Dockerfile.lambda). */
 const LAMBDA_DOCKERFILE = join(here, "..", "..", "bridge", "Dockerfile.lambda");
 
-// The Lambda image runs the engine directly (kiro-cli 3.x cannot start it under
-// Lambda's sandbox), so a `kiro` stage unpacks it at build time and the runtime
-// stage ships only /opt/kiro.
+/** Bundle one entry exactly as Dockerfile.lambda does, in memory. */
+async function bundle(entry: string): Promise<string> {
+  const result = await build({
+    entryPoints: [join(BRIDGE_SRC, entry)],
+    bundle: true,
+    platform: "node",
+    target: "node26",
+    format: "cjs",
+    resolveExtensions: [".ts", ".js", ".mjs", ".json"],
+    write: false,
+    logLevel: "silent",
+  });
+  return result.outputFiles.map((f) => f.text).join("\n");
+}
+
+describe("Lambda bridge bundles", () => {
+  test.each([
+    ["lambda-consumer.ts", "command_received"],
+    ["caps-publisher.ts", "caps_publisher_initialize_result"],
+  ])(
+    "bundling %s inlines the @nikovirtala/* workspace code (no bare import)",
+    async (entry, marker) => {
+      const code = await bundle(entry);
+
+      // The whole point: the workspace code is INLINED, so there is no bare
+      // `@nikovirtala/...` module left to resolve under node_modules at runtime.
+      expect(code).not.toMatch(/require\(["']@nikovirtala\//);
+      expect(code).not.toMatch(/\bfrom\s+["']@nikovirtala\//);
+
+      // Sanity: the bundle actually contains the entry's own runtime surface
+      // (it reached and inlined the application code, not just an empty shell).
+      expect(code).toContain(marker);
+    },
+  );
+});
+
 describe("Lambda bridge image", () => {
   const dockerfile = readFileSync(LAMBDA_DOCKERFILE, "utf8");
+
+  // The in-process build() above imports esbuild as a module, so it cannot
+  // catch a wrong esbuild *bin path* in the Dockerfile. esbuild is a
+  // devDependency of @nikovirtala/kiro-remote-cdk, so under pnpm's isolated
+  // layout its bin is linked ONLY into packages/cdk/node_modules/.bin -- NOT
+  // the workspace-root node_modules/.bin, which does not exist in the image.
+  test("invokes esbuild via packages/cdk/node_modules/.bin for both entries (never the root bin)", () => {
+    expect(dockerfile).toMatch(
+      /packages\/cdk\/node_modules\/\.bin\/esbuild\s+packages\/bridge\/src\/lambda-consumer\.ts/,
+    );
+    expect(dockerfile).toMatch(
+      /packages\/cdk\/node_modules\/\.bin\/esbuild\s+packages\/bridge\/src\/caps-publisher\.ts/,
+    );
+    expect(dockerfile).not.toMatch(/(?:RUN\s+|&&\s*)node_modules\/\.bin\/esbuild/);
+  });
+
+  // An older default `https://kiro.dev/install.sh` returned HTTP 404, the
+  // bash-only script was piped to `sh`, and `unzip` (which the script needs on
+  // Linux) was missing. These assertions pin the corrected invocation.
+  test("installs kiro-cli from the official URL, piped to bash, with unzip available", () => {
+    expect(dockerfile).toMatch(/KIRO_CLI_INSTALL_URL=https:\/\/cli\.kiro\.dev\/install\b/);
+    expect(dockerfile).not.toMatch(/kiro\.dev\/install\.sh/);
+
+    expect(dockerfile).toMatch(
+      /curl\s+-fsSL\s+"?\$\{?KIRO_CLI_INSTALL_URL\}?"?\s*\|\s*Q_INSTALL_GLOBAL=1\s+bash\s+-s\s+--\s+--version\s+"?\$\{?KIRO_CLI_VERSION\}?"?/,
+    );
+    expect(dockerfile).not.toMatch(/\|\s*(?:\S+\s+)?sh\s+-s\s+--/);
+
+    // The AWS Lambda base is Amazon Linux 2023: packages come from (micro)dnf.
+    expect(dockerfile).toMatch(/(?:micro)?dnf\s+install\b[^\n]*\bunzip\b/);
+  });
+
+  test("makes kiro-cli world-executable", () => {
+    expect(dockerfile).toMatch(/chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli/);
+  });
+
+  test("requires a KIRO_CLI_VERSION build arg", () => {
+    expect(dockerfile).toMatch(/test\s+-n\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
+  });
+
+  // On Lambda only /tmp is writable, and the engine writes its config and
+  // session state under HOME/KIRO_HOME.
+  test("points HOME and KIRO_HOME at writable paths under /tmp", () => {
+    expect(dockerfile).toMatch(/\bENV\b[\s\S]*?\bHOME=\/tmp\b/);
+    expect(dockerfile).toMatch(/KIRO_HOME=\/tmp\/\.kiro\b/);
+  });
 
   test("unpacks the engine with kiro-cli acp --agent-engine=v3", () => {
     expect(dockerfile).toMatch(/kiro-cli\s+acp\s+--agent-engine=v3/);
@@ -214,12 +133,12 @@ describe("Lambda bridge image", () => {
     expect(dockerfile).toContain("COPY --from=kiro /opt/kiro /opt/kiro");
   });
 
-  test("requires a KIRO_CLI_VERSION build arg", () => {
-    expect(dockerfile).toMatch(/test\s+-n\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
-  });
-
+  // kiro-cli 3.x ships one binary (`acp` and `chat` are subcommands). CDK's
+  // build-level `--platform linux/arm64` already sets the target platform, so a
+  // per-FROM `--platform` is redundant (buildkit warns RedundantTargetPlatform).
   test("references no kiro-cli-chat binary and no per-FROM --platform", () => {
     expect(dockerfile).not.toMatch(/kiro-cli-chat/);
     expect(dockerfile).not.toMatch(/FROM\s+--platform=/);
+    expect(dockerfile).not.toMatch(/TARGETPLATFORM/);
   });
 });

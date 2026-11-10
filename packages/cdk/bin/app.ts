@@ -13,11 +13,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { App } from "aws-cdk-lib";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
-import { ContainerImage } from "aws-cdk-lib/aws-ecs";
 import { DockerImageCode } from "aws-cdk-lib/aws-lambda";
 import { buildApiLambdaCode } from "../src/api-asset.ts";
 import { BRIDGE_IMAGE_EXCLUDES, selectAppAssets } from "../src/app-assets.ts";
-import type { BridgeMode } from "../src/construct.ts";
 import { KiroRemoteDnsStack } from "../src/dns-stack.ts";
 import { applyAwsSolutionsChecks } from "../src/nag.ts";
 import { KiroRemoteStack } from "../src/stack.ts";
@@ -25,9 +23,9 @@ import { KiroRemoteStack } from "../src/stack.ts";
 const app = new App();
 
 // The monorepo root, resolved relative to THIS file (packages/cdk/bin/app.ts).
-// The bridge Dockerfile's build context MUST be the repo root because it COPYs
-// package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json and the
-// whole packages/core + packages/bridge trees.
+// The bridge Dockerfile.lambda's build context MUST be the repo root because it
+// COPYs package.json, pnpm-lock.yaml, pnpm-workspace.yaml, tsconfig.base.json
+// and the workspace packages it installs and bundles.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 const account = process.env.CDK_DEFAULT_ACCOUNT;
@@ -75,57 +73,37 @@ const env = account && region ? { account, region } : undefined;
 const kiroApiKeySecretArn = app.node.tryGetContext("kiroApiKeySecretArn") as string;
 
 // Real production assets: `-c kiroCliVersion=<ver>` (required above) builds the
-// real bridge image(s) (Docker) AND bundles the real API Lambda code (esbuild).
+// real Lambda bridge image (Docker) AND bundles the real API Lambda code
+// (esbuild).
 //
 // `selectAppAssets` is a pure, unit-tested helper (src/app-assets.ts): it
-// validates the version (throwing clearly for a blank value, since the bridge
-// Dockerfile's KIRO_CLI_VERSION build arg has no default) and only then invokes
-// the asset factories.
-const { kiroCliVersion, bridgeImage, lambdaImage, apiLambdaCode } = selectAppAssets(
+// validates the version (throwing clearly for a blank value, since
+// Dockerfile.lambda's KIRO_CLI_VERSION build arg has no default) and only then
+// invokes the asset factories.
+const { kiroCliVersion, lambdaImage, apiLambdaCode } = selectAppAssets(
   { kiroCliVersion: app.node.tryGetContext("kiroCliVersion") as string | undefined },
   {
-    // Real ECS/Fargate bridge image from the Dockerfile with the repo root as
+    // Real Lambda bridge image from Dockerfile.lambda with the repo root as
     // build context (linux/arm64 for Graviton). Needs Docker: this runs at
     // synth time on the operator's machine, not in constrained CI/sandboxes.
-    buildBridgeImage: (version: string) =>
-      ContainerImage.fromAsset(repoRoot, {
-        file: "packages/bridge/Dockerfile",
-        platform: Platform.LINUX_ARM64,
-        buildArgs: { KIRO_CLI_VERSION: version },
-        // The build context is the repo root, which CONTAINS packages/cdk/cdk.out.
-        // Exclude it (and node_modules / .api-bundle / .git) so CDK does not
-        // recursively stage cdk.out into the asset -- that recursion overflows
-        // the path length (ENAMETOOLONG). See BRIDGE_IMAGE_EXCLUDES.
-        exclude: [...BRIDGE_IMAGE_EXCLUDES],
-      }),
-    // Real serverless (Lambda) bridge image from Dockerfile.lambda, same repo
-    // root build context + excludes + linux/arm64 as the ECS image. Needs
-    // Docker. Carries both the SQS consumer and caps-publisher handlers; the
-    // construct selects which via each function's image CMD.
+    // Carries both the SQS consumer and caps-publisher handlers; the construct
+    // selects which via each function's image CMD.
     buildLambdaImage: (version: string, cmd: string[]) =>
       DockerImageCode.fromImageAsset(repoRoot, {
         file: "packages/bridge/Dockerfile.lambda",
         platform: Platform.LINUX_ARM64,
         buildArgs: { KIRO_CLI_VERSION: version },
         cmd,
+        // The build context is the repo root, which CONTAINS packages/cdk/cdk.out.
+        // Exclude it (and node_modules / .api-bundle / .git) so CDK does not
+        // recursively stage cdk.out into the asset -- that recursion overflows
+        // the path length (ENAMETOOLONG). See BRIDGE_IMAGE_EXCLUDES.
         exclude: [...BRIDGE_IMAGE_EXCLUDES],
       }),
     // Real API Lambda asset (esbuild, in-process, no Docker).
     buildApiLambdaCode,
   },
 );
-
-// The bridge-mode selector: which host(s) drive the cloud path. `fargate`
-// (default) keeps today's stack exactly, `lambda` runs the serverless path
-// only, `both` provisions both. Passed via `-c bridgeMode=lambda|fargate|both`.
-// An unknown value is rejected loudly rather than silently defaulting.
-const bridgeModeCtx = app.node.tryGetContext("bridgeMode") as string | undefined;
-if (bridgeModeCtx !== undefined && !["fargate", "lambda", "both"].includes(bridgeModeCtx)) {
-  throw new Error(
-    `invalid bridgeMode context '${bridgeModeCtx}': expected one of 'fargate', 'lambda', 'both'`,
-  );
-}
-const bridgeMode = bridgeModeCtx as BridgeMode | undefined;
 
 // DNS stack (optional, deployed FIRST): a Route 53 PUBLIC hosted zone for the
 // delegated subdomain. Enabled by passing `-c dnsZoneName=<zone>`. Deploy it,
@@ -174,10 +152,8 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     publicBaseUrl,
     cognitoDomainPrefix,
     allowedRepos,
-    ...(bridgeMode ? { bridgeMode } : {}),
     kiroApiKeySecretArn,
     ...(kiroCliVersion ? { kiroCliVersion } : {}),
-    ...(bridgeImage ? { bridgeImage } : {}),
     ...(lambdaImage ? { lambdaImage } : {}),
     ...(apiLambdaCode ? { apiLambdaCode } : {}),
     ...(customDomain ? { customDomain } : {}),
