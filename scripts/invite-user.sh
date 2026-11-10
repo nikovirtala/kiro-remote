@@ -97,7 +97,9 @@ discard_user() {
   aws cognito-idp admin-delete-user --user-pool-id "$POOL_ID" --username "$EMAIL" || true
 }
 DISCARDED=0
+INPUT_FILE=""
 cleanup() {
+  [ -z "$INPUT_FILE" ] || rm -f "$INPUT_FILE"
   [ "$DISCARDED" = 1 ] || discard_user
 }
 trap cleanup EXIT
@@ -105,13 +107,21 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # 64 random bytes -> 88 base64 chars, plus a suffix to satisfy the pool's
-# default password policy. The value goes through stdin JSON, not argv, and is
-# never echoed.
+# default password policy. The value goes through a private (mode 600) temp
+# file passed as file://, not argv (so it is not visible in `ps`), and is never
+# echoed. A temp file is used because AWS CLI v2 cannot reliably read
+# file:///dev/stdin from a pipe. The file is removed on every exit path by the
+# EXIT trap (INT/TERM exit through it too). base64 characters and the validated
+# email need no JSON escaping.
+umask 077
+INPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/invite-user.XXXXXX")"
 RANDOM_PASSWORD="$(openssl rand -base64 64 | tr -d '\n=')Aa1!"
 printf '{"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}' \
-  "$POOL_ID" "$EMAIL" "$RANDOM_PASSWORD" \
-  | aws cognito-idp admin-set-user-password --cli-input-json file:///dev/stdin
+  "$POOL_ID" "$EMAIL" "$RANDOM_PASSWORD" >"$INPUT_FILE"
 unset RANDOM_PASSWORD
+aws cognito-idp admin-set-user-password --cli-input-json "file://$INPUT_FILE"
+rm -f "$INPUT_FILE"
+INPUT_FILE=""
 DISCARDED=1
 trap - EXIT INT TERM
 
