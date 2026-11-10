@@ -15,7 +15,13 @@ You deploy it once into your own AWS account. After that, you (and the MCP clien
 
 Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 
-Not production-hardened: the user pool is invite-only and users sign in with a passkey (MFA is off, since a passkey sign-in is already multi-factor), but the email-code factor used to bootstrap the first passkey stays usable afterwards and Cognito offers no way to enforce passkey-only sign-in. The API and OAuth callback Lambdas run on the Node 26 runtime, which AWS lists as public preview (the bridge Lambdas are container images). See [Registering a user](./docs/users.md), [SECURITY.md](./SECURITY.md) and [Toolchain](#toolchain).
+Not production-hardened:
+
+- The user pool is invite-only, and users sign in with a passkey.
+- MFA is off because a passkey sign-in is already multi-factor.
+- The email-code factor used to bootstrap the first passkey stays usable afterwards. Cognito cannot enforce passkey-only sign-in.
+
+The API and OAuth callback Lambdas run on the Node 26 runtime, which AWS lists as public preview (the bridge Lambdas are container images). See [Registering a user](./docs/users.md), [SECURITY.md](./SECURITY.md) and [Toolchain](#toolchain).
 
 ## Quick start
 
