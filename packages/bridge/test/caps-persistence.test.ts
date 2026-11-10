@@ -6,10 +6,10 @@
  * that it round-trips, and that no secret leaks into the item or the logs.
  */
 
-import { capabilities as deriveCapabilities } from "@nikovirtala/kiro-remote-core";
+import { capabilities as deriveCapabilities, kiroCliVersion } from "@nikovirtala/kiro-remote-core";
 import { afterEach, describe, expect, test } from "vitest";
 import { createLogger } from "../src/logger.ts";
-import { persistCaps } from "../src/persist-caps.ts";
+import { persistCaps, withAgentVersion } from "../src/persist-caps.ts";
 import { createHarness, type Harness, requireHarness } from "./harness.ts";
 import { initResult } from "./scenarios.ts";
 
@@ -126,6 +126,39 @@ describe("CONFIG#CAPS persistence", () => {
     expect(derived.executionTargets).toEqual(["cloud", "local"]);
     expect(derived.modes.map((m) => m.modeId)).toEqual(["vibe", "planner"]);
     expect(derived.cloudExecution).toBe(true);
+  });
+
+  test("persistCaps records the image's kiro-cli version when the engine reports no agentInfo", async () => {
+    const logger = createLogger({ sink: () => {}, level: "debug" });
+    // The direct KAS engine's initialize result has no agentInfo.
+    const engineInit = initResult({ extensionMethods: ["_kiro/openExternalUrl"] });
+    let persisted: { initializeResult: Record<string, unknown> } | null = null;
+    const repo = {
+      putCaps: async (item: { initializeResult: Record<string, unknown> }) => {
+        persisted = item;
+      },
+      putModels: async () => {},
+    };
+    const gateway = {
+      initializeResult: engineInit,
+      capabilities: () => deriveCapabilities(engineInit),
+    };
+
+    // biome-ignore lint/suspicious/noExplicitAny: focused unit with minimal fakes.
+    await persistCaps(repo as any, gateway as any, logger, { kiroCliVersion: " 3.1.0 " });
+
+    const stored = (persisted as { initializeResult: Record<string, unknown> } | null)
+      ?.initializeResult;
+    expect(kiroCliVersion(stored)).toBe("3.1.0");
+    // Adding agentInfo leaves the derived capabilities unchanged.
+    expect(deriveCapabilities(stored ?? {})).toEqual(deriveCapabilities(engineInit));
+  });
+
+  test("withAgentVersion keeps a version the agent reported itself", () => {
+    const reported = { agentInfo: { name: "Kiro CLI Agent", version: "2.37.1" } };
+    expect(withAgentVersion(reported, "3.1.0")).toBe(reported);
+    expect(withAgentVersion({}, undefined)).toEqual({});
+    expect(withAgentVersion({}, "  ")).toEqual({});
   });
 
   test("persistCaps swallows a putCaps failure and logs a warning", async () => {

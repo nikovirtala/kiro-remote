@@ -196,6 +196,14 @@ FROM public.ecr.aws/lambda/nodejs:26 AS runtime
 # needed at runtime.
 COPY --from=kiro /opt/kiro /opt/kiro
 
+# The kiro-cli version the engine was unpacked from. The engine's own
+# `initialize` result carries no `agentInfo` (kiro-cli added it when it relayed
+# ACP), so the caps publisher records this as `agentInfo.version` in
+# CONFIG#CAPS, which backs `kiroCliVersion` in GET /v1/capabilities and the MCP
+# `kiro_capabilities` tool.
+ARG KIRO_CLI_VERSION
+ENV KIRO_CLI_VERSION=${KIRO_CLI_VERSION}
+
 # The engine needs a WRITABLE HOME/KIRO_HOME for its config/sessions/agent
 # state. The Lambda execution environment only guarantees /tmp is writable, so
 # point HOME and KIRO_HOME under /tmp (the handlers never persist anything that

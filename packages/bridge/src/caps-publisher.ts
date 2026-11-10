@@ -21,7 +21,7 @@ import { Repository } from "@nikovirtala/kiro-remote-core";
 import { AcpGateway } from "./gateway.ts";
 import { kasSpawnSpec } from "./kas-engine.ts";
 import { createLogger, type Logger } from "./logger.ts";
-import { persistCaps } from "./persist-caps.ts";
+import { type PersistCapsOptions, persistCaps } from "./persist-caps.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
 import { defaultSpawn, type SpawnFn, StdioJsonRpcTransport } from "./transport.ts";
 
@@ -72,6 +72,7 @@ export async function publishCaps(
   repo: Repository,
   gateway: Pick<AcpGateway, "initialize" | "initializeResult" | "capabilities">,
   logger: Logger,
+  options: PersistCapsOptions = {},
 ): Promise<void> {
   // Register handlers (inside initialize) + negotiate to obtain the REAL
   // advertisement. This is the ONLY RPC the publisher makes.
@@ -79,8 +80,9 @@ export async function publishCaps(
   logger.info("caps_publisher_initialize_result", {
     initializeResult: gateway.initializeResult,
   });
-  // Persist CONFIG#CAPS via the SAME logic the ECS bridge uses at boot.
-  await persistCaps(repo, gateway as AcpGateway, logger);
+  // Persist CONFIG#CAPS via the SAME logic the ECS bridge uses at boot. The
+  // direct engine reports no agentInfo, so pass the image's kiro-cli version.
+  await persistCaps(repo, gateway as AcpGateway, logger, options);
 }
 
 /**
@@ -127,7 +129,9 @@ export async function runCapsPublish(deps: CapsPublisherDeps): Promise<void> {
 
   transport.start();
   try {
-    await publishCaps(repo, gateway, logger);
+    await publishCaps(repo, gateway, logger, {
+      ...(env.KIRO_CLI_VERSION ? { kiroCliVersion: env.KIRO_CLI_VERSION } : {}),
+    });
   } finally {
     // Always stop the short-lived engine so the invocation returns.
     await transport.stop("SIGTERM");

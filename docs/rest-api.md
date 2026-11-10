@@ -40,8 +40,11 @@ delete needs `sessions:delete`. A session is visible only to its creator's sub.
 
 `kiroCliVersion` comes from `agentInfo.version` in the ACP `initialize` result
 the bridge persists as `CONFIG#CAPS` (the same value backs the MCP
-`kiro_capabilities` tool). It is `null` — never a guessed value — until a bridge
-has initialized at least once, or if the agent did not report a version.
+`kiro_capabilities` tool). On the Lambda bridge, the engine's own `initialize`
+result has no `agentInfo`, so the caps publisher records the kiro-cli version
+the image was built from (its `KIRO_CLI_VERSION` build arg) instead. It is
+`null` — never a guessed value — until a bridge has initialized at least once,
+or if neither the agent nor the image reports a version.
 
 ### Request-body shapes
 
