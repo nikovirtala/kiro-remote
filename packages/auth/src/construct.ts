@@ -3,8 +3,10 @@
  * the OAuth facade.
  *
  * It provisions:
- *   - a Cognito user pool with self-sign-up OFF and passwordless, passkey-first
- *     (WebAuthn) sign-in using the newer managed-login experience. There is no
+ *   - a Cognito user pool that is admin invite-only (self-sign-up OFF) with
+ *     passkey (WebAuthn) sign-in using the newer managed-login experience.
+ *     Email one-time codes are enabled ONLY so an invited user can bootstrap
+ *     their first passkey; passwords are never issued (see below). There is no
  *     separately-required MFA step: a passkey login is already multi-factor
  *     (possession + required user verification), which Cognito treats as
  *     mutually exclusive with requiring MFA on top of a passkey first factor,
@@ -22,8 +24,9 @@
  * and client ids that stack needs.
  */
 
-import { Duration } from "aws-cdk-lib";
+import { Duration, Stack } from "aws-cdk-lib";
 import {
+  AccountRecovery,
   CfnManagedLoginBranding,
   FeaturePlan,
   type ManagedLoginVersion,
@@ -64,8 +67,10 @@ export interface KiroRemoteAuthProps {
   preRegisteredClients?: PreRegisteredClientProps[];
 
   /**
-   * Optional passkey relying-party id (the facade's fully-qualified domain)
-   * required when the pool is served from a custom domain.
+   * Optional passkey relying-party id override. Defaults to the managed-login
+   * domain host (<prefix>.auth.<region>.amazoncognito.com), which is what
+   * passkey registration needs when no custom domain is used. Set it to the
+   * fully-qualified custom domain when the pool is served from one.
    */
   passkeyRelyingPartyId?: string;
 }
@@ -100,27 +105,53 @@ export class KiroRemoteAuth extends Construct {
     this.mcpResourceIdentifier = `${base}/mcp`;
     const callbackUrl = `${base}/oauth/callback`;
 
+    // Passkeys are bound to the relying-party id. Build it from the prefix and
+    // region directly (not from the domain resource) to avoid a dependency
+    // cycle between the pool and its domain.
+    const relyingPartyId =
+      props.passkeyRelyingPartyId ??
+      `${props.cognitoDomainPrefix}.auth.${Stack.of(this).region}.amazoncognito.com`;
+
     this.userPool = new UserPool(this, "UserPool", {
+      // Invite-only: only administrators can create users (AllowAdminCreateUserOnly).
       selfSignUpEnabled: false,
       // Passkeys require the Essentials feature plan.
       featurePlan: FeaturePlan.ESSENTIALS,
-      // Option B: passwordless, passkey-first. No separately-required MFA step.
-      // Cognito rejects requiring MFA on top of a passkey first-auth factor
-      // ("Cannot set WebAuthn factor configuration to SINGLE_FACTOR if MFA is
-      // required and WebAuthn is an allowed first auth factor"), because a
-      // passkey login is already multi-factor. The security comes from the
-      // passkey itself (possession + required user verification below).
+      // MFA stays OFF. Cognito rejects requiring MFA on top of a passkey
+      // first-auth factor ("Cannot set WebAuthn factor configuration to
+      // SINGLE_FACTOR if MFA is required and WebAuthn is an allowed first auth
+      // factor"), because a passkey login is already multi-factor (possession
+      // + required user verification below).
       mfa: Mfa.OFF,
-      // Passkey (WebAuthn) is an allowed first-auth factor so sign-in can be
-      // passwordless and passkey-first. Cognito requires `password` to remain
-      // an allowed first factor as well (it must be true), so it stays enabled.
-      signInPolicy: { allowedFirstAuthFactors: { password: true, passkey: true } },
+      // Allowed first factors: passkey for every sign-in, email OTP only to let
+      // an invited user bootstrap the first passkey. Cognito requires
+      // `password` to remain true and offers no way to remove it, so it is
+      // neutralised instead: scripts/invite-user.sh sets a random, discarded
+      // permanent password right after admin-create-user, and account recovery
+      // is NONE so "forgot password" cannot be used to set a known one.
+      signInPolicy: {
+        allowedFirstAuthFactors: { password: true, passkey: true, emailOtp: true },
+      },
+      accountRecovery: AccountRecovery.NONE,
       // Require user verification (biometric/PIN) on the passkey. This is the
       // second factor inherent to the passkey and does not conflict with MFA.
       passkeyUserVerification: PasskeyUserVerification.REQUIRED,
-      ...(props.passkeyRelyingPartyId
-        ? { passkeyRelyingPartyId: props.passkeyRelyingPartyId }
-        : {}),
+      passkeyRelyingPartyId: relyingPartyId,
+      // The invitation tells the user to register a passkey. The temporary
+      // password placeholder is mandatory in the template but is invalidated by
+      // the invite script immediately after the user is created.
+      userInvitation: {
+        emailSubject: "You are invited to kiro-remote: set up your passkey",
+        emailBody: [
+          `<p>You have been invited to kiro-remote ({username}).</p>`,
+          `<p>There is no password to set. Sign in at ${base}/ (or connect your MCP client),`,
+          `choose the email code option, enter the code Cognito emails you,`,
+          `then register a passkey when prompted. From then on, sign in with the passkey.</p>`,
+          `<p>Ignore the legacy temporary password {####}: it is disabled and cannot be used.</p>`,
+        ].join(" "),
+        smsMessage:
+          "kiro-remote invite for {username}. Sign in with an email code, then add a passkey. {####} is disabled.",
+      },
       signInCaseSensitive: false,
     });
 

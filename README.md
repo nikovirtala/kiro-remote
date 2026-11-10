@@ -21,7 +21,7 @@ Operator and user guides live under [`docs/`](./docs/):
 - [Overview and what to do next](./docs/README.md)
 - [Deploying the control plane](./docs/deploy.md)
 - [Running the tests](./docs/testing.md)
-- [Registering a user](./docs/users.md)
+- [Inviting a user and passkey sign-in](./docs/users.md)
 - [Trying the REST API](./docs/rest-api.md)
 - [Using the MCP server](./docs/mcp.md)
 

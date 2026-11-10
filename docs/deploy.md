@@ -743,13 +743,13 @@ aws cloudformation describe-stacks --stack-name KiroRemoteStack \
   --query 'Stacks[0].Outputs'
 ```
 
-| Output logical id       | What it is                                                                       |
-| ----------------------- | -------------------------------------------------------------------------------- |
-| `UserPoolId`            | The Cognito user pool id (used to register users and inspect app clients).       |
-| `FacadeClientId`        | The public, no-secret facade app client id used by OAuth clients.                |
-| `ApiUrl`                | The HTTP API default endpoint (the facade base host when no custom domain).      |
-| `ManagedLoginDomainUrl` | The Cognito managed-login domain base URL (`https://<prefix>.auth.<region>...`). |
-| `McpResourceIdentifier` | The RFC 8707 MCP resource identifier (`<host>/mcp` audience).                    |
+| Output logical id       | What it is                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------- |
+| `UserPoolId`            | The Cognito user pool id (used by `scripts/invite-user.sh` and to inspect clients). |
+| `FacadeClientId`        | The public, no-secret facade app client id used by OAuth clients.                   |
+| `ApiUrl`                | The HTTP API default endpoint (the facade base host when no custom domain).         |
+| `ManagedLoginDomainUrl` | The Cognito managed-login domain base URL (`https://<prefix>.auth.<region>...`).    |
+| `McpResourceIdentifier` | The RFC 8707 MCP resource identifier (`<host>/mcp` audience).                       |
 
 When a `customDomain` is configured, two more outputs appear (used to create the
 Cloudflare service `CNAME` — see [Option B](#option-b--a-custom-domain-recommended)):
@@ -770,7 +770,8 @@ the separate `KiroRemoteDnsStack` publishes its own outputs (read them with
 | `HostedZoneName`  | The delegated zone name (the custom-domain host / zone apex).                                                               |
 
 The managed-login domain is `<cognitoDomainPrefix>.auth.<region>.amazoncognito.com`
-with the prefix you passed at deploy time.
+with the prefix you passed at deploy time. It is also the passkey relying-party
+id, so do not change the prefix or region after users register passkeys.
 
 > Managed Login v2 only renders the hosted login page when a branding style
 > exists for the app client; without one the page shows "Login pages
@@ -780,6 +781,6 @@ with the prefix you passed at deploy time.
 
 ## Next
 
-- [Register a user](./users.md)
+- [Invite a user](./users.md) (`./scripts/invite-user.sh <email>`; passkey-only sign-in)
 - [Try the REST API](./rest-api.md)
 - [Use the MCP server](./mcp.md)
