@@ -1,304 +1,770 @@
 /**
- * The ordered e2e steps.
+ * The live harness steps: MCP first (discovery, the MCP Inspector, the tool
+ * flow over the SDK client), then the same flow over REST.
  *
- * Each step is an async function that takes the {@link StepContext} and either
- * runs for real (recording captured artifacts) or records a precise
- * `blocked: <reason>` when a prerequisite is absent. A step NEVER fabricates a
- * transcript, a metric, a discovery chain, a tool list, or a connector result.
+ * Every step makes real requests through injected dependencies and throws on
+ * the first assertion that does not hold. Captured values are non-secret
+ * scalars only (ids, statuses, counts, durations); session objects, which
+ * carry the repo, are never captured.
  *
- * The CLI-driven steps (login, launch, poll, follow-up, steer, change model,
- * answer permission, cancel, adopt, delete) all require BOTH a deployed
- * https://<host> AND the `kiro-cli` binary (the control plane wraps kiro-cli).
- * The Inspector steps additionally require the MCP Inspector; the Streamable
- * HTTP + OAuth-from-discovery flow and the claude.ai connector require the
- * deployed /mcp endpoint. When a prerequisite is missing the step is blocked
- * with the exact reason surfaced by preflight.
- *
- * Live steps that COULD run (given a host + token) are implemented over the
- * real REST client (packages/mcp HttpClient) so the harness is a genuine driver
- * rather than a stub -- it is the absence of the deployed stack, not missing
- * code, that blocks them here.
+ * Not covered because the Lambda bridge path does not support them: cancel
+ * (rejected on a running cloud turn), set_config (a logged no-op), permissions
+ * (cloud turns never ask), adopt (rejected), and steer/queue mid-turn
+ * (rejected). See docs/testing.md.
  */
-
-import type { PreflightResult } from "./preflight.ts";
+import type { KiroRemoteClient } from "@nikovirtala/kiro-remote-api";
+import type { Principal } from "@nikovirtala/kiro-remote-core";
+import { HttpClientError, TOOL_NAMES, type TokenProvider } from "@nikovirtala/kiro-remote-mcp";
+import type { ObtainedToken } from "./auth.ts";
+import type { McpSession } from "./mcp-client.ts";
 import type { Report } from "./report.ts";
+import type { Step } from "./runner.ts";
+import { type EventLike, type EventPage, waitForTurn } from "./settle.ts";
 
-/** Everything a step needs. Secrets are reachable only via accessors. */
-export interface StepContext {
-  report: Report;
-  preflight: PreflightResult;
-  /** The deployed base URL, or null. */
-  baseUrl: string | null;
-  /** The target repo accessor (in-memory only; never logged). */
-  repo(): string | null;
-  /** The API key accessor (in-memory only; never logged). */
-  apiKey(): string | null;
+/** Everything the steps reach the outside world through (faked in unit tests). */
+export interface HarnessDeps {
+  fetch: typeof fetch;
+  /** Run the MCP Inspector `tools/list` (with its own browser sign-in); return the tool names. */
+  inspector(baseUrl: string): Promise<string[]>;
+  obtainToken(baseUrl: string): Promise<ObtainedToken>;
+  connectMcp(baseUrl: string, tokens: TokenProvider): Promise<McpSession>;
+  rest(baseUrl: string, tokens: TokenProvider): KiroRemoteClient;
+  /** Milliseconds. */
+  now(): number;
+  sleep(ms: number): Promise<void>;
+  /** 8 uppercase hex characters, unique per run; goes into the prompt markers and titles. */
+  runId: string;
+  /** Write a progress line to stderr (the caller scrubs it). */
+  progress(line: string): void;
+  turnTimeoutMs: number;
+  deleteTimeoutMs: number;
+  deletePollMs: number;
 }
 
-/** A named step with a stable id, run in order. */
-export interface Step {
+export interface SessionCursor {
   id: string;
-  name: string;
-  run(ctx: StepContext): Promise<void>;
+  cursor: number;
+}
+
+/** Mutable state the steps hand to each other. */
+export interface HarnessState {
+  tokens?: TokenProvider;
+  mcp?: McpSession;
+  rest?: KiroRemoteClient;
+  mcpSession?: SessionCursor;
+  restSession?: SessionCursor;
+  /** Session ids created and not yet confirmed deleted. */
+  created: Set<string>;
+}
+
+export interface HarnessContext {
+  baseUrl: string | null;
+  repo(): string | null;
+  deps: HarnessDeps;
+  state: HarnessState;
+  signal?: AbortSignal;
+}
+
+export const TURN_TIMEOUT_MS = 20 * 60_000;
+export const DELETE_TIMEOUT_MS = 5 * 60_000;
+export const DELETE_POLL_MS = 5_000;
+/** The REST long-poll wait, in seconds (the API maximum). */
+const REST_WAIT_SECONDS = 20;
+/** HttpClient ignores the principal argument; the bearer identifies the caller. */
+const REST_PRINCIPAL: Principal = { sub: "e2e", clientId: "e2e", scopes: [] };
+
+/* -------------------------------------------------------------------------- */
+/* Prompts                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export type MarkerKind = "MCP_LAUNCH" | "MCP_FOLLOWUP" | "REST_LAUNCH" | "REST_FOLLOWUP";
+
+export function markerFor(runId: string, kind: MarkerKind): string {
+  return `KIRO_E2E_${runId}_${kind}`;
+}
+
+export function promptFor(marker: string): string {
+  return `This is an automated kiro-remote end-to-end check. Do not change any files, do not open a pull request, and do not run any commands. Reply with exactly this line and nothing else: ${marker}`;
+}
+
+export function titleFor(runId: string, via: "mcp" | "rest"): string {
+  return `kiro-remote e2e ${runId} (${via})`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Field readers: throw on a missing or mistyped field                        */
+/* -------------------------------------------------------------------------- */
+
+type Obj = Record<string, unknown>;
+
+function isObj(v: unknown): v is Obj {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function str(o: Obj, key: string, what: string): string {
+  const v = o[key];
+  if (typeof v !== "string" || v.length === 0) {
+    throw new Error(`${what}: ${key} is not a non-empty string`);
+  }
+  return v;
+}
+
+function num(o: Obj, key: string, what: string): number {
+  const v = o[key];
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new Error(`${what}: ${key} is not a number`);
+  }
+  return v;
+}
+
+function obj(o: Obj, key: string, what: string): Obj {
+  const v = o[key];
+  if (!isObj(v)) {
+    throw new Error(`${what}: ${key} is not an object`);
+  }
+  return v;
+}
+
+function list(o: Obj, key: string, what: string): unknown[] {
+  const v = o[key];
+  if (!Array.isArray(v)) {
+    throw new Error(`${what}: ${key} is not an array`);
+  }
+  return v;
+}
+
+function statusOrNull(o: Obj, key: string, what: string): string | null {
+  const v = o[key];
+  if (v !== null && typeof v !== "string") {
+    throw new Error(`${what}: ${key} is neither a string nor null`);
+  }
+  return v;
+}
+
+function events(raw: unknown[], what: string): EventLike[] {
+  return raw.map((e) => {
+    if (!isObj(e) || typeof e.seq !== "number" || typeof e.type !== "string") {
+      throw new Error(`${what}: an event has no numeric seq or string type`);
+    }
+    const turnId = typeof e.turnId === "string" ? e.turnId : null;
+    return { seq: e.seq, type: e.type, turnId, payload: e.payload };
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Shared helpers                                                             */
+/* -------------------------------------------------------------------------- */
+
+function baseOf(ctx: HarnessContext): string {
+  if (!ctx.baseUrl) {
+    throw new Error("KIRO_REMOTE_URL is unset");
+  }
+  return ctx.baseUrl;
+}
+
+function repoOf(ctx: HarnessContext): string {
+  const repo = ctx.repo();
+  if (!repo) {
+    throw new Error("KIRO_API_E2E_REPO is unset");
+  }
+  return repo;
+}
+
+function tokensOf(ctx: HarnessContext): TokenProvider {
+  if (!ctx.state.tokens) {
+    throw new Error("no login token");
+  }
+  return ctx.state.tokens;
+}
+
+function mcpOf(ctx: HarnessContext): McpSession {
+  if (!ctx.state.mcp) {
+    throw new Error("no MCP connection");
+  }
+  return ctx.state.mcp;
+}
+
+function restOf(ctx: HarnessContext): KiroRemoteClient {
+  ctx.state.rest ??= ctx.deps.rest(baseOf(ctx), tokensOf(ctx));
+  return ctx.state.rest;
+}
+
+function sessionOf(s: SessionCursor | undefined): SessionCursor {
+  if (!s) {
+    throw new Error("no session from the launch step");
+  }
+  return s;
+}
+
+/** Assert the names are exactly the 14 registered tools. */
+export function assertToolSet(names: string[], what: string): void {
+  const expected = new Set<string>(TOOL_NAMES);
+  const got = new Set(names);
+  const missing = [...expected].filter((n) => !got.has(n));
+  const extra = [...got].filter((n) => !expected.has(n));
+  if (missing.length > 0 || extra.length > 0 || names.length !== expected.size) {
+    throw new Error(
+      `${what}: expected the ${expected.size} registered tools, got ${names.length}` +
+        (missing.length > 0 ? `; missing ${missing.join(", ")}` : "") +
+        (extra.length > 0 ? `; unexpected ${extra.join(", ")}` : ""),
+    );
+  }
+}
+
+/** Call a tool and return its structured result; a tool error throws. */
+async function callOk(mcp: McpSession, name: string, args: Obj): Promise<Obj> {
+  const res = await mcp.callTool(name, args);
+  if (res.isError) {
+    throw new Error(`${name} returned an error: ${res.text}`);
+  }
+  if (!res.structured) {
+    throw new Error(`${name} returned no structured content`);
+  }
+  return res.structured;
+}
+
+function checkCapabilities(caps: Obj, what: string): number {
+  obj(caps, "capabilities", what);
+  return num(caps, "activeSessionCount", what);
+}
+
+function abortableSleep(ctx: HarnessContext, ms: number): Promise<void> {
+  if (ctx.signal?.aborted) {
+    return Promise.reject(new Error("aborted"));
+  }
+  return ctx.deps.sleep(ms);
 }
 
 /**
- * Guard used by every CLI-driven live step: both a deployed host and the
- * kiro-cli binary are required. Returns the blocking reason, or null when the
- * step may proceed.
+ * Poll `isGone` every deletePollMs until it returns true or the delete timeout
+ * passes. `isGone` returns a string describing the current state otherwise.
  */
-function cliLiveBlocker(ctx: StepContext): string | null {
-  if (!ctx.preflight.host.ok) {
-    return ctx.preflight.host.reason ?? "no deployed host";
-  }
-  if (!ctx.preflight.kiroCli.ok) {
-    return ctx.preflight.kiroCli.reason ?? "kiro-cli not installed";
-  }
-  return null;
-}
-
-/** Guard for the MCP Inspector stdio step. */
-function inspectorStdioBlocker(ctx: StepContext): string | null {
-  // The stdio Inspector runs `kiro-remote mcp`, which calls the REST API with
-  // the user's token -- so it still needs a deployed host + a prior login, plus
-  // the Inspector binary.
-  const cli = cliLiveBlocker(ctx);
-  if (cli) {
-    return cli;
-  }
-  if (!ctx.preflight.inspector.ok) {
-    return ctx.preflight.inspector.reason ?? "MCP Inspector not available";
-  }
-  return null;
-}
-
-/** Guard for the MCP Inspector Streamable HTTP + OAuth step. */
-function inspectorHttpBlocker(ctx: StepContext): string | null {
-  if (!ctx.preflight.host.ok) {
-    return `${ctx.preflight.host.reason ?? "no deployed host"} The Streamable HTTP + OAuth-from-discovery flow needs the live https://<host>/mcp endpoint and the facade's /.well-known discovery documents, which only exist on a deployed stack.`;
-  }
-  if (!ctx.preflight.inspector.ok) {
-    return ctx.preflight.inspector.reason ?? "MCP Inspector not available";
-  }
-  return null;
-}
-
-/* -------------------------------------------------------------------------- */
-/* The ordered steps                                                          */
-/* -------------------------------------------------------------------------- */
-
-export const STEPS: readonly Step[] = [
-  {
-    id: "login",
-    name: "kiro-remote login (OAuth authorization-code + PKCE against the facade)",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "login",
-          this.name,
-          `Attempted: run \`kiro-remote login\` with KIRO_REMOTE_URL=<host>. ${blocker} Additionally, login opens a browser for the Cognito managed-login UI and a loopback redirect, neither of which is available in this headless sandbox.`,
-        );
-        return;
-      }
-      // (Live path, if a host + browser existed.) Not reachable in-sandbox.
-      ctx.report.ran("login", this.name, { note: "login completed" });
-    },
-  },
-  {
-    id: "launch",
-    name: "launch a session on E2E_REPO",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "launch",
-          this.name,
-          `Attempted: POST /v1/sessions { repos: [<E2E_REPO>], prompt: <bootstrap prompt> } with a bearer token from the login step. ${blocker} The repo target is read from KIRO_API_E2E_REPO (present: ${ctx.repo() !== null}) and is never logged. Capture targets if run: time to first event, launch path (acp|headless) and why.`,
-        );
-        return;
-      }
-      ctx.report.ran("launch", this.name);
-    },
-  },
-  {
-    id: "poll",
-    name: "poll events to completion",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "poll",
-          this.name,
-          `Attempted: long-poll GET /v1/sessions/{id}/events?after=&wait=25 until the turn settles. ${blocker} Capture targets if run: time to first event, turn duration, raw-event count, DynamoDB writes per turn before vs after coalescing.`,
-        );
-        return;
-      }
-      ctx.report.ran("poll", this.name);
-    },
-  },
-  {
-    id: "followup",
-    name: "send a follow-up",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "followup",
-          this.name,
-          `Attempted: POST /v1/sessions/{id}/turns { prompt, whenBusy:'queue' } after the first turn settled. ${blocker}`,
-        );
-        return;
-      }
-      ctx.report.ran("followup", this.name);
-    },
-  },
-  {
-    id: "steer",
-    name: "steer mid-turn",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "steer",
-          this.name,
-          `Attempted: POST /v1/sessions/{id}/turns { prompt, whenBusy:'steer' } DURING an active turn (bridge sends _session/steer). ${blocker}`,
-        );
-        return;
-      }
-      ctx.report.ran("steer", this.name);
-    },
-  },
-  {
-    id: "change-model",
-    name: "change model",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "change-model",
-          this.name,
-          `Attempted: PATCH /v1/sessions/{id}/config { model: <one of GET /v1/models> } (bridge sends session/set_config_option configId=model). ${blocker} Only values the agent advertises are accepted.`,
-        );
-        return;
-      }
-      ctx.report.ran("change-model", this.name);
-    },
-  },
-  {
-    id: "answer-permission",
-    name: "answer a permission if one appears",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "answer-permission",
-          this.name,
-          `Attempted: poll GET /v1/sessions/{id}/permissions?status=pending; if a request appears, POST /v1/sessions/{id}/permissions/{requestId} { optionId: <one of the agent-supplied options verbatim> }. ${blocker} The harness never synthesizes an option; it returns only an agent-offered optionId.`,
-        );
-        return;
-      }
-      ctx.report.ran("answer-permission", this.name);
-    },
-  },
-  {
-    id: "cancel",
-    name: "cancel a turn",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "cancel",
-          this.name,
-          `Attempted: start a turn, then POST /v1/sessions/{id}/cancel (bridge sends session/cancel and waits for the prompt response before marking the turn cancelled). ${blocker}`,
-        );
-        return;
-      }
-      ctx.report.ran("cancel", this.name);
-    },
-  },
-  {
-    id: "adopt",
-    name: "adopt a session started in Kiro Web",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "adopt",
-          this.name,
-          `Attempted: POST /v1/sessions/adopt { kiroSessionId: <a session started in Kiro Web> }. ${blocker} This also requires a session created in the Kiro Web UI under the same account, which cannot be created without a live Kiro session.`,
-        );
-        return;
-      }
-      ctx.report.ran("adopt", this.name);
-    },
-  },
-  {
-    id: "delete",
-    name: "delete the session",
-    async run(ctx) {
-      const blocker = cliLiveBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "delete",
-          this.name,
-          `Attempted: DELETE /v1/sessions/{id} (bridge runs \`kiro-cli chat --delete-session <id>\` then marks the session deleted). ${blocker}`,
-        );
-        return;
-      }
-      ctx.report.ran("delete", this.name);
-    },
-  },
-  {
-    id: "inspector-stdio",
-    name: "same flow through MCP Inspector over stdio",
-    async run(ctx) {
-      const blocker = inspectorStdioBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "inspector-stdio",
-          this.name,
-          `Attempted: launch MCP Inspector against \`kiro-remote mcp\` (stdio), list tools, and drive the same launch->poll->follow-up->steer->config->permission->cancel->adopt->delete flow through the 14 MCP tools. ${blocker} (The static tool list a live Inspector would show is included as a DERIVED artifact from the MCP tool registry.)`,
-        );
-        return;
-      }
-      ctx.report.ran("inspector-stdio", this.name);
-    },
-  },
-  {
-    id: "inspector-http",
-    name: "MCP Inspector over Streamable HTTP, completing OAuth from discovery",
-    async run(ctx) {
-      const blocker = inspectorHttpBlocker(ctx);
-      if (blocker) {
-        ctx.report.blocked(
-          "inspector-http",
-          this.name,
-          `Attempted: point MCP Inspector at https://<host>/mcp (Streamable HTTP) and complete the OAuth flow from discovery: 401 -> RFC 9728 protected-resource metadata -> RFC 8414 AS metadata -> /oauth/authorize -> /oauth/token. ${blocker} Capture targets if run: the discovery chain with REDACTED tokens, and the audience binding used (the binding RULE is included as a DERIVED artifact).`,
-        );
-        return;
-      }
-      ctx.report.ran("inspector-http", this.name);
-    },
-  },
-  {
-    id: "claude-connector",
-    name: "claude.ai custom-connector sign-in",
-    async run(ctx) {
-      // The connector step is manual (claude.ai UI) and needs the live /mcp host.
-      if (!ctx.preflight.host.ok) {
-        ctx.report.blocked(
-          "claude-connector",
-          this.name,
-          `Attempted: add https://<host>/mcp as a claude.ai custom connector and complete sign-in. ${ctx.preflight.host.reason ?? "no deployed host"} This is a manual step in the claude.ai web UI against a live, publicly reachable /mcp endpoint; there is no such endpoint in this sandbox and no browser.`,
-        );
-        return;
-      }
-      ctx.report.blocked(
-        "claude-connector",
-        this.name,
-        "Attempted: add https://<host>/mcp as a claude.ai custom connector. This step is inherently manual (claude.ai web UI) and cannot be automated from the harness; it must be performed by a human against the deployed host and the result recorded by hand.",
+async function waitUntilGone(
+  ctx: HarnessContext,
+  id: string,
+  isGone: () => Promise<true | string>,
+  opts: { honorAbort: boolean },
+): Promise<number> {
+  const start = ctx.deps.now();
+  let last = "";
+  for (;;) {
+    const res = await isGone();
+    if (res === true) {
+      return ctx.deps.now() - start;
+    }
+    last = res;
+    if (ctx.deps.now() - start >= ctx.deps.deleteTimeoutMs) {
+      throw new Error(
+        `session ${id} still readable ${Math.round(ctx.deps.deleteTimeoutMs / 1000)} s after delete (last: ${last})`,
       );
-    },
+    }
+    if (opts.honorAbort) {
+      await abortableSleep(ctx, ctx.deps.deletePollMs);
+    } else {
+      await ctx.deps.sleep(ctx.deps.deletePollMs);
+    }
+  }
+}
+
+async function restGone(client: KiroRemoteClient, id: string): Promise<true | string> {
+  try {
+    const s = await client.getSession(REST_PRINCIPAL, id);
+    return `status ${s.status}`;
+  } catch (err) {
+    if (err instanceof HttpClientError && err.status === 404) {
+      return true;
+    }
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+function mcpPage(r: Obj): EventPage {
+  const what = "kiro_wait_for_events";
+  return {
+    events: events(list(r, "events", what), what),
+    nextCursor: num(r, "nextCursor", what),
+    turnStatus: statusOrNull(r, "turnStatus", what),
+    truncated: r.eventsTruncated === true,
+  };
+}
+
+async function mcpTranscriptTurns(mcp: McpSession, sessionId: string): Promise<Obj[]> {
+  const t = await callOk(mcp, "kiro_get_transcript", { sessionId });
+  return list(t, "turns", "kiro_get_transcript").filter(isObj);
+}
+
+function turnCaptured(r: Awaited<ReturnType<typeof waitForTurn>>): Obj {
+  return {
+    eventCount: r.eventCount,
+    polls: r.polls,
+    firstEventMs: r.firstEventMs,
+    turnMs: r.durationMs,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Steps                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const INITIALIZE_BODY = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "kiro-remote-e2e", version: "0.0.0" },
   },
+});
+
+async function getJson(ctx: HarnessContext, url: string, what: string): Promise<Obj> {
+  const res = await ctx.deps.fetch(url, { headers: { accept: "application/json" } });
+  if (res.status !== 200) {
+    throw new Error(`${what} returned HTTP ${res.status}`);
+  }
+  const body: unknown = await res.json().catch(() => null);
+  if (!isObj(body)) {
+    throw new Error(`${what} is not a JSON object`);
+  }
+  return body;
+}
+
+const discovery: Step<HarnessContext> = {
+  id: "discovery",
+  name: "MCP discovery: 401 challenge, protected-resource and authorization-server metadata",
+  requires: ["baseUrl"],
+  needs: [],
+  async run(ctx) {
+    const base = baseOf(ctx);
+    const res = await ctx.deps.fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: INITIALIZE_BODY,
+    });
+    if (res.status !== 401) {
+      throw new Error(`unauthenticated POST /mcp returned HTTP ${res.status}, expected 401`);
+    }
+    const challenge = res.headers.get("www-authenticate") ?? "";
+    const match = /resource_metadata="([^"]+)"/.exec(challenge);
+    if (!match) {
+      throw new Error("the 401 has no WWW-Authenticate resource_metadata parameter");
+    }
+    const prm = await getJson(ctx, match[1], "protected-resource metadata");
+    if (prm.resource !== `${base}/mcp`) {
+      throw new Error("protected-resource metadata: resource is not <KIRO_REMOTE_URL>/mcp");
+    }
+    const servers = list(prm, "authorization_servers", "protected-resource metadata");
+    if (servers[0] !== base) {
+      throw new Error(
+        "protected-resource metadata: authorization_servers[0] is not <KIRO_REMOTE_URL>",
+      );
+    }
+    const as = await getJson(
+      ctx,
+      `${base}/.well-known/oauth-authorization-server`,
+      "authorization-server metadata",
+    );
+    if (as.issuer !== base) {
+      throw new Error("authorization-server metadata: issuer is not <KIRO_REMOTE_URL>");
+    }
+    const methods = list(as, "code_challenge_methods_supported", "authorization-server metadata");
+    if (!methods.includes("S256")) {
+      throw new Error("authorization-server metadata: S256 PKCE is not supported");
+    }
+    for (const key of ["authorization_endpoint", "token_endpoint", "registration_endpoint"]) {
+      str(as, key, "authorization-server metadata");
+    }
+    return {
+      challengeStatus: res.status,
+      scopesSupported: Array.isArray(prm.scopes_supported) ? prm.scopes_supported.length : 0,
+    };
+  },
+};
+
+const mcpInspector: Step<HarnessContext> = {
+  id: "mcp-inspector",
+  name: "MCP Inspector CLI: OAuth sign-in (browser) and tools/list",
+  requires: ["baseUrl"],
+  needs: ["discovery"],
+  async run(ctx) {
+    const names = await ctx.deps.inspector(baseOf(ctx));
+    assertToolSet(names, "Inspector tools/list");
+    return { toolCount: names.length };
+  },
+};
+
+const login: Step<HarnessContext> = {
+  id: "login",
+  name: "kiro-remote login token (keychain, or browser sign-in)",
+  requires: ["baseUrl"],
+  needs: [],
+  async run(ctx) {
+    const got = await ctx.deps.obtainToken(baseOf(ctx));
+    ctx.state.tokens = got.tokens;
+    return { source: got.source, scopeCount: got.scopes.length };
+  },
+};
+
+const mcpTools: Step<HarnessContext> = {
+  id: "mcp-tools",
+  name: "MCP SDK client: tools/list, kiro_capabilities, kiro_list_models",
+  requires: ["baseUrl"],
+  needs: ["login"],
+  async run(ctx) {
+    ctx.state.mcp = await ctx.deps.connectMcp(baseOf(ctx), tokensOf(ctx));
+    const mcp = ctx.state.mcp;
+    const names = await mcp.listToolNames();
+    assertToolSet(names, "tools/list");
+    const caps = await callOk(mcp, "kiro_capabilities", {});
+    const activeSessionCount = checkCapabilities(caps, "kiro_capabilities");
+    const models = await callOk(mcp, "kiro_list_models", {});
+    const modelCount = list(models, "models", "kiro_list_models").length;
+    return { toolCount: names.length, activeSessionCount, modelCount };
+  },
+};
+
+const mcpLaunch: Step<HarnessContext> = {
+  id: "mcp-launch",
+  name: "MCP kiro_launch_session, kiro_get_session, kiro_list_sessions",
+  requires: ["baseUrl", "repo"],
+  needs: ["mcp-tools"],
+  async run(ctx) {
+    const mcp = mcpOf(ctx);
+    const marker = markerFor(ctx.deps.runId, "MCP_LAUNCH");
+    const launched = await callOk(mcp, "kiro_launch_session", {
+      prompt: promptFor(marker),
+      repos: [repoOf(ctx)],
+      title: titleFor(ctx.deps.runId, "mcp"),
+    });
+    const sessionId = str(launched, "sessionId", "kiro_launch_session");
+    ctx.state.created.add(sessionId);
+    ctx.state.mcpSession = { id: sessionId, cursor: 0 };
+    const got = await callOk(mcp, "kiro_get_session", { sessionId });
+    const session = obj(got, "session", "kiro_get_session");
+    if (session.id !== sessionId) {
+      throw new Error("kiro_get_session returned a different session id");
+    }
+    const listed = await callOk(mcp, "kiro_list_sessions", { limit: 20 });
+    const ids = list(listed, "sessions", "kiro_list_sessions").map((s) => (isObj(s) ? s.id : null));
+    if (!ids.includes(sessionId)) {
+      throw new Error("kiro_list_sessions (limit 20) does not contain the new session");
+    }
+    return {
+      sessionId,
+      turnId: typeof launched.turnId === "string" ? launched.turnId : null,
+      sessionStatus: typeof session.status === "string" ? session.status : null,
+    };
+  },
+};
+
+const mcpLaunchTurn: Step<HarnessContext> = {
+  id: "mcp-launch-turn",
+  name: "MCP kiro_wait_for_events until the launch turn settles, then kiro_get_transcript",
+  requires: ["baseUrl", "repo"],
+  needs: ["mcp-launch"],
+  async run(ctx) {
+    const mcp = mcpOf(ctx);
+    const s = sessionOf(ctx.state.mcpSession);
+    const res = await waitForTurn({
+      after: s.cursor,
+      read: async (after) =>
+        mcpPage(await callOk(mcp, "kiro_wait_for_events", { sessionId: s.id, after })),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = res.cursor;
+    const marker = markerFor(ctx.deps.runId, "MCP_LAUNCH");
+    const turns = await mcpTranscriptTurns(mcp, s.id);
+    if (!turns.some((t) => typeof t.text === "string" && t.text.includes(marker))) {
+      throw new Error("kiro_get_transcript has no turn containing the launch marker");
+    }
+    return { ...turnCaptured(res), transcriptTurns: turns.length };
+  },
+};
+
+const mcpFollowup: Step<HarnessContext> = {
+  id: "mcp-followup",
+  name: "MCP kiro_send_prompt (whenBusy reject), wait until it settles, kiro_get_transcript",
+  requires: ["baseUrl", "repo"],
+  needs: ["mcp-launch-turn"],
+  async run(ctx) {
+    const mcp = mcpOf(ctx);
+    const s = sessionOf(ctx.state.mcpSession);
+    const marker = markerFor(ctx.deps.runId, "MCP_FOLLOWUP");
+    const sent = await callOk(mcp, "kiro_send_prompt", {
+      sessionId: s.id,
+      prompt: promptFor(marker),
+      whenBusy: "reject",
+    });
+    const turnId = str(obj(sent, "turn", "kiro_send_prompt"), "id", "kiro_send_prompt turn");
+    const res = await waitForTurn({
+      after: s.cursor,
+      turnId,
+      read: async (after) =>
+        mcpPage(await callOk(mcp, "kiro_wait_for_events", { sessionId: s.id, after })),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = res.cursor;
+    const turns = await mcpTranscriptTurns(mcp, s.id);
+    const turn = turns.find((t) => t.turnId === turnId);
+    if (!turn || typeof turn.text !== "string" || !turn.text.includes(marker)) {
+      throw new Error("kiro_get_transcript: the follow-up turn does not contain its marker");
+    }
+    return { turnId, ...turnCaptured(res) };
+  },
+};
+
+const mcpDelete: Step<HarnessContext> = {
+  id: "mcp-delete",
+  name: "MCP kiro_delete_session, then kiro_get_session until not found",
+  requires: ["baseUrl", "repo"],
+  needs: ["mcp-launch"],
+  async run(ctx) {
+    const mcp = mcpOf(ctx);
+    const s = sessionOf(ctx.state.mcpSession);
+    const del = await callOk(mcp, "kiro_delete_session", { sessionId: s.id });
+    if (del.status !== "deleting") {
+      throw new Error("kiro_delete_session: status is not deleting");
+    }
+    const goneMs = await waitUntilGone(
+      ctx,
+      s.id,
+      async () => {
+        const res = await mcp.callTool("kiro_get_session", { sessionId: s.id });
+        if (res.isError && /not found/i.test(res.text)) {
+          return true;
+        }
+        if (res.isError) {
+          return res.text;
+        }
+        const session = res.structured?.session;
+        return `status ${isObj(session) ? String(session.status) : "unknown"}`;
+      },
+      { honorAbort: true },
+    );
+    ctx.state.created.delete(s.id);
+    return { sessionId: s.id, goneMs };
+  },
+};
+
+const restRead: Step<HarnessContext> = {
+  id: "rest-read",
+  name: "REST GET /v1/capabilities and /v1/models",
+  requires: ["baseUrl"],
+  needs: ["login"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const caps = (await client.capabilities(REST_PRINCIPAL)) as unknown;
+    if (!isObj(caps)) {
+      throw new Error("GET /v1/capabilities is not an object");
+    }
+    const activeSessionCount = checkCapabilities(caps, "GET /v1/capabilities");
+    const models = (await client.listModels(REST_PRINCIPAL)) as unknown;
+    if (!isObj(models)) {
+      throw new Error("GET /v1/models is not an object");
+    }
+    const modelCount = list(models, "models", "GET /v1/models").length;
+    return { activeSessionCount, modelCount };
+  },
+};
+
+const restLaunch: Step<HarnessContext> = {
+  id: "rest-launch",
+  name: "REST POST /v1/sessions, GET /v1/sessions/{id}",
+  requires: ["baseUrl", "repo"],
+  needs: ["login"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const marker = markerFor(ctx.deps.runId, "REST_LAUNCH");
+    const launched = (await client.launchSession(REST_PRINCIPAL, {
+      prompt: promptFor(marker),
+      repos: [repoOf(ctx)],
+      title: titleFor(ctx.deps.runId, "rest"),
+    })) as unknown;
+    if (!isObj(launched)) {
+      throw new Error("POST /v1/sessions is not an object");
+    }
+    const sessionId = str(launched, "sessionId", "POST /v1/sessions");
+    ctx.state.created.add(sessionId);
+    ctx.state.restSession = { id: sessionId, cursor: 0 };
+    const session = await client.getSession(REST_PRINCIPAL, sessionId);
+    if (session.id !== sessionId) {
+      throw new Error("GET /v1/sessions/{id} returned a different session id");
+    }
+    return {
+      sessionId,
+      turnId: typeof launched.turnId === "string" ? launched.turnId : null,
+      sessionStatus: typeof session.status === "string" ? session.status : null,
+    };
+  },
+};
+
+function restEventReader(ctx: HarnessContext, sessionId: string) {
+  const client = restOf(ctx);
+  return async (after: number): Promise<EventPage> => {
+    const page = (await client.getEvents(REST_PRINCIPAL, sessionId, {
+      after,
+      wait: REST_WAIT_SECONDS,
+    })) as unknown;
+    const what = "GET /v1/sessions/{id}/events";
+    if (!isObj(page)) {
+      throw new Error(`${what} is not an object`);
+    }
+    return {
+      events: events(list(page, "events", what), what),
+      nextCursor: num(page, "nextCursor", what),
+      turnStatus: statusOrNull(page, "turnStatus", what),
+      truncated: false,
+    };
+  };
+}
+
+const restLaunchTurn: Step<HarnessContext> = {
+  id: "rest-launch-turn",
+  name: "REST GET /v1/sessions/{id}/events until the launch turn settles",
+  requires: ["baseUrl", "repo"],
+  needs: ["rest-launch"],
+  async run(ctx) {
+    const s = sessionOf(ctx.state.restSession);
+    const res = await waitForTurn({
+      after: s.cursor,
+      read: restEventReader(ctx, s.id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = res.cursor;
+    if (!res.text.includes(markerFor(ctx.deps.runId, "REST_LAUNCH"))) {
+      throw new Error("the launch turn's message text does not contain the launch marker");
+    }
+    return turnCaptured(res);
+  },
+};
+
+const restFollowup: Step<HarnessContext> = {
+  id: "rest-followup",
+  name: "REST POST /v1/sessions/{id}/turns (whenBusy reject), events until it settles",
+  requires: ["baseUrl", "repo"],
+  needs: ["rest-launch-turn"],
+  async run(ctx) {
+    const s = sessionOf(ctx.state.restSession);
+    const marker = markerFor(ctx.deps.runId, "REST_FOLLOWUP");
+    const turn = (await restOf(ctx).createTurn(REST_PRINCIPAL, s.id, {
+      prompt: promptFor(marker),
+      whenBusy: "reject",
+    })) as unknown;
+    if (!isObj(turn)) {
+      throw new Error("POST /v1/sessions/{id}/turns is not an object");
+    }
+    const turnId = str(turn, "id", "POST /v1/sessions/{id}/turns");
+    const res = await waitForTurn({
+      after: s.cursor,
+      turnId,
+      read: restEventReader(ctx, s.id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = res.cursor;
+    if (!res.text.includes(marker)) {
+      throw new Error("the follow-up turn's message text does not contain its marker");
+    }
+    return { turnId, ...turnCaptured(res) };
+  },
+};
+
+const restDelete: Step<HarnessContext> = {
+  id: "rest-delete",
+  name: "REST DELETE /v1/sessions/{id}, then GET until 404",
+  requires: ["baseUrl", "repo"],
+  needs: ["rest-launch"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const s = sessionOf(ctx.state.restSession);
+    await client.deleteSession(REST_PRINCIPAL, s.id);
+    const goneMs = await waitUntilGone(ctx, s.id, () => restGone(client, s.id), {
+      honorAbort: true,
+    });
+    ctx.state.created.delete(s.id);
+    return { sessionId: s.id, goneMs };
+  },
+};
+
+/** The steps, in run order. */
+export const STEPS: readonly Step<HarnessContext>[] = [
+  discovery,
+  mcpInspector,
+  login,
+  mcpTools,
+  mcpLaunch,
+  mcpLaunchTurn,
+  mcpFollowup,
+  mcpDelete,
+  restRead,
+  restLaunch,
+  restLaunchTurn,
+  restFollowup,
+  restDelete,
 ];
+
+export const CLEANUP_ID = "cleanup";
+const CLEANUP_NAME = "Delete leftover sessions over REST";
+
+/**
+ * Delete every session the run created and did not confirm deleted. Recorded
+ * only when there is something to clean up. It ignores the abort signal so an
+ * interrupted run still removes what it made.
+ */
+export async function cleanupSessions(ctx: HarnessContext, report: Report): Promise<void> {
+  const ids = [...ctx.state.created];
+  if (ids.length === 0) {
+    return;
+  }
+  const start = ctx.deps.now();
+  ctx.deps.progress(report.scrub(`▶ ${CLEANUP_ID}: ${ids.length} leftover session(s)`));
+  let client: KiroRemoteClient;
+  try {
+    client = restOf(ctx);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    report.fail(
+      CLEANUP_ID,
+      CLEANUP_NAME,
+      `cannot delete leftover sessions ${ids.join(", ")}: ${message}`,
+      ctx.deps.now() - start,
+    );
+    return;
+  }
+  const left: string[] = [];
+  for (const id of ids) {
+    try {
+      await client.deleteSession(REST_PRINCIPAL, id);
+    } catch {
+      // A 404 means it is already gone; any other error is settled by the poll below.
+    }
+    try {
+      await waitUntilGone(ctx, id, () => restGone(client, id), { honorAbort: false });
+      ctx.state.created.delete(id);
+    } catch {
+      left.push(id);
+    }
+  }
+  const ms = ctx.deps.now() - start;
+  if (left.length > 0) {
+    report.fail(CLEANUP_ID, CLEANUP_NAME, `sessions not confirmed deleted: ${left.join(", ")}`, ms);
+    ctx.deps.progress(report.scrub(`✘ ${CLEANUP_ID}: not deleted: ${left.join(", ")}`));
+    return;
+  }
+  report.pass(CLEANUP_ID, CLEANUP_NAME, { deleted: ids.length }, ms);
+  ctx.deps.progress(report.scrub(`✔ ${CLEANUP_ID}: deleted ${ids.length}`));
+}

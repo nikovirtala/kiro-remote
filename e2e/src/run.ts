@@ -1,113 +1,139 @@
 /**
- * The `pnpm e2e` entry point.
+ * The `pnpm e2e` entry point: run the live harness against a deployed stack.
  *
- * It wires the real prerequisite probes, loads config + secrets from the
- * environment, runs every step in order (each recording a real result or a
- * precise `blocked: <reason>`), adds the offline-derivable artifacts, and
- * prints the fully-redacted report to stdout. It persists nothing.
+ * It loads the config from the environment, wires the real dependencies (the
+ * MCP Inspector CLI, the `kiro-remote login` keychain, the MCP SDK client and
+ * the REST HttpClient), runs every step, deletes any session the run created
+ * and did not confirm deleted, and prints the scrubbed JSON report to stdout.
+ * Progress goes to stderr.
  *
  * Exit code:
- *   0  -- at least one live step ran for real (a genuine live e2e happened).
- *   2  -- no live step could run; every live step is blocked with a recorded
- *         reason. This is the EXPECTED outcome in a sandbox with no deployed
- *         stack: the harness did its job (attempt + precise record), but the
- *         live e2e did not execute, so CI sees a non-zero code rather than a
- *         false green. No output is fabricated in either case.
+ *   0  every recorded step passed;
+ *   1  a step failed (or the harness crashed);
+ *   2  nothing failed, but at least one step was skipped (for example
+ *      KIRO_REMOTE_URL is unset), so the live e2e did not fully run.
  */
-
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { redact } from "@nikovirtala/kiro-remote-core";
+import { randomUUID } from "node:crypto";
+import { FileKeychain, HttpClient } from "@nikovirtala/kiro-remote-mcp";
+import { defaultLogin, nodeFetch, obtainToken } from "./auth.ts";
 import { loadConfig } from "./config.ts";
-import { recordDerivedArtifacts } from "./derived.ts";
-import { type PreflightProbes, preflight } from "./preflight.ts";
-import { Report } from "./report.ts";
-import { STEPS, type StepContext } from "./steps.ts";
+import { defaultInspectorSpawn, runInspectorToolsList } from "./inspector.ts";
+import { connectMcp } from "./mcp-client.ts";
+import { makeScrubber, Report, type RunReport } from "./report.ts";
+import { runSteps } from "./runner.ts";
+import {
+  cleanupSessions,
+  DELETE_POLL_MS,
+  DELETE_TIMEOUT_MS,
+  type HarnessContext,
+  type HarnessDeps,
+  STEPS,
+  TURN_TIMEOUT_MS,
+} from "./steps.ts";
 
-const execFileAsync = promisify(execFile);
-
-/** Real PATH probe: `command -v <binary>` via the shell, no secret involved. */
-export const realProbes: PreflightProbes = {
-  async which(binary) {
-    try {
-      const { stdout } = await execFileAsync("sh", ["-c", `command -v ${binary}`]);
-      const path = stdout.trim();
-      return path.length > 0 ? path : null;
-    } catch {
-      return null;
-    }
-  },
-};
-
-/** The result of a harness run (used by the CLI exit-code decision + tests). */
+/** The result of a harness run (used by the CLI exit code and tests). */
 export interface RunHarnessResult {
-  report: ReturnType<Report["build"]>;
-  anyLiveStepRan: boolean;
+  report: RunReport;
+  exitCode: 0 | 1 | 2;
 }
 
-/**
- * Run the full harness with injectable probes/env, returning the built report.
- * Pure enough to test: the caller decides what to do with the result.
- */
-export async function runHarness(opts: {
-  env?: NodeJS.ProcessEnv;
-  probes?: PreflightProbes;
-}): Promise<RunHarnessResult> {
+function realDeps(progress: (line: string) => void): HarnessDeps {
+  return {
+    fetch: globalThis.fetch,
+    inspector: (u) => runInspectorToolsList(u, { spawn: defaultInspectorSpawn, progress }),
+    obtainToken: (u) => {
+      const keychain = new FileKeychain();
+      return obtainToken(u, {
+        keychain,
+        fetch: nodeFetch,
+        login: () => defaultLogin(u, keychain),
+      });
+    },
+    connectMcp: (u, t) => connectMcp(u, t),
+    rest: (u, t) => new HttpClient({ baseUrl: u, tokens: t, fetch: nodeFetch }),
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    runId: randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase(),
+    progress,
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    deleteTimeoutMs: DELETE_TIMEOUT_MS,
+    deletePollMs: DELETE_POLL_MS,
+  };
+}
+
+/** Run the harness with injectable env and dependencies; returns the scrubbed report. */
+export async function runHarness(
+  opts: { env?: NodeJS.ProcessEnv; deps?: Partial<HarnessDeps>; signal?: AbortSignal } = {},
+): Promise<RunHarnessResult> {
   const { config, secrets } = loadConfig(opts.env ?? process.env);
-  const probes = opts.probes ?? realProbes;
-
-  const report = new Report({
-    deployedHostConfigured: config.baseUrl !== null,
-    kiroApiKeyPresent: config.hasApiKey,
-    e2eRepoPresent: config.hasRepo,
-  });
-
-  const pf = await preflight(config.baseUrl, probes);
-
-  const ctx: StepContext = {
-    report,
-    preflight: pf,
+  const repo = secrets.repo();
+  const report = new Report(
+    { kiroRemoteUrl: config.baseUrl, e2eRepoPresent: config.hasRepo },
+    { literalSecrets: repo ? [repo] : [] },
+  );
+  const progress =
+    opts.deps?.progress ??
+    ((line: string) => {
+      process.stderr.write(`${report.scrub(line)}\n`);
+    });
+  const deps: HarnessDeps = { ...realDeps((line) => progress(report.scrub(line))), ...opts.deps };
+  const ctx: HarnessContext = {
     baseUrl: config.baseUrl,
     repo: secrets.repo,
-    apiKey: secrets.apiKey,
+    deps,
+    state: { created: new Set() },
+    ...(opts.signal ? { signal: opts.signal } : {}),
   };
-
-  for (const step of STEPS) {
-    await step.run(ctx);
+  try {
+    await runSteps(STEPS, ctx, report, {
+      hasBaseUrl: config.baseUrl !== null,
+      hasRepo: config.hasRepo,
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      now: deps.now,
+      progress: deps.progress,
+    });
+  } finally {
+    await cleanupSessions(ctx, report);
+    await ctx.state.mcp?.close().catch(() => {});
   }
-
-  recordDerivedArtifacts(report);
-
-  return { report: report.build(), anyLiveStepRan: report.anyRan };
+  return { report: report.build(), exitCode: report.exitCode };
 }
 
-/** CLI main: run, print the redacted report, pick the exit code. */
+/** CLI main: run, print the report and a summary, set the exit code. */
 async function main(): Promise<void> {
-  const { report, anyLiveStepRan } = await runHarness({});
-
-  // The report is already fully redacted; redact once more defensively before
-  // it touches stdout.
-  process.stdout.write(`${JSON.stringify(redact(report), null, 2)}\n`);
-
-  const blocked = report.steps.filter((s) => s.status === "blocked").length;
-  const ran = report.steps.filter((s) => s.status === "ran").length;
-  process.stderr.write(
-    `\ne2e summary: ${ran} step(s) ran, ${blocked} step(s) blocked, ${report.derived.length} derived artifact(s).\n`,
-  );
-
-  if (!anyLiveStepRan) {
+  const controller = new AbortController();
+  let interrupts = 0;
+  const onSignal = () => {
+    interrupts++;
+    if (interrupts > 1) {
+      process.exit(130);
+    }
     process.stderr.write(
-      "No live step could run in this environment; every live step is recorded as blocked with its exact reason (no output fabricated). Exiting 2.\n",
+      "\ninterrupted: skipping the remaining steps and deleting created sessions (press Ctrl-C again to exit now)\n",
     );
-    process.exit(2);
-  }
+    controller.abort();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  const { report, exitCode } = await runHarness({ signal: controller.signal });
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  const count = (s: string) => report.steps.filter((x) => x.status === s).length;
+  const lines = [
+    `e2e: ${count("passed")} passed, ${count("failed")} failed, ${count("skipped")} skipped`,
+    ...report.steps
+      .filter((s) => s.status !== "passed")
+      .map((s) => `  ${s.status} ${s.id}: ${s.reason ?? ""}`),
+  ];
+  process.stderr.write(`\n${lines.join("\n")}\n`);
+  process.exitCode = exitCode;
 }
 
 // Only run main() when invoked directly (not when imported by a test).
 if (process.argv[1]?.endsWith("run.ts")) {
   main().catch((err) => {
+    const scrub = makeScrubber([loadConfig().secrets.repo() ?? ""]);
     process.stderr.write(
-      `e2e harness error: ${redact(err instanceof Error ? err.message : String(err))}\n`,
+      `e2e harness error: ${scrub(err instanceof Error ? err.message : String(err))}\n`,
     );
     process.exit(1);
   });

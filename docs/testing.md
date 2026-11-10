@@ -110,9 +110,10 @@ error.
 The unit tests drive a fake engine. These checks need a deployed `lambda`
 stack and a real Kiro API key:
 
-- **Launch and follow-up.** Launch a session, then send a follow-up. Both
-  settle `idle`, and the consumer logs `session_launched` and no
-  `cloud_turn_failed`.
+- **Launch, follow-up and delete.** `pnpm e2e` (see
+  [the live end-to-end harness](#the-live-end-to-end-harness)) covers these
+  over MCP and over REST. While it runs, the consumer logs should show
+  `session_launched` and no `cloud_turn_failed`.
 - **Forced detach.** Ordinary turns finish long before the 90 s margin, so the
   detach path only runs when forced. Set `DETACH_MARGIN_MS` on the consumer
   function (in the Lambda console, so the other env vars stay as they are) to
@@ -133,33 +134,148 @@ stack and a real Kiro API key:
 ## The live end-to-end harness
 
 ```bash
+export KIRO_REMOTE_URL=https://kiro-remote.nikovirtala.dev
+export KIRO_API_E2E_REPO=owner/repo
 mise exec -- pnpm e2e   # pnpm --filter @nikovirtala/kiro-remote-e2e e2e → node src/run.ts
 ```
 
-The harness ([`e2e/src/run.ts`](../e2e/src/run.ts)) drives the **full live flow**
-against a real deployment. It needs:
+The harness ([`e2e/src/run.ts`](../e2e/src/run.ts)) tests a deployed stack the
+way a client uses it: MCP first, then REST. Each step makes real requests and
+passes only when its assertions hold. A step that fails or does not run makes
+the exit code non-zero.
 
-- a **deployed stack**, with `KIRO_REMOTE_URL` set to the canonical `https://<host>`,
-- the `kiro-cli` binary on `PATH`,
-- a browser (for the interactive login), and
-- optionally MCP Inspector.
+### Prerequisites
 
-Two secrets are read **from the environment only** (never from disk, logs, or the
-report): `KIRO_API_KEY` (`ksk_...`) and `KIRO_API_E2E_REPO` (the GitHub repo the
-live run targets). They are surfaced to the report only as presence booleans,
-never their values.
+- A deployed `lambda` stack.
+- Node 26 with `npx` and network access. The first run downloads
+  `@modelcontextprotocol/inspector@2.14.0`.
+- A desktop browser for the sign-ins.
+- Port 6276 free on `127.0.0.1`. It is the Inspector CLI's fixed OAuth
+  callback.
 
-### Exit codes (by design)
+### Environment variables
 
-The harness never fabricates results. Each step either runs for real or records a
-precise `blocked: <reason>`:
+- `KIRO_REMOTE_URL` (required): the stack's public base URL. Without it every
+  step is skipped.
+- `KIRO_API_E2E_REPO` (required for the launch steps): the repo the sessions
+  run on, as `owner/repo`. It must be in the stack's `allowedRepos`. The
+  harness holds it in memory only, reports just whether it is set, and
+  replaces it with `[REDACTED]` in every line it prints.
 
-- **exit 0** — at least one live step actually ran.
-- **exit 2** — nothing live could run; every live step is recorded as `blocked`
-  with its exact reason. This is the **expected** outcome with no deployed stack
-  (for example in a fresh sandbox where `KIRO_REMOTE_URL` is unset): the harness
-  did its job, but the live e2e did not execute, so CI sees a non-zero code rather
-  than a false green.
+`KIRO_API_KEY` is not used. It is the bridge's credential, never a REST or MCP
+bearer.
 
-So a non-zero `pnpm e2e` in an environment with no deployment is normal; read the
-printed report to see which prerequisites were missing.
+### Sign-in
+
+A run asks for up to two browser sign-ins:
+
+1. **The Inspector step** always opens one. The harness runs the Inspector with
+   its in-memory secret store and a temporary storage directory that it
+   deletes afterwards, so the Inspector's tokens are gone when it exits. By
+   default the Inspector would keep them in the OS keychain or
+   `~/.mcp-inspector/secrets.json`, and the harness keeps tokens only in the
+   `kiro-remote` 0600 token file. Each Inspector run also registers one new
+   `mcp_` client through dynamic client registration, as Claude does.
+2. **The login step** reuses the `kiro-remote login` token in
+   `~/.config/kiro-remote/tokens.json` and refreshes it silently. When the
+   file has no token for this host, or the refresh fails, it runs the same
+   browser login as `kiro-remote login` and stores the result in that file. To
+   skip this sign-in, run `kiro-remote login` beforehand (see
+   [`docs/mcp.md`](mcp.md)). The token must carry the `sessions:read`,
+   `sessions:write` and `sessions:delete` scopes.
+
+The bearer token is never printed, put on a command line, or written anywhere
+other than that token file.
+
+### Steps
+
+- `discovery`: An unauthenticated `POST /mcp` answers 401 with
+  `WWW-Authenticate: … resource_metadata="…"`. The protected-resource metadata
+  names `<KIRO_REMOTE_URL>/mcp` as the resource and `<KIRO_REMOTE_URL>` as the
+  authorization server. The authorization-server metadata has that issuer,
+  supports S256, and lists the authorization, token and registration endpoints.
+- `mcp-inspector`: The Inspector CLI
+  (`--cli <url>/mcp --transport http --method tools/list`) completes
+  discovery, registration and the browser sign-in, and lists exactly the 14
+  registered tools.
+- `login`: A token with the three scopes, from the token file or a browser
+  login. `captured.source` says which.
+- `mcp-tools`: The MCP SDK client connects over Streamable HTTP with that token.
+  `tools/list` returns the 14 tools, and `kiro_capabilities` and
+  `kiro_list_models` return their result shapes.
+- `mcp-launch`: `kiro_launch_session` on the repo returns a session id.
+  `kiro_get_session` returns it and `kiro_list_sessions` lists it.
+- `mcp-launch-turn`: `kiro_wait_for_events` until the launch turn settles `idle`
+  with no `turn.failed`. `kiro_get_transcript` contains the launch marker.
+- `mcp-followup`: `kiro_send_prompt` with `whenBusy: "reject"`, then waits until
+  that turn settles. Its transcript turn contains the follow-up marker.
+- `mcp-delete`: `kiro_delete_session` returns `deleting`, and `kiro_get_session`
+  reports not found within 5 minutes.
+- `rest-read`: `GET /v1/capabilities` and `GET /v1/models` return their result
+  shapes.
+- `rest-launch`: `POST /v1/sessions` returns a session id and
+  `GET /v1/sessions/{id}` returns it.
+- `rest-launch-turn`: `GET /v1/sessions/{id}/events` until the launch turn
+  settles. Its message text contains the launch marker.
+- `rest-followup`: `POST /v1/sessions/{id}/turns` with `whenBusy: "reject"`,
+  then events until that turn settles with its marker.
+- `rest-delete`: `DELETE /v1/sessions/{id}`, then `GET` answers 404 within 5
+  minutes.
+- `cleanup`: Only present when sessions were left behind (see below).
+
+A step is skipped when a required environment variable is missing, when a step
+it depends on did not pass, or after Ctrl-C. The delete steps depend only on
+their launch step, so a session whose turn failed is still deleted in the
+flow.
+
+Every prompt asks Kiro not to change files, open a pull request, or run
+commands, and to reply with one marker line such as
+`KIRO_E2E_<run id>_MCP_LAUNCH`. Sessions are titled
+`kiro-remote e2e <run id> (mcp|rest)`. A turn has 20 minutes to settle, which
+covers a catch-up continuation past the 15-minute consumer. Expect several
+minutes per launch.
+
+### Output and exit codes
+
+Progress lines (`▶`, `✔`, `✘`, `–`), the Inspector's output and the login
+messages go to stderr. The JSON report goes to stdout: `config` (the URL and
+whether the repo is set) and `steps[]`, each with `id`, `name`, `status`
+(`passed`, `failed` or `skipped`), `reason`, `durationMs` and `captured`
+(ids, statuses, counts and durations only). A summary line follows on stderr:
+`e2e: N passed, M failed, K skipped`.
+
+`node e2e/src/run.ts` exits:
+
+- **0**: every step passed;
+- **1**: a step failed, or the harness crashed;
+- **2**: nothing failed, but some steps were skipped. For example, without
+  `KIRO_REMOTE_URL` all 13 steps are skipped with `KIRO_REMOTE_URL is unset`.
+
+`pnpm e2e` reports any non-zero code from the script as 1.
+
+### Cleanup and Ctrl-C
+
+The harness tracks every session it creates. After the steps, it deletes over
+REST each session that a delete step did not confirm gone, and waits for a 404.
+This also runs after a failed step. When it had something to delete, the
+report gets a `cleanup` step: passed when every leftover is gone, failed with
+the session ids otherwise. Delete those by hand.
+
+The first Ctrl-C stops the current wait, skips the remaining steps as
+`run interrupted.`, and still runs the cleanup. A second Ctrl-C exits at once
+with code 130 and may leave sessions behind.
+
+### Not covered
+
+These operations do not apply to the Lambda bridge path, so the harness does
+not test them:
+
+- **cancel**: a running cloud turn rejects it as an unsupported operation, and
+  it is a no-op on an idle session;
+- **set_config** (model, effort, mode): a logged no-op on cloud sessions;
+- **permissions** (list and answer): cloud turns never ask;
+- **adopt**: rejected on the Lambda path;
+- **steer, and `whenBusy: "queue"` during a turn**: rejected as unsupported.
+
+The claude.ai connector and forced detach / catch-up stay manual checks (see
+the [live-test checklist](#live-test-checklist-lambda-direct-engine)).

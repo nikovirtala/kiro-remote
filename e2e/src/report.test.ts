@@ -1,20 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { Report } from "./report.ts";
+import { makeScrubber, Report } from "./report.ts";
 
 describe("Report redaction", () => {
   it("scrubs a ksk_ API key that leaks into a captured value", () => {
     const report = new Report({ ok: true });
-    // Simulate a buggy caller that accidentally captures a secret.
-    report.ran("launch", "launch", { leaked: "ksk_abc123SECRETkeyvalue" });
-    const built = report.build();
-    const json = JSON.stringify(built);
+    report.pass("launch", "launch", { leaked: "ksk_abc123SECRETkeyvalue" });
+    const json = JSON.stringify(report.build());
     expect(json).not.toContain("ksk_abc123SECRETkeyvalue");
     expect(json).toContain("[REDACTED]");
   });
 
-  it("scrubs bearer tokens, OAuth codes, and OAuth URLs in blocked reasons", () => {
+  it("scrubs bearer tokens, OAuth codes, and OAuth URLs in failure reasons", () => {
     const report = new Report({ ok: true });
-    report.blocked(
+    report.fail(
       "login",
       "login",
       "failed with Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payloadpart.sigpart at https://host/oauth/authorize?code=secretcode&state=x",
@@ -28,29 +26,65 @@ describe("Report redaction", () => {
 
   it("scrubs sensitive-keyed fields wholesale", () => {
     const report = new Report({ ok: true });
-    report.derive("x", "test", { access_token: "topsecret", refresh_token: "alsosecret" });
+    report.pass("x", "x", { access_token: "topsecret", refresh_token: "alsosecret" });
     const json = JSON.stringify(report.build());
     expect(json).not.toContain("topsecret");
     expect(json).not.toContain("alsosecret");
   });
 
-  it("tracks whether any step ran", () => {
-    const report = new Report({ ok: true });
-    expect(report.anyRan).toBe(false);
-    report.blocked("a", "a", "no host");
-    expect(report.anyRan).toBe(false);
-    report.ran("b", "b");
-    expect(report.anyRan).toBe(true);
+  it("scrubs the literal repo from captured values and reasons", () => {
+    const report = new Report({ ok: true }, { literalSecrets: ["acme/secret-repo", ""] });
+    report.pass("a", "a", { nested: { note: "launched on acme/secret-repo" } });
+    report.fail("b", "b", "repo acme/secret-repo is not allowed");
+    report.skip("c", "c", "acme/secret-repo missing");
+    const json = JSON.stringify(report.build());
+    expect(json).not.toContain("acme/secret-repo");
+    expect(json).toContain("launched on [REDACTED]");
   });
 
-  it("records step status and reasons in build()", () => {
-    const report = new Report({ ok: true });
-    report.blocked("login", "kiro-remote login", "kiro-cli not installed");
-    report.skipped("launch", "launch", "depends on login");
+  it("makeScrubber applies core redact before the literals", () => {
+    const scrub = makeScrubber(["owner/repo"]);
+    expect(scrub("ksk_abcdef owner/repo")).toBe("[REDACTED] [REDACTED]");
+  });
+});
+
+describe("Report.exitCode", () => {
+  it("is 0 only when every recorded step passed", () => {
+    const report = new Report({});
+    report.pass("a", "a");
+    report.pass("b", "b");
+    expect(report.exitCode).toBe(0);
+  });
+
+  it("is 1 when any step failed, even with skips", () => {
+    const report = new Report({});
+    report.pass("a", "a");
+    report.skip("b", "b", "no host");
+    report.fail("c", "c", "boom");
+    expect(report.exitCode).toBe(1);
+  });
+
+  it("is 2 when nothing failed but a step was skipped, or nothing was recorded", () => {
+    const report = new Report({});
+    expect(report.exitCode).toBe(2);
+    report.pass("a", "a");
+    report.skip("b", "b", "no host");
+    expect(report.exitCode).toBe(2);
+  });
+
+  it("records status, reason, and duration in build()", () => {
+    const report = new Report({});
+    report.fail("login", "login", "no browser", 12);
+    report.skip("launch", "launch", "skipped because login did not pass.");
     const built = report.build();
-    const login = built.steps.find((s) => s.id === "login");
-    expect(login?.status).toBe("blocked");
-    expect(login?.reason).toContain("kiro-cli not installed");
-    expect(built.steps.find((s) => s.id === "launch")?.status).toBe("skipped");
+    expect(built.steps[0]).toEqual({
+      id: "login",
+      name: "login",
+      status: "failed",
+      reason: "no browser",
+      durationMs: 12,
+    });
+    expect(built.steps[1].status).toBe("skipped");
+    expect(report.statusOf("login")).toBe("failed");
   });
 });
