@@ -13,14 +13,14 @@ The part I'm most excited about: the MCP server lets a chat client such as Claud
 
 Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 
-Not production-hardened: sign-in is password-only with MFA off, and the Lambdas run on the Node 26 runtime, which AWS lists as public preview. See [Registering a user](./docs/users.md) and [Toolchain](#toolchain).
+Not production-hardened: the user pool is invite-only and users sign in with a passkey (MFA is off, since a passkey sign-in is already multi-factor), but the email-code factor used to bootstrap the first passkey stays usable afterwards and Cognito offers no way to enforce passkey-only sign-in. The Lambdas run on the Node 26 runtime, which AWS lists as public preview. See [Inviting a user and passkey sign-in](./docs/users.md), [SECURITY.md](./SECURITY.md) and [Toolchain](#toolchain).
 
 You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, poll events, and manage sessions, either over the REST API or through the 14 MCP tools. Both MCP transports expose the same tools.
 
 ## Quick start
 
 1. [Deploy the control plane](./docs/deploy.md) into your AWS account (needs your Kiro API key).
-2. [Register a user](./docs/users.md) (sign-up is operator driven).
+2. [Invite a user](./docs/users.md) with `scripts/invite-user.sh` (sign-up is operator driven; you then add a passkey).
 3. Connect an MCP client: [Using the MCP server](./docs/mcp.md), or try the [REST API](./docs/rest-api.md) with `curl`.
 
 ## What's in the box?

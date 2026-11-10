@@ -39,7 +39,7 @@ The package is a private workspace package, so run its bin through pnpm:
 ```bash
 export KIRO_REMOTE_URL=https://<host>
 
-# Log in once (opens managed login in your browser, sign in with your password).
+# Log in once (opens managed login in your browser, sign in with your passkey).
 mise exec -- pnpm --filter @nikovirtala/kiro-remote-mcp exec kiro-remote login
 
 # Confirm who you are.
