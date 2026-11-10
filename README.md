@@ -11,11 +11,11 @@ The part I'm most excited about: the MCP server lets a chat client such as Claud
 - read back each turn's final answer (`kiro_get_transcript`),
 - and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-14-tools).
 
+You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can do all of the above either over the REST API or through the 14 MCP tools. Both MCP transports expose the same tools.
+
 Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 
-Not production-hardened: the user pool is invite-only and users sign in with a passkey (MFA is off, since a passkey sign-in is already multi-factor), but the email-code factor used to bootstrap the first passkey stays usable afterwards and Cognito offers no way to enforce passkey-only sign-in. The Lambdas run on the Node 26 runtime, which AWS lists as public preview. See [Inviting a user and passkey sign-in](./docs/users.md), [SECURITY.md](./SECURITY.md) and [Toolchain](#toolchain).
-
-You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, poll events, and manage sessions, either over the REST API or through the 14 MCP tools. Both MCP transports expose the same tools.
+Not production-hardened: the user pool is invite-only and users sign in with a passkey (MFA is off, since a passkey sign-in is already multi-factor), but the email-code factor used to bootstrap the first passkey stays usable afterwards and Cognito offers no way to enforce passkey-only sign-in. The API and OAuth callback Lambdas run on the Node 26 runtime, which AWS lists as public preview (the bridge Lambdas are container images). See [Registering a user](./docs/users.md), [SECURITY.md](./SECURITY.md) and [Toolchain](#toolchain).
 
 ## Quick start
 
@@ -38,7 +38,7 @@ Operator and user guides live under [`docs/`](./docs/):
 - [Overview and what to do next](./docs/README.md)
 - [Deploying the control plane](./docs/deploy.md)
 - [Running the tests](./docs/testing.md)
-- [Inviting a user and passkey sign-in](./docs/users.md)
+- [Registering a user](./docs/users.md)
 - [Trying the REST API](./docs/rest-api.md)
 - [Using the MCP server](./docs/mcp.md)
 
