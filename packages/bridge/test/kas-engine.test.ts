@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from "vitest";
 import {
+  CLIENT_INFO,
   KAS_NODE_PATH,
   KAS_SERVER_PATH,
   KasEngine,
@@ -80,6 +81,38 @@ describe("kasSpawnSpec", () => {
 });
 
 describe("KasEngine", () => {
+  test("initialize sends protocolVersion 1, CLIENT_INFO and empty clientCapabilities by default", async () => {
+    const { engine, logLines } = engineFor({ initialize: initResult() });
+    engine.start();
+    try {
+      await engine.initialize();
+    } finally {
+      await engine.stop();
+    }
+    expect(echoed(logLines, "fakeAgentInitializeParams")).toEqual([
+      {
+        protocolVersion: 1,
+        clientInfo: { name: "kiro-remote-bridge", version: "0.0.0" },
+        clientCapabilities: {},
+      },
+    ]);
+    expect(CLIENT_INFO).toEqual({ name: "kiro-remote-bridge", version: "0.0.0" });
+  });
+
+  test("initialize forwards the passed clientCapabilities", async () => {
+    const { engine, logLines } = engineFor({ initialize: initResult() });
+    const clientCapabilities = { _meta: { kiro: { openExternalUrl: true } } };
+    engine.start();
+    try {
+      await engine.initialize(clientCapabilities);
+    } finally {
+      await engine.stop();
+    }
+    expect(echoed(logLines, "fakeAgentInitializeParams")).toEqual([
+      { protocolVersion: 1, clientInfo: CLIENT_INFO, clientCapabilities },
+    ]);
+  });
+
   test("newCloudSession sends the cloud-sandbox _meta and returns the id", async () => {
     const { engine, logLines } = engineFor({
       initialize: initResult(),

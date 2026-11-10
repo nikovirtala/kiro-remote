@@ -4,7 +4,7 @@
  * Single source of truth for the kiro-remote control plane:
  *  - zod schemas (REST validation + OpenAPI 3.1 + MCP tool input schemas)
  *  - domain types and the normalized event union
- *  - the KiroGateway interface and capabilities() model
+ *  - the shared ACP session inputs and capabilities() model
  *  - the pure state machine transition(state, event)
  *  - the ACP V3 event normalizer + coalescer
  *  - the DynamoDB single-table repository
@@ -25,7 +25,6 @@ export * from "./events/dedupe.ts";
 export * from "./events/normalize.ts";
 export * from "./gateway/index.ts";
 export * from "./gateway/jsonrpc.ts";
-export * from "./gateway/reconnect.ts";
 export * from "./redact.ts";
 export * from "./repo/keys.ts";
 export * from "./repo/repository.ts";

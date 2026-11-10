@@ -6,29 +6,28 @@
  * MCP `kiro_capabilities` tool all READ this item via `repo.getCaps()` and
  * reconstruct the normalized capabilities with core's `deriveCapabilities`
  * applied to the stored RAW initialize result. For that reconstruction to
- * reproduce the advertisement, the bridge MUST store the RAW
- * `gateway.initializeResult` here, NOT the normalized Capabilities object.
+ * reproduce the advertisement, the bridge MUST store the RAW initialize
+ * result here, NOT the normalized Capabilities object.
  *
- * This runs after `gateway.initialize()` at BOTH bridge init points (serve
- * start and supervisor reconnect). It is try/catch guarded so a persistence
- * failure logs a warning and never crashes startup or reconnect; the bridge
- * keeps operating and the next reconnect retries the write.
+ * The caps publisher calls this after the engine's `initialize`. It is
+ * try/catch guarded so a persistence failure logs a warning instead of
+ * throwing; the next scheduled publish retries the write.
  */
 
 import {
+  capabilities as deriveCapabilities,
   type InitializeResult,
   kiroCliVersion,
   type Repository,
   redact,
 } from "@nikovirtala/kiro-remote-core";
-import type { AcpGateway } from "./gateway.ts";
 import type { Logger } from "./logger.ts";
 
 export interface PersistCapsOptions {
   /**
    * The kiro-cli version the running engine came from. Used only when the
    * initialize result reports no `agentInfo.version`: the direct KAS engine
-   * (Lambda path) omits `agentInfo`, which kiro-cli added when it relayed ACP.
+   * omits `agentInfo`, which kiro-cli added when it relayed ACP.
    * The Lambda image sets it from its KIRO_CLI_VERSION build arg.
    */
   kiroCliVersion?: string;
@@ -54,19 +53,19 @@ export function withAgentVersion(
 }
 
 /**
- * Write CONFIG#CAPS from the gateway's latest initialize advertisement. Logs a
+ * Write CONFIG#CAPS from the engine's raw initialize result. Logs a
  * redaction-safe `config_caps_persisted` confirmation on success, or a
  * `config_caps_persist_failed` warning on failure (continuing either way).
  */
 export async function persistCaps(
   repo: Repository,
-  gateway: AcpGateway,
+  rawInitializeResult: InitializeResult,
   logger: Logger,
   options: PersistCapsOptions = {},
 ): Promise<void> {
   try {
-    const caps = gateway.capabilities();
-    const initializeResult = withAgentVersion(gateway.initializeResult, options.kiroCliVersion);
+    const caps = deriveCapabilities(rawInitializeResult);
+    const initializeResult = withAgentVersion(rawInitializeResult, options.kiroCliVersion);
     // initializeResult MUST be (and remains) the RAW initialize result so the
     // read side (deriveCapabilities(caps.initializeResult)) reproduces the
     // advertisement. It is run through core's redact() first so that if the
@@ -98,9 +97,9 @@ export async function persistCaps(
       cloudExecution: caps.cloudExecution,
     });
   } catch (err) {
-    // A persistence failure must not kill startup/reconnect; the bridge can
-    // still operate and will retry on the next reconnect. The error string is
-    // routed through the redacting logger like every other record.
+    // A persistence failure is logged, not thrown; the next scheduled publish
+    // retries. The error string is routed through the redacting logger like
+    // every other record.
     logger.warn("config_caps_persist_failed", {
       error: err instanceof Error ? err.message : String(err),
     });

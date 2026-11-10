@@ -21,9 +21,11 @@
  * The API key travels only in the child env; nothing here logs the env.
  */
 
-import { CLIENT_INFO } from "./gateway.ts";
 import type { Logger } from "./logger.ts";
 import { type SpawnFn, type SpawnSpec, StdioJsonRpcTransport } from "./transport.ts";
+
+/** Our client identity sent on initialize. */
+export const CLIENT_INFO = { name: "kiro-remote-bridge", version: "0.0.0" } as const;
 
 /** Root of the engine unpacked into the Lambda image. */
 export const KAS_ROOT = "/opt/kiro";
@@ -112,11 +114,15 @@ export class KasEngine {
     };
   }
 
-  async initialize(): Promise<unknown> {
+  /**
+   * Negotiate with the engine. The consumer advertises no client capabilities;
+   * the caps publisher passes the ones it wants reflected in CONFIG#CAPS.
+   */
+  async initialize(clientCapabilities: Record<string, unknown> = {}): Promise<unknown> {
     return this.bounded("initialize", {
       protocolVersion: 1,
       clientInfo: CLIENT_INFO,
-      clientCapabilities: {},
+      clientCapabilities,
     });
   }
 

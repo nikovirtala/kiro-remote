@@ -1,10 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# The SERVERLESS bridge image (the Lambda-path counterpart to the ECS
-# Dockerfile).
-#
-# It runs the SAME workspace code as the ECS bridge but packaged for the AWS
-# Lambda container runtime rather than a long-running ECS task:
+# The bridge image, packaged for the AWS Lambda container runtime:
 #
 # - linux/arm64 (the Lambda functions run on Graviton, Architecture.ARM_64).
 # - Runs the Kiro agent engine (KAS) DIRECTLY, not through kiro-cli. kiro-cli
@@ -25,10 +21,9 @@
 #   KIRO_CLI_VERSION bump must re-run the engine smoke before deploy; the
 #   build fails loudly here if the unpacked layout changes.
 # - esbuild-bundles BOTH Lambda entries at IMAGE-BUILD time into single
-#   self-contained CommonJS files (mirroring the ECS image's `bridge.cjs`
-#   step), so there is no bare `@nikovirtala/*` import and no raw `.ts` under a
-#   node_modules path at runtime (Node refuses to type-strip `.ts` resolved
-#   under node_modules):
+#   self-contained CommonJS files, so there is no bare `@nikovirtala/*` import
+#   and no raw `.ts` under a node_modules path at runtime (Node refuses to
+#   type-strip `.ts` resolved under node_modules):
 #     - dist/lambda-consumer.cjs  -> the SQS FIFO cloud consumer `handler`
 #       (packages/bridge/src/lambda-consumer.ts), and
 #     - dist/caps-publisher.cjs   -> the one-shot CONFIG#CAPS publisher
@@ -91,9 +86,9 @@ COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages/core ./packages/core
 COPY packages/bridge ./packages/bridge
 
-# Bundle BOTH Lambda entries to SINGLE self-contained CommonJS files. Settings
-# mirror the ECS image's bridge.cjs step: @aws-sdk/* is BUNDLED IN (no
-# --external) so the runtime image needs no node_modules at all; `.cjs` forces
+# Bundle BOTH Lambda entries to SINGLE self-contained CommonJS files.
+# @aws-sdk/* is BUNDLED IN (no --external) so the runtime image needs no
+# node_modules at all; `.cjs` forces
 # CommonJS (the repo-root package.json is "type": "module"); and
 # --resolve-extensions includes `.ts` so esbuild resolves the repo's explicit
 # `.ts` import specifiers (allowImportingTsExtensions +
@@ -103,8 +98,7 @@ COPY packages/bridge ./packages/bridge
 #
 # esbuild is a devDependency of @nikovirtala/kiro-remote-cdk; under pnpm's
 # isolated node_modules layout its bin is linked ONLY into that package's
-# node_modules/.bin, so we invoke it by its explicit path (same as the ECS
-# image).
+# node_modules/.bin, so we invoke it by its explicit path.
 RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/lambda-consumer.ts \
       --bundle \
       --platform=node \
@@ -134,7 +128,7 @@ ARG KIRO_CLI_VERSION
 # `curl -fsSL https://cli.kiro.dev/install | bash` (note: no `.sh` suffix).
 ARG KIRO_CLI_INSTALL_URL=https://cli.kiro.dev/install
 
-# Install kiro-cli like the ECS image: the official script needs a downloader
+# Install kiro-cli: the official script needs a downloader
 # (curl), `unzip`, and `sha256sum`. The AWS Lambda base image is Amazon Linux
 # 2023, so packages come from `dnf`/`microdnf`, not apt. The script's shebang is
 # `#!/bin/bash` and it uses bash-only features, so it MUST be piped to `bash`.

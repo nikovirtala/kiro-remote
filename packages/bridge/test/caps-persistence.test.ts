@@ -1,43 +1,50 @@
 /**
- * CONFIG#CAPS persistence: after the bridge initializes it must write the RAW
- * initialize result so the REST API GET /v1/capabilities, the lambda capability
- * gate, and the MCP kiro_capabilities tool reconstruct the advertisement via
- * core's deriveCapabilities. These tests prove the write happens at start(),
- * that it round-trips, and that no secret leaks into the item or the logs.
+ * CONFIG#CAPS persistence: the caps publisher must write the RAW initialize
+ * result so the REST API GET /v1/capabilities, the lambda capability gate, and
+ * the MCP kiro_capabilities tool reconstruct the advertisement via core's
+ * deriveCapabilities. These tests prove the write round-trips and that no
+ * secret leaks into the item or the logs.
  */
 
-import { capabilities as deriveCapabilities, kiroCliVersion } from "@nikovirtala/kiro-remote-core";
-import { afterEach, describe, expect, test } from "vitest";
+import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import {
+  capabilities as deriveCapabilities,
+  kiroCliVersion,
+  Repository,
+} from "@nikovirtala/kiro-remote-core";
+import { describe, expect, test } from "vitest";
 import { createLogger } from "../src/logger.ts";
 import { persistCaps, withAgentVersion } from "../src/persist-caps.ts";
-import { createHarness, type Harness, requireHarness } from "./harness.ts";
+import { FakeDocClient, FakeS3Client } from "./fakes.ts";
 import { initResult } from "./scenarios.ts";
 
-let harness: Harness | null = null;
-
-afterEach(async () => {
-  if (harness) {
-    await harness.stop();
-    harness = null;
-  }
-});
+function wireRepo(): Repository {
+  return new Repository({
+    ddb: new FakeDocClient() as unknown as DynamoDBDocumentClient,
+    // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
+    s3: new FakeS3Client() as any,
+    tableName: "kiro-remote-test",
+    bucketName: "kiro-remote-test-bucket",
+  });
+}
 
 describe("CONFIG#CAPS persistence", () => {
-  test("start() persists CONFIG#CAPS whose raw initializeResult derives the advertisement", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-caps-1",
-      initialize: initResult({
+  test("persistCaps writes CONFIG#CAPS whose raw initializeResult derives the advertisement", async () => {
+    const repo = wireRepo();
+    const logLines: string[] = [];
+    const logger = createLogger({ level: "debug", sink: (l) => logLines.push(l) });
+    await persistCaps(
+      repo,
+      initResult({
         extensionMethods: ["_kiro/openExternalUrl", "_kiro/session/context"],
         executionTargets: ["cloud", "local"],
         sessionSources: ["remote", "local"],
         listScopes: ["cloud"],
       }),
-      onPrompt: { response: { stopReason: "end_turn" } },
-    });
-    await harness.server.start();
+      logger,
+    );
 
-    const h = requireHarness(harness);
-    const caps = await h.repo.getCaps();
+    const caps = await repo.getCaps();
     expect(caps).not.toBeNull();
 
     // The persisted initializeResult must be the RAW result: deriveCapabilities
@@ -53,12 +60,12 @@ describe("CONFIG#CAPS persistence", () => {
     expect(caps?.modes.length).toBe(2);
 
     // Model ids are also persisted as CONFIG#MODELS from the model config option.
-    const models = await h.repo.getModels();
+    const models = await repo.getModels();
     expect(models?.models).toEqual(["claude-sonnet", "claude-haiku"]);
     expect(models?.source).toBe("config_option");
 
     // A redaction-safe confirmation line was logged.
-    const confirmed = h.logLines.find((l) => l.includes("config_caps_persisted"));
+    const confirmed = logLines.find((l) => l.includes("config_caps_persisted"));
     expect(confirmed).toBeDefined();
     const record = JSON.parse(confirmed as string) as Record<string, unknown>;
     expect(record.extensionMethodCount).toBe(2);
@@ -66,18 +73,15 @@ describe("CONFIG#CAPS persistence", () => {
   });
 
   test("no ksk_ secret leaks into the persisted item or the logs", async () => {
-    harness = await createHarness({
-      newSessionId: "cloud-caps-2",
-      initialize: initResult(),
-      onPrompt: { response: { stopReason: "end_turn" } },
-    });
-    await harness.server.start();
+    const repo = wireRepo();
+    const logLines: string[] = [];
+    const logger = createLogger({ level: "debug", sink: (l) => logLines.push(l) });
+    await persistCaps(repo, initResult(), logger);
 
-    const h = requireHarness(harness);
-    const caps = await h.repo.getCaps();
-    const serialized = JSON.stringify(caps);
-    expect(serialized).not.toContain("ksk_");
-    expect(h.logLines.join("\n")).not.toContain("ksk_");
+    const caps = await repo.getCaps();
+    expect(caps).not.toBeNull();
+    expect(JSON.stringify(caps)).not.toContain("ksk_");
+    expect(logLines.join("\n")).not.toContain("ksk_");
   });
 
   test("a secret-shaped value in the initialize result is redacted before it is persisted", async () => {
@@ -103,13 +107,8 @@ describe("CONFIG#CAPS persistence", () => {
       },
       putModels: async () => {},
     };
-    const gateway = {
-      initializeResult: secretBearingInit,
-      capabilities: () => deriveCapabilities(secretBearingInit),
-    };
-
     // biome-ignore lint/suspicious/noExplicitAny: focused unit with minimal fakes.
-    await persistCaps(repo as any, gateway as any, logger);
+    await persistCaps(repo as any, secretBearingInit, logger);
 
     expect(persisted).not.toBeNull();
     const serialized = JSON.stringify(persisted);
@@ -139,13 +138,8 @@ describe("CONFIG#CAPS persistence", () => {
       },
       putModels: async () => {},
     };
-    const gateway = {
-      initializeResult: engineInit,
-      capabilities: () => deriveCapabilities(engineInit),
-    };
-
     // biome-ignore lint/suspicious/noExplicitAny: focused unit with minimal fakes.
-    await persistCaps(repo as any, gateway as any, logger, { kiroCliVersion: " 3.1.0 " });
+    await persistCaps(repo as any, engineInit, logger, { kiroCliVersion: " 3.1.0 " });
 
     const stored = (persisted as { initializeResult: Record<string, unknown> } | null)
       ?.initializeResult;
@@ -164,19 +158,15 @@ describe("CONFIG#CAPS persistence", () => {
   test("persistCaps swallows a putCaps failure and logs a warning", async () => {
     const lines: string[] = [];
     const logger = createLogger({ sink: (l) => lines.push(l), level: "debug" });
-    // A repo whose putCaps rejects must not propagate; reconnect/startup stays up.
+    // A repo whose putCaps rejects must not propagate; the publish logs it.
     const repo = {
       putCaps: async () => {
         throw new Error("ddb unavailable ksk_live_should_be_redacted");
       },
       putModels: async () => {},
     };
-    const gateway = {
-      initializeResult: {},
-      capabilities: () => deriveCapabilities(initResult()),
-    };
     // biome-ignore lint/suspicious/noExplicitAny: focused unit with minimal fakes.
-    await expect(persistCaps(repo as any, gateway as any, logger)).resolves.toBeUndefined();
+    await expect(persistCaps(repo as any, initResult(), logger)).resolves.toBeUndefined();
     const warn = lines.find((l) => l.includes("config_caps_persist_failed"));
     expect(warn).toBeDefined();
     // The error string is routed through the redacting logger.

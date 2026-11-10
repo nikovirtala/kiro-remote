@@ -148,6 +148,9 @@ rl.on("line", (line) => {
 
   switch (method) {
     case "initialize":
+      // Echo the received params so a test can assert what the client sent
+      // (protocolVersion/clientInfo/clientCapabilities).
+      process.stderr.write(`${JSON.stringify({ fakeAgentInitializeParams: params })}\n`);
       send({ jsonrpc: "2.0", id, result: scenario.initialize });
       return;
 

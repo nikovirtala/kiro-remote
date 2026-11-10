@@ -929,7 +929,7 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
     expect(w.spawner.specs).toHaveLength(0);
   });
 
-  test("adopt on the Lambda path is rejected loudly as unsupported (deferred to Fargate)", async () => {
+  test("adopt is rejected loudly as unsupported", async () => {
     const w = await wire([LAUNCH]);
     await w.seed("sad");
 
@@ -947,7 +947,7 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
     const rej = events.find((e) => e.type === "turn.failed" && e.rawType === "operation_rejected");
     expect(rej).toBeDefined();
     expect(inner(rej).operation).toBe("adopt");
-    expect(String(inner(rej).reason)).toContain("Fargate");
+    expect(inner(rej).reason).toBe("adopt/session-load is not supported by the bridge");
   });
 });
 
