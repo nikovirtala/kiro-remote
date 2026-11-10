@@ -113,6 +113,25 @@ requests, the token the client receives always carries the MCP resource scopes
 (`openid` plus `sessions:read` / `sessions:write` / `sessions:delete`), because the
 facade forwards the resource scopes to Cognito.
 
+### Trying it in the MCP Inspector
+
+The [MCP Inspector](https://modelcontextprotocol.io/docs/2026-07-28/tools/inspector#remote-http-server)
+web UI is a quick way to browse the tools and call them by hand against the
+deployed endpoint:
+
+```bash
+npx @modelcontextprotocol/inspector --server-url https://<host>/mcp --transport http
+```
+
+When `/mcp` answers 401, the Inspector runs the OAuth discovery, registers an
+`mcp_` client through Dynamic Client Registration and opens the Cognito sign-in,
+the same way Claude does. By default it stores the resulting tokens in the OS
+keychain, or unencrypted in `~/.mcp-inspector/secrets.json` on a machine
+without one; see the Inspector's
+[secret storage notes](https://modelcontextprotocol.io/docs/2026-07-28/tools/inspector/configuration.md#where-secrets-are-stored).
+The live e2e harness uses the Inspector's CLI mode instead, with an in-memory
+store (see [`docs/testing.md`](testing.md#the-live-end-to-end-harness)).
+
 ## The 14 tools
 
 Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
