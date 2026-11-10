@@ -784,6 +784,6 @@ id, so do not change the prefix or region after users register passkeys.
 
 ## Next
 
-- [Invite a user](./users.md) (`./scripts/invite-user.sh <email>`; passkey-only sign-in)
+- [Invite a user](./users.md) (`./scripts/invite-user.sh <email>`; sign in with a passkey, see the note on the email-code factor there)
 - [Try the REST API](./rest-api.md)
 - [Use the MCP server](./mcp.md)

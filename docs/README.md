@@ -3,7 +3,9 @@
 This is the index for operating kiro-remote: deploying it, testing it, creating a
 user, and driving it through the REST API or the MCP server.
 
-kiro-remote is a personal AWS control plane that wraps `kiro-cli`. You deploy a
+kiro-remote is a personal AWS control plane that launches and drives Kiro Web
+sessions using the engine bundled with `kiro-cli` over ACP (`kiro-cli` is
+installed at image build time, not run at runtime). You deploy a
 single CDK stack (`KiroRemoteStack`) into your own AWS account. It exposes:
 
 - a **REST API** under base path `/v1`, fronted by an OAuth 2.1 / Cognito facade,
@@ -28,7 +30,8 @@ work through the guides in this order:
 2. **[Register a user](./users.md)** — a user **is** required. Sign-up is operator
    driven (there is no public signup): you invite yourself with
    `scripts/invite-user.sh`, bootstrap a passkey from the emailed code, and sign
-   in with that passkey from then on (no password is ever issued).
+   in with that passkey from then on (no password is ever issued; the email-code
+   factor stays usable, see [users.md](./users.md)).
 3. **[Try the REST API](./rest-api.md)** — log in to get a token, then call
    `/v1/capabilities`, launch a session, and long-poll its events with `curl`.
 4. **[Use the MCP server](./mcp.md)** — run `kiro-remote login` once, then wire
@@ -63,8 +66,8 @@ deployed.
 - Node **26.13.0** and pnpm **12.18.0**, pinned in [`.mise.toml`](../.mise.toml).
 - ESM throughout; TypeScript is executed directly via Node 26 native type
   stripping, so there is no separate compile step.
-- The deployed Lambdas target the matching **Node 26** runtime (`nodejs26.x`),
-  which AWS lists as **public preview** (not SLA/Support-covered, not for
+- The API and OAuth callback Lambdas target the matching **Node 26** runtime
+  (`nodejs26.x`; the bridge Lambdas are container images), which AWS lists as **public preview** (not SLA/Support-covered, not for
   production, GA targeted ~Nov 2026). CDK has no `Runtime.NODEJS_26_X` constant
   yet ([aws/aws-cdk#39021](https://github.com/aws/aws-cdk/issues/39021)) so a
   shim is used. See [`deploy.md`](./deploy.md#lambda-runtime-node-26-public-preview)
