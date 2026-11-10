@@ -62,6 +62,8 @@ interface Scenario {
     messages?: ScriptedMessage[];
     /** Emit `messages` BEFORE the load result (the order ACP requires). */
     replayBeforeResponse?: boolean;
+    /** Answer session/load with this JSON-RPC error instead (no replay). */
+    error?: { code: number; message: string };
   };
   sendUnknownRequest?: boolean;
   /**
@@ -175,6 +177,10 @@ rl.on("line", (line) => {
     case "session/load":
       process.stderr.write(`${JSON.stringify({ fakeAgentLoadParams: params })}\n`);
       lastSessionId = String(params.sessionId ?? lastSessionId);
+      if (scenario.onLoad?.error) {
+        send({ jsonrpc: "2.0", id, error: scenario.onLoad.error });
+        return;
+      }
       if (scenario.onLoad?.replayBeforeResponse && scenario.onLoad.messages) {
         emitScripted(scenario.onLoad.messages, lastSessionId);
         send({ jsonrpc: "2.0", id, result: { sessionId: lastSessionId } });

@@ -338,13 +338,21 @@ requests on the cloud path.
 
 **Detach and catch-up.** The turn runs in Kiro's cloud sandbox, so the
 invocation does not have to wait for it. When the turn is still running with
-90 s left before the 15-minute deadline, the consumer flushes what it has,
+90 s left before the 15-minute deadline (the consumer's `DETACH_MARGIN_MS` env
+var overrides the 90 s, in milliseconds), the consumer flushes what it has,
 stops the engine (the cloud turn keeps running), logs `turn_detached`, emits
 the `TurnDetached` metric, and sends a catch-up message to `CatchUpQueue` with
 a 60 s delay. While detached, the session META stays `status: running` with
 `activeTurnId` set to the turn. Each catch-up run starts a fresh engine, makes
-one remote `session/load`, and compares the replay of the latest turn with the
-events already in the log for that `turnId`. Text chunks are matched by prefix,
+one remote `session/load`, and compares the replay of the detached turn with
+the events already in the log for that `turnId`. The catch-up message carries
+the turn's position among the replay's turns (1 for a launch; for a follow-up,
+the number of turns in the load replay taken before the prompt, plus 1), so a
+replay that does not hold the turn yet writes nothing and is retried. A
+redelivered command that finds its own turn still running (its first delivery
+died before it could detach) also schedules a catch-up; that one has no
+position, uses the replay's last turn, and writes nothing if that turn's text
+diverges from the log (`catch_up_segment_mismatch`). Text chunks are matched by prefix,
 tool calls by `(toolCallId, status)`, other events by count, so only missing
 events are appended and a repeated catch-up writes nothing twice. When the
 replay contains `turn_end`, the turn settles (`prompt.response`, session back
