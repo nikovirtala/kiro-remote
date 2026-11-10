@@ -1,15 +1,32 @@
 # Kiro Remote
 
-Have you ever wanted to command your hosted coding agent from the Claude chat conversation without changing the tool to Claude Code for instance? — If yes, then read on!
-
 Kiro Remote is a personal AWS control plane that wraps `kiro-cli` to launch and drive [Kiro Web](https://kiro.dev/web/) agentic coding sessions through an MCP server and a REST API.
 
-You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, stream events, and manage sessions, either over the REST API or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
+## Drive a hosted coding agent from your chat
+
+The part I'm most excited about: the MCP server lets a chat client such as Claude connect to your own deployment and hand real coding work to a Kiro Web agent, right from the conversation. No switch to Claude Code needed. From the chat you can:
+
+- launch a repo-scoped Kiro Web session with an initial prompt (`kiro_launch_session`),
+- send follow-up prompts and long-poll progress (`kiro_send_prompt`, `kiro_wait_for_events`),
+- read back each turn's final answer (`kiro_get_transcript`),
+- and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-14-tools).
+
+Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
+
+Not production-hardened: sign-in is password-only with MFA off, and the Lambdas run on the Node 26 runtime, which AWS lists as public preview. See [Registering a user](./docs/users.md) and [Toolchain](#toolchain).
+
+You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, poll events, and manage sessions, either over the REST API or through the 14 MCP tools. Both MCP transports expose the same tools.
+
+## Quick start
+
+1. [Deploy the control plane](./docs/deploy.md) into your AWS account (needs your Kiro API key).
+2. [Register a user](./docs/users.md) (sign-up is operator driven).
+3. Connect an MCP client: [Using the MCP server](./docs/mcp.md), or try the [REST API](./docs/rest-api.md) with `curl`.
 
 ## What's in the box?
 
 - **MCP server** (`packages/mcp`) exposed in two ways: a Streamable HTTP transport mounted at `<host>/mcp` and a stdio transport via the `kiro-remote` CLI.
-- **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`,with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at `/openapi.json`.
+- **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`, with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at `/openapi.json`.
 - **Bridge** (`packages/bridge`) two container-image Lambda functions (arm64) built from one image: an SQS consumer that launches and drives Kiro Web sessions over the Agent Client Protocol (ACP) against kiro-cli's bundled engine, and a publisher that records the engine's capabilities. See the [direct-engine path](./docs/deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine) for detail.
 - **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS, Cognito, the Lambda bridge, and the API (with native stage throttling).
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a live end-to-end harness (`e2e`).
