@@ -1,6 +1,6 @@
 # Kiro Remote
 
-Kiro Remote is a personal AWS control plane that wraps `kiro-cli` to launch and drive [Kiro Web](https://kiro.dev/web/) agentic coding sessions through an MCP server and a REST API.
+Kiro Remote is a personal AWS control plane that launches and drives [Kiro Web](https://kiro.dev/web/) agentic coding sessions through an MCP server and a REST API, using the engine bundled with `kiro-cli` over ACP.
 
 ## Drive a hosted coding agent from your chat
 
