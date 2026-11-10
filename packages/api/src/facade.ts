@@ -44,6 +44,29 @@ const FACADE_PATHS = new Set([
   "/oauth/clients/cli.json",
 ]);
 
+/**
+ * GET /passkeys/add: redirect to the Cognito managed-login passkey registration
+ * page, which needs the facade client id and callback as query parameters.
+ * The invitation email links here because the client id cannot be embedded in
+ * the user pool's invitation template (the app client depends on the pool).
+ */
+export const PASSKEY_ADD_PATH = "/passkeys/add";
+
+/** True when the request targets an unauthenticated passkey-add redirect. */
+export function isPasskeyAddPath(path: string): boolean {
+  return path === PASSKEY_ADD_PATH;
+}
+
+/** Build the Cognito managed-login passkey add URL. */
+export function passkeyAddUrl(ctx: ApiContext): string {
+  const { cognitoDomain, cognitoClientId, publicBaseUrl } = ctx.facade.config;
+  const q = new URLSearchParams({
+    client_id: cognitoClientId,
+    redirect_uri: `${publicBaseUrl.replace(/\/+$/, "")}/oauth/callback`,
+  });
+  return `${cognitoDomain.replace(/\/+$/, "")}/passkeys/add?${q.toString()}`;
+}
+
 /** True when the request targets an unauthenticated facade endpoint. */
 export function isFacadePath(path: string): boolean {
   return FACADE_PATHS.has(path);

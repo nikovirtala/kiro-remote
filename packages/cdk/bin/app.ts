@@ -146,6 +146,9 @@ const customDomain = customDomainName
     }
   : undefined;
 
+const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefined;
+const sesVerifiedDomain = app.node.tryGetContext("sesVerifiedDomain") as string | undefined;
+
 new KiroRemoteStack(app, "KiroRemoteStack", {
   ...(env ? { env } : {}),
   kiroRemote: {
@@ -153,6 +156,8 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     cognitoDomainPrefix,
     allowedRepos,
     kiroApiKeySecretArn,
+    ...(sesFromEmail ? { sesFromEmail } : {}),
+    ...(sesVerifiedDomain ? { sesVerifiedDomain } : {}),
     ...(kiroCliVersion ? { kiroCliVersion } : {}),
     ...(lambdaImage ? { lambdaImage } : {}),
     ...(apiLambdaCode ? { apiLambdaCode } : {}),

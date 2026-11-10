@@ -36,6 +36,16 @@ describe("Lambda handler over API Gateway HTTP API v2 events", () => {
     expect(h.queue.commands[0].kind).toBe("launch");
   });
 
+  test("GET /passkeys/add redirects unauthenticated to the Cognito passkey page", async () => {
+    const h = buildHarness();
+    const handler = createHandler(h.ctx);
+    const result = await handler(makeEvent({ method: "GET", path: "/passkeys/add" }));
+    expect(result.statusCode).toBe(302);
+    expect(result.headers?.location).toBe(
+      "https://cognito.example.com/passkeys/add?client_id=cognito-app-client&redirect_uri=https%3A%2F%2Fkiro.example.com%2Foauth%2Fcallback",
+    );
+  });
+
   test("unknown path returns 404 problem+json", async () => {
     const h = buildHarness();
     const handler = createHandler(h.ctx);

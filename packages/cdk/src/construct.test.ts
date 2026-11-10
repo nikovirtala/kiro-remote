@@ -23,7 +23,7 @@
  */
 
 import { App, Stack } from "aws-cdk-lib";
-import { Match, Template } from "aws-cdk-lib/assertions";
+import { Annotations, Match, Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, test } from "vitest";
 import { KiroRemote } from "./construct.ts";
 
@@ -571,5 +571,49 @@ describe("KiroRemote Lambda bridge", () => {
     }
     // Sanity: the two container-image bridge functions carry no Runtime.
     expect(imageFunctions(t).length).toBe(2);
+  });
+});
+
+describe("KiroRemote SES sender and passkey add route", () => {
+  function synthWith(extra: Record<string, unknown>): { template: Template; stack: Stack } {
+    const app = new App();
+    const stack = new Stack(app, "SesStack", {
+      env: { account: "111111111111", region: "eu-west-1" },
+    });
+    new KiroRemote(stack, "KiroRemote", {
+      publicBaseUrl: "https://kiro.example.com",
+      cognitoDomainPrefix: "kiro-remote-test",
+      allowedRepos: ["acme/*"],
+      ...extra,
+    });
+    return { template: Template.fromStack(stack), stack };
+  }
+
+  test("forwards sesFromEmail to the user pool as a DEVELOPER (SES) sender", () => {
+    const { template } = synthWith({
+      sesFromEmail: "no-reply@example.com",
+      sesVerifiedDomain: "example.com",
+    });
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      EmailConfiguration: Match.objectLike({
+        EmailSendingAccount: "DEVELOPER",
+        From: "no-reply@example.com",
+      }),
+    });
+  });
+
+  test("without sesFromEmail it uses the Cognito default sender and warns", () => {
+    const { template, stack } = synthWith({});
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      EmailConfiguration: Match.absent(),
+    });
+    Annotations.fromStack(stack).hasWarning("*", Match.stringLikeRegexp("sesFromEmail"));
+  });
+
+  test("routes GET /passkeys/add to the API", () => {
+    const { template } = synthWith({});
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "GET /passkeys/add",
+    });
   });
 });

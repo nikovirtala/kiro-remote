@@ -156,7 +156,7 @@ export class KiroRemoteAuth extends Construct {
           `<p>There is no password to set. Sign in at ${base}/ (or connect your MCP client),`,
           `choose the email code option and enter the code Cognito emails you.`,
           `Cognito does not prompt for a passkey on its own: once signed in, add one at`,
-          `${base}/passkeys/add (or ask your admin for the link). From then on, sign in with the passkey.</p>`,
+          `${base}/passkeys/add (it forwards to the Cognito passkey page). From then on, sign in with the passkey.</p>`,
           `<p>Ignore the legacy temporary password {####}: it is disabled and cannot be used.</p>`,
         ].join(" "),
         smsMessage:

@@ -22,7 +22,7 @@ import {
 } from "@nikovirtala/kiro-remote-core";
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import type { ApiContext } from "./context.ts";
-import { dispatchFacade, isFacadePath } from "./facade.ts";
+import { dispatchFacade, isFacadePath, isPasskeyAddPath, passkeyAddUrl } from "./facade.ts";
 import { type HttpRequest, type HttpResponse, jsonResponse, parseEvent } from "./http.ts";
 import { buildOpenApiDocument } from "./openapi.ts";
 import {
@@ -142,6 +142,11 @@ export async function route(ctx: ApiContext, req: HttpRequest): Promise<HttpResp
       if (res) {
         return res;
       }
+    }
+
+    // 1b. Public redirect to the Cognito passkey registration page.
+    if (isPasskeyAddPath(req.path) && req.method === "GET") {
+      return { status: 302, headers: { location: passkeyAddUrl(ctx) }, body: "" };
     }
 
     // 2. Public API description.
