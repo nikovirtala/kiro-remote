@@ -109,7 +109,10 @@ describe("KiroRemoteAuth", () => {
     template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
       GenerateSecret: false,
       AllowedOAuthFlows: ["code"],
-      CallbackURLs: ["https://kiro.example.com/oauth/callback"],
+      CallbackURLs: [
+        "https://kiro.example.com/oauth/callback",
+        "https://kiro.example.com/passkeys/added",
+      ],
       EnableTokenRevocation: true,
       AccessTokenValidity: 15,
       RefreshTokenValidity: 43200, // 30 days in minutes

@@ -52,9 +52,48 @@ const FACADE_PATHS = new Set([
  */
 export const PASSKEY_ADD_PATH = "/passkeys/add";
 
+/**
+ * GET /passkeys/added: where Cognito returns the browser after the passkey
+ * page. It is deliberately NOT /oauth/callback (that endpoint requires the
+ * upstream `state` of a real OAuth transaction). It exchanges no code.
+ */
+export const PASSKEY_ADDED_PATH = "/passkeys/added";
+
 /** True when the request targets an unauthenticated passkey-add redirect. */
 export function isPasskeyAddPath(path: string): boolean {
   return path === PASSKEY_ADD_PATH;
+}
+
+/** True when the request targets the passkey-added landing page. */
+export function isPasskeyAddedPath(path: string): boolean {
+  return path === PASSKEY_ADDED_PATH;
+}
+
+const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/**
+ * Render the static landing page shown after the Cognito passkey page. A
+ * Cognito `error` / `error_description` query is shown (escaped); any `code`
+ * is ignored and never exchanged.
+ */
+export function passkeyAddedPage(query: Record<string, string>): HttpResponse {
+  const error = query.error;
+  const body = error
+    ? `<h1>Passkey not added</h1><p>${escapeHtml(error)}${
+        query.error_description ? `: ${escapeHtml(query.error_description)}` : ""
+      }</p><p>Open the invitation link again to retry.</p>`
+    : "<h1>Passkey added</h1><p>You can close this tab and sign in with your passkey using <code>kiro-remote login</code> or your MCP client.</p>";
+  return {
+    status: error ? 400 : 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'none'",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+    body: `<!doctype html><html><head><meta charset="utf-8"><title>kiro-remote passkey</title></head><body>${body}</body></html>`,
+  };
 }
 
 /** Build the Cognito managed-login passkey add URL. */
@@ -62,7 +101,7 @@ export function passkeyAddUrl(ctx: ApiContext): string {
   const { cognitoDomain, cognitoClientId, publicBaseUrl } = ctx.facade.config;
   const q = new URLSearchParams({
     client_id: cognitoClientId,
-    redirect_uri: `${publicBaseUrl.replace(/\/+$/, "")}/oauth/callback`,
+    redirect_uri: `${publicBaseUrl.replace(/\/+$/, "")}/passkeys/added`,
   });
   return `${cognitoDomain.replace(/\/+$/, "")}/passkeys/add?${q.toString()}`;
 }

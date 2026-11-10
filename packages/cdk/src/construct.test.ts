@@ -329,7 +329,10 @@ describe("KiroRemote", () => {
     template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
       GenerateSecret: false,
       AllowedOAuthFlows: ["code"],
-      CallbackURLs: ["https://kiro.example.com/oauth/callback"],
+      CallbackURLs: [
+        "https://kiro.example.com/oauth/callback",
+        "https://kiro.example.com/passkeys/added",
+      ],
       EnableTokenRevocation: true,
       AccessTokenValidity: 15,
       RefreshTokenValidity: 43200,
@@ -614,6 +617,13 @@ describe("KiroRemote SES sender and passkey add route", () => {
     const { template } = synthWith({});
     template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
       RouteKey: "GET /passkeys/add",
+    });
+  });
+
+  test("routes GET /passkeys/added to the API", () => {
+    const { template } = synthWith({});
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "GET /passkeys/added",
     });
   });
 });

@@ -113,6 +113,8 @@ export class KiroRemoteAuth extends Construct {
     const base = props.publicBaseUrl.replace(/\/+$/, "");
     this.mcpResourceIdentifier = `${base}/mcp`;
     const callbackUrl = `${base}/oauth/callback`;
+    // Return URL for the Cognito passkey-add page (served by the API; no code exchange).
+    const passkeyAddedUrl = `${base}/passkeys/added`;
 
     // Passkeys are bound to the relying-party id. Build it from the prefix and
     // region directly (not from the domain resource) to avoid a dependency
@@ -205,7 +207,7 @@ export class KiroRemoteAuth extends Construct {
       authFlows: { user: true, userSrp: false, adminUserPassword: false, custom: false },
       oAuth: {
         flows: { authorizationCodeGrant: true, implicitCodeGrant: false },
-        callbackUrls: [callbackUrl],
+        callbackUrls: [callbackUrl, passkeyAddedUrl],
         scopes: oauthScopes,
       },
       accessTokenValidity: Duration.minutes(15),
