@@ -53,28 +53,27 @@ against the real asset constructs. It needs AWS credentials but not Docker (the
 image is built at deploy), and deploys nothing. See
 [Bootstrap and deploy](deploy.md#5-bootstrap-and-deploy).
 
-Without `deploy.env` or AWS credentials, synthesize the Lambda bridge mode
-directly from `packages/cdk` (output goes to `/tmp`, nothing is deployed):
+Without `deploy.env` or AWS credentials, synthesize the stack directly from
+`packages/cdk` (output goes to `/tmp`, nothing is deployed):
 
 ```bash
 cd packages/cdk
 mise exec -- pnpm exec cdk synth --quiet -o /tmp/kiro-remote-synth \
-  -c kiroCliVersion=3.1.0 -c bridgeMode=lambda \
+  -c kiroCliVersion=3.1.0 \
   -c publicBaseUrl=https://kiro-remote.nikovirtala.dev \
   -c cognitoDomainPrefix=kiro-remote -c 'allowedRepos=*/*' \
   -c kiroApiKeySecretArn=arn:aws:secretsmanager:eu-north-1:827333031966:secret:kiro-api-key-AbCdEf
 ```
 
 `/tmp/kiro-remote-synth/KiroRemoteStack.template.json` then holds the
-`CatchUpQueue` and two `AWS::Lambda::EventSourceMapping` resources.
+`CatchUpQueue` and two `AWS::Lambda::EventSourceMapping` resources, and no
+`AWS::ECS::*` or `AWS::EC2::*` resources.
 
-## Building the bridge images and the engine smoke
+## Building the bridge image and the engine smoke
 
-Build both bridge images from the repo root (Docker, `linux/arm64`):
+Build the bridge image from the repo root (Docker, `linux/arm64`):
 
 ```bash
-docker build --platform linux/arm64 --build-arg KIRO_CLI_VERSION=3.1.0 \
-  -f packages/bridge/Dockerfile -t kiro-remote-bridge:3.1.0 .
 docker build --platform linux/arm64 --build-arg KIRO_CLI_VERSION=3.1.0 \
   -f packages/bridge/Dockerfile.lambda -t kiro-remote-bridge-lambda:3.1.0 .
 ```
@@ -94,21 +93,10 @@ rejected by Kiro, which proves the engine reached it). Add
 `--user 10001:10001` after `--rm` to check that a non-root user, like Lambda's
 sandbox user, can run `/opt/kiro`.
 
-The Fargate bridge starts `kiro-cli acp --agent-engine=v3` at boot, which
-unpacks the engine into `$HOME/.local/share/kiro-cli` before it answers. The
-same smoke against the Fargate image, as the `bridge` user (uid 10001):
-
-```bash
-docker run --rm --platform linux/arm64 --user 10001:10001 --entrypoint /bin/sh kiro-remote-bridge:3.1.0 -c '(printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/tmp\",\"mcpServers\":[],\"_meta\":{\"kiro\":{\"executionTarget\":{\"kind\":\"cloud-sandbox\"},\"sessionSource\":\"remote\",\"repositories\":[\"octo/repo\"]}}}}"; sleep 40) | KIRO_API_KEY=dummy timeout 90 kiro-cli acp --agent-engine=v3 2>/dev/null'
-```
-
-Expected: the same `"id":1` result and `"id":2` `Identity provider is required`
-error.
-
 ## Live-test checklist (Lambda direct engine)
 
-The unit tests drive a fake engine. These checks need a deployed `lambda`
-stack and a real Kiro API key:
+The unit tests drive a fake engine. These checks need a deployed stack
+and a real Kiro API key:
 
 - **Launch, follow-up and delete.** `pnpm e2e` (see
   [the live end-to-end harness](#the-live-end-to-end-harness)) covers these
@@ -126,10 +114,6 @@ stack and a real Kiro API key:
   replays a running turn. A `catch_up_segment_mismatch` or a catch-up that
   stays pending after the turn finished in Kiro is a failure to report.
   Remove the variable afterwards.
-- **Fargate on 3.1.0** (only before deploying `fargate` or `both` with
-  `KIRO_CLI_VERSION=3.1.0`). `headless.ts` parses `[cloud] session <uuid>` from
-  `kiro-cli chat --cloud` stderr. Confirm a real 3.1.0 cloud chat still prints
-  that line.
 
 ## The live end-to-end harness
 
@@ -146,7 +130,7 @@ the exit code non-zero.
 
 ### Prerequisites
 
-- A deployed `lambda` stack.
+- A deployed stack.
 - Node 26 with `npx` and network access. The first run downloads
   `@modelcontextprotocol/inspector@2.14.0`.
 - A desktop browser for the sign-ins.
@@ -267,14 +251,14 @@ with code 130 and may leave sessions behind.
 
 ### Not covered
 
-These operations do not apply to the Lambda bridge path, so the harness does
-not test them:
+These operations do not apply to cloud sessions, so the harness does not test
+them:
 
 - **cancel**: a running cloud turn rejects it as an unsupported operation, and
   it is a no-op on an idle session;
 - **set_config** (model, effort, mode): a logged no-op on cloud sessions;
 - **permissions** (list and answer): cloud turns never ask;
-- **adopt**: rejected on the Lambda path;
+- **adopt**: rejected by the bridge;
 - **steer, and `whenBusy: "queue"` during a turn**: rejected as unsupported.
 
 The claude.ai connector and forced detach / catch-up stay manual checks (see

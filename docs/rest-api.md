@@ -13,37 +13,56 @@ The routes below come directly from the router
 Every `/v1/*` route requires a **Cognito OAuth access token** as
 `Authorization: Bearer <token>`. This is the token you get from
 `kiro-remote login` (see [users.md](./users.md)); it is **not** the `ksk_`
-`KIRO_API_KEY` (that key is only the bridge's credential for `kiro-cli` inside the
-deployed container and is never a REST/MCP bearer).
+`KIRO_API_KEY` (that key is only the bridge's credential for Kiro, read by the bridge Lambda
+functions, and is never a REST/MCP bearer).
 
 Scopes gate access: reads need `sessions:read`, writes need `sessions:write`,
 delete needs `sessions:delete`. A session is visible only to its creator's sub.
 
 ## Authenticated routes (under `/v1`)
 
-| Method | Path                                        | Notes                                                                                                                                   |
-| ------ | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/v1/capabilities`                          | Advertised capabilities, `kiro-cli` version (`kiroCliVersion`, `null` until a bridge has initialized; see below), active session count. |
-| GET    | `/v1/models`                                | Model ids the agent advertises.                                                                                                         |
-| GET    | `/v1/sessions`                              | List your sessions. Query: `status`, `limit` (default 20, max 100), `cursor`.                                                           |
-| POST   | `/v1/sessions`                              | Launch a session. Returns **202** `{ sessionId, turnId }`.                                                                              |
-| POST   | `/v1/sessions/adopt`                        | Adopt an existing Kiro session. Body `{ kiroSessionId }`.                                                                               |
-| GET    | `/v1/sessions/{id}`                         | Fetch one session.                                                                                                                      |
-| DELETE | `/v1/sessions/{id}`                         | Delete a session (needs `sessions:delete`).                                                                                             |
-| POST   | `/v1/sessions/{id}/turns`                   | Send a prompt. Returns **202**.                                                                                                         |
-| GET    | `/v1/sessions/{id}/turns/{turnId}`          | Fetch a turn.                                                                                                                           |
-| GET    | `/v1/sessions/{id}/events`                  | Long-poll the event log. Query: `after=<seq>`, `wait=<0..20s>`, `types`. Returns `{ events, nextCursor, turnStatus }`.                  |
-| POST   | `/v1/sessions/{id}/cancel`                  | Cancel the active turn.                                                                                                                 |
-| GET    | `/v1/sessions/{id}/permissions`             | List permission requests. Query: `status=pending`.                                                                                      |
-| POST   | `/v1/sessions/{id}/permissions/{requestId}` | Answer a permission. Body `{ optionId, consent? }`. 422 if `optionId` was not offered.                                                  |
-| PATCH  | `/v1/sessions/{id}/config`                  | Change `model` / `effort` / `mode`.                                                                                                     |
+| Method | Path                                        | Notes                                                                                                                                     |
+| ------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/capabilities`                          | Advertised capabilities, `kiro-cli` version (`kiroCliVersion`, `null` until the caps publisher has run; see below), active session count. |
+| GET    | `/v1/models`                                | Model ids the agent advertises.                                                                                                           |
+| GET    | `/v1/sessions`                              | List your sessions. Query: `status`, `limit` (default 20, max 100), `cursor`.                                                             |
+| POST   | `/v1/sessions`                              | Launch a session. Returns **202** `{ sessionId, turnId }`.                                                                                |
+| POST   | `/v1/sessions/adopt`                        | Adopt an existing Kiro session. Body `{ kiroSessionId }`.                                                                                 |
+| GET    | `/v1/sessions/{id}`                         | Fetch one session.                                                                                                                        |
+| DELETE | `/v1/sessions/{id}`                         | Delete a session (needs `sessions:delete`).                                                                                               |
+| POST   | `/v1/sessions/{id}/turns`                   | Send a prompt. Returns **202**.                                                                                                           |
+| GET    | `/v1/sessions/{id}/turns/{turnId}`          | Fetch a turn.                                                                                                                             |
+| GET    | `/v1/sessions/{id}/events`                  | Long-poll the event log. Query: `after=<seq>`, `wait=<0..20s>`, `types`. Returns `{ events, nextCursor, turnStatus }`.                    |
+| POST   | `/v1/sessions/{id}/cancel`                  | Cancel the active turn.                                                                                                                   |
+| GET    | `/v1/sessions/{id}/permissions`             | List permission requests. Query: `status=pending`.                                                                                        |
+| POST   | `/v1/sessions/{id}/permissions/{requestId}` | Answer a permission. Body `{ optionId, consent? }`. 422 if `optionId` was not offered.                                                    |
+| PATCH  | `/v1/sessions/{id}/config`                  | Change `model` / `effort` / `mode`.                                                                                                       |
+
+**On cloud sessions.** Every session the bridge launches is a Kiro cloud
+session, and some routes have no effect there:
+
+- `GET /v1/models` returning no models is expected for cloud and autonomous
+  sessions.
+- `POST /v1/sessions/adopt` is accepted, but the bridge rejects the adopt.
+- `PATCH /v1/sessions/{id}/config` is a logged no-op.
+- `GET /v1/sessions/{id}/permissions` always returns an empty list, so there
+  is never a pending request to answer: cloud turns never ask for permission.
+- `POST /v1/sessions/{id}/cancel` is rejected while a turn is running and is a
+  no-op when the session is idle.
+- `POST /v1/sessions/{id}/turns` with `whenBusy: "steer"` or `"queue"` is
+  rejected while a turn is running; use `"reject"` and send the prompt once
+  the turn settles.
+
+A rejection appears in `GET /v1/sessions/{id}/events` as a `turn.failed` event
+with `rawType: "operation_rejected"`. See
+[Operations cloud sessions do not support](./deploy.md#operations-cloud-sessions-do-not-support).
 
 `kiroCliVersion` comes from `agentInfo.version` in the ACP `initialize` result
 the bridge persists as `CONFIG#CAPS` (the same value backs the MCP
 `kiro_capabilities` tool). On the Lambda bridge, the engine's own `initialize`
 result has no `agentInfo`, so the caps publisher records the kiro-cli version
 the image was built from (its `KIRO_CLI_VERSION` build arg) instead. It is
-`null` — never a guessed value — until a bridge has initialized at least once,
+`null` — never a guessed value — until the caps publisher has run at least once,
 or if neither the agent nor the image reports a version.
 
 ### Request-body shapes

@@ -10,11 +10,11 @@ single CDK stack (`KiroRemoteStack`) into your own AWS account. It exposes:
 - an **MCP server** (stdio via the `kiro-remote` CLI, and Streamable HTTP at
   `<host>/mcp`),
 
-both backed by an ECS Fargate **bridge** that runs `kiro-cli` to launch and drive
-Kiro cloud sessions, provisioned and driven via `kiro-cli chat --cloud` (see
-[deploy.md](./deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only)).
-The `lambda` bridge mode instead talks ACP directly to kiro-cli's bundled engine
-(see [deploy.md](./deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
+both backed by a serverless **bridge**: two container-image Lambda functions
+built from one image. An SQS consumer launches and drives Kiro cloud sessions
+over ACP against kiro-cli's bundled engine, and a publisher records the
+engine's capabilities (see
+[deploy.md](./deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
 
 ## What to do next
 
@@ -42,10 +42,10 @@ work through the guides in this order:
 kiro-remote involves two unrelated secrets. Keeping them straight avoids most of
 the confusion:
 
-| Credential                 | What it is                                                                          | Where it lives                                                                      | Used for                                                                                       |
-| -------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `KIRO_API_KEY` (`ksk_...`) | Your personal Kiro API key from [app.kiro.dev](https://app.kiro.dev) → **API Keys** | AWS Secrets Manager, injected into the bridge container as an ECS secret at runtime | The bridge's own credential so `kiro-cli` can talk to Kiro cloud. **Never** a REST/MCP bearer. |
-| Cognito OAuth access token | A short-lived (15 min) bearer minted by the Cognito facade after you log in         | Your machine's keychain (via `kiro-remote login`)                                   | The `Authorization: Bearer <token>` you send to `/v1/*` and `/mcp`.                            |
+| Credential                 | What it is                                                                          | Where it lives                                                      | Used for                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `KIRO_API_KEY` (`ksk_...`) | Your personal Kiro API key from [app.kiro.dev](https://app.kiro.dev) → **API Keys** | AWS Secrets Manager, read at runtime by the bridge Lambda functions | The bridge's own credential so `kiro-cli` can talk to Kiro cloud. **Never** a REST/MCP bearer. |
+| Cognito OAuth access token | A short-lived (15 min) bearer minted by the Cognito facade after you log in         | Your machine's keychain (via `kiro-remote login`)                   | The `Authorization: Bearer <token>` you send to `/v1/*` and `/mcp`.                            |
 
 The `ksk_` key never leaves the server side and is never passed to the REST API or
 MCP. The OAuth token is what _you_ present to the API.
@@ -78,7 +78,7 @@ deployed.
 ```
 packages/core     shared zod schemas, auth primitives, domain types
 packages/auth      Cognito OAuth 2.1 facade construct + handlers
-packages/bridge    ECS Fargate bridge that runs kiro-cli (ACP)
+packages/bridge    Lambda bridge: SQS consumer + caps publisher (ACP to kiro-cli's engine)
 packages/api       REST API (/v1) + facade routing + /mcp + /openapi.json
 packages/mcp       the `kiro-remote` CLI and the MCP tools/transports
 packages/cdk       the CDK app and KiroRemoteStack
