@@ -26,9 +26,9 @@ work through the guides in this order:
    the prerequisite for everything else; the REST API and MCP server only exist
    once the stack is deployed.
 2. **[Register a user](./users.md)** — a user **is** required. Sign-up is operator
-   driven (there is no public signup), so you create your own user with the AWS
-   CLI and sign in with a password (passkeys are a planned enhancement, not yet
-   available).
+   driven (there is no public signup): you invite yourself with
+   `scripts/invite-user.sh`, bootstrap a passkey from the emailed code, and sign
+   in with that passkey from then on (no password is ever issued).
 3. **[Try the REST API](./rest-api.md)** — log in to get a token, then call
    `/v1/capabilities`, launch a session, and long-poll its events with `curl`.
 4. **[Use the MCP server](./mcp.md)** — run `kiro-remote login` once, then wire

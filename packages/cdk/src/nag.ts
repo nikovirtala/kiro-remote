@@ -103,7 +103,7 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     {
       id: "AwsSolutions-COG8",
       reason:
-        "The pool uses the Essentials feature plan (passwordless passkey-first sign-in, self-sign-up off); the Plus tier's threat-protection is not warranted for a single-tenant personal control plane.",
+        "The pool uses the Essentials feature plan (passkey sign-in, invite-only, self-sign-up off); the Plus tier's threat-protection is not warranted for a single-tenant personal control plane.",
     },
     // DynamoDB: PITR explicitly enabled; acknowledgement is informational.
     {
@@ -114,12 +114,12 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     {
       id: "AwsSolutions-COG1",
       reason:
-        "Self-sign-up is OFF and the pool is admin-created only; a password-complexity policy does not apply to an admin-provisioned, passkey-first pool.",
+        "Self-sign-up is OFF and the pool is admin-created only; a password-complexity policy does not apply: Cognito cannot remove the password first factor, so every invited user gets a random, discarded permanent password by scripts/invite-user.sh and account recovery is disabled, so no usable password exists.",
     },
     {
       id: "AwsSolutions-COG2",
       reason:
-        "No separately-required MFA step: the pool is passwordless and passkey-first, and a passkey login is already multi-factor (possession + required user verification). Cognito rejects requiring MFA on top of a passkey first-auth factor.",
+        "No separately-required MFA step: users sign in with a passkey (an emailed code only bootstraps the first one), and a passkey login is already multi-factor (possession + required user verification). Cognito rejects requiring MFA on top of a passkey first-auth factor.",
     },
     {
       id: "AwsSolutions-COG3",

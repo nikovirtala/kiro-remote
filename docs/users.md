@@ -4,25 +4,35 @@
 Cognito OAuth access token, and you can only get one by signing in as a user in
 the pool.
 
-The Cognito user pool is created with **self-sign-up OFF** and **`mfa: OFF`**.
-There is no public signup endpoint, so **you**, the operator, create users with
-the AWS CLI. Sign-in today is by **password** through managed login. Passwordless,
-passkey-first sign-in was the original design intent and remains a **planned
-enhancement**, but it is not usable yet: the pool's WebAuthn relying-party id is
-not configured, so the hosted UI cannot register a passkey. Until that WebAuthn
-RP-ID / Cognito custom-domain work lands, password is the only working first-auth
-factor.
+The Cognito user pool is **invite-only** (self-sign-up OFF, admin-create-user
+only) and users sign in with a **passkey** (WebAuthn, user verification
+required). There is no public signup endpoint, so **you**, the operator, invite
+users with [`scripts/invite-user.sh`](../scripts/invite-user.sh). No password is
+ever issued to anyone.
 
-This matches the auth construct
-([`packages/auth/src/construct.ts`](../packages/auth/src/construct.ts)):
-`selfSignUpEnabled: false`, `mfa: OFF`, and `AllowedFirstAuthFactors` that
-includes both password and passkey. The passkey factor is declared, but passkey
-registration requires WebAuthn RP-ID configuration that is not yet set on the
-pool, so in practice you sign in with a password.
+How it works, and what Cognito does and does not enforce:
 
-Because the current path is password with `mfa: OFF`, sign-in for this personal
-control plane is **single-factor** today. Hardening it (passkeys or a separate
-MFA step) is a planned follow-up; the notes below do not overstate the posture.
+- **Allowed first factors** are `PASSWORD`, `EMAIL_OTP` and `WEB_AUTHN`.
+  Cognito requires `PASSWORD` to stay enabled and offers no way to remove it.
+  The invite script therefore replaces the emailed temporary password with a
+  random 64+ character permanent password that is never shown or stored, and the
+  pool disables account recovery so "forgot password" cannot set a known one.
+  Net effect: no one knows a password, but the password factor is not switched
+  off in Cognito.
+- **Email code** is enabled only so an invitee can bootstrap their first
+  passkey. Cognito does not offer "email code until a passkey exists", so this
+  factor stays usable afterwards too; it is also the recovery path (below).
+  Anyone who controls the invitee's mailbox can therefore sign in with the email
+  code. Passkey-only is **not** enforced server-side: Cognito's pre-authentication
+  and pre-token-generation triggers do not expose which factor was used, so no
+  trigger can reject non-passkey logins. See [SECURITY.md](../SECURITY.md).
+- **MFA is `OFF`**, deliberately. Cognito rejects requiring MFA when passkey is
+  an allowed first factor, because a passkey sign-in is already multi-factor
+  (possession plus required biometric/PIN).
+- The **passkey relying-party id** defaults to the managed-login host
+  `<cognitoDomainPrefix>.auth.<region>.amazoncognito.com`, so registration works
+  without a custom domain. Passkeys are bound to it: changing the prefix or
+  region invalidates existing passkeys.
 
 ## 1. Find the user pool id
 
@@ -46,38 +56,44 @@ aws cloudformation list-stack-resources --stack-name KiroRemoteStack \
 (The facade client is the `AWS::Cognito::UserPoolClient` resource.) Use the
 resulting `<user-pool-id>` (and `<facade-client-id>`) below.
 
-## 2. Create the user
+## 2. Invite the user
 
 ```bash
-aws cognito-idp admin-create-user \
-  --user-pool-id <user-pool-id> \
-  --username you@example.com \
-  --message-action SUPPRESS
+./scripts/invite-user.sh you@example.com
+# or: pnpm run invite -- you@example.com
 ```
 
-`--message-action SUPPRESS` skips the invitation email (you are setting the
-password yourself in the next step). Adjust attributes to your pool's
-configuration as needed.
+The script reads `AWS_PROFILE` / `AWS_REGION` from `deploy.env`, looks up the
+`UserPoolId` stack output, creates the user (`email_verified=true`, invitation
+email sent), and immediately sets a random permanent password that it discards.
+If discarding fails it deletes the user again, so a user is never left with the
+emailed temporary password. The pool uses Cognito's default email sender, which
+is fine for personal use but capped at about 50 emails per day; use SES for more.
 
-## 3. Set a password
+The invitation email says to ignore the legacy temporary password (Cognito
+requires that placeholder in the template; it is already invalid).
 
-```bash
-aws cognito-idp admin-set-user-password \
-  --user-pool-id <user-pool-id> \
-  --username you@example.com \
-  --password '<a-strong-password>' \
-  --permanent
-```
+Do **not** create users with `aws cognito-idp admin-create-user` and
+`admin-set-user-password` by hand with a password you choose: that leaves a
+known, usable password.
 
-`--permanent` avoids the force-change-password state so you can sign in directly.
+## 3. Register a passkey (first sign-in)
+
+1. Run `kiro-remote login` (step 5) or connect your MCP client; managed login
+   opens in the browser.
+2. Enter your email, choose the **email code** option, and enter the code
+   Cognito emails you.
+3. Managed login prompts you to register a passkey. Accept and complete the
+   biometric/PIN prompt.
+4. From then on, choose the passkey option at sign-in.
 
 ## 4. Sign in
 
-Sign-in today is by **password** through managed login (the Cognito hosted UI).
-You do not open the managed-login domain directly; the login flow (via
+Sign in with your passkey through managed login (the Cognito hosted UI). You do
+not open the managed-login domain directly; the login flow (via
 `kiro-remote login`, see the next step) redirects you to the hosted UI with the
-full OAuth parameters, you enter your username and password, and you are
-redirected back with a code that is exchanged for tokens.
+full OAuth parameters, and you are redirected back with a code that is exchanged
+for tokens.
 
 Managed login is served from:
 
@@ -87,11 +103,15 @@ https://<cognitoDomainPrefix>.auth.<region>.amazoncognito.com
 
 with the prefix you passed as `-c cognitoDomainPrefix=...` at deploy time.
 
-> **Passkeys / MFA are a planned enhancement, not yet available.** The original
-> design intent was passwordless, passkey-first sign-in, but that needs WebAuthn
-> RP-ID configuration (and the Cognito custom-domain work that goes with it),
-> which is deferred. For now, password is the only working first-auth factor and
-> there is no separate MFA step.
+### Lost passkey / new device
+
+Sign in with the email code and register another passkey. To remove a lost
+passkey, the user can delete it from their own session (`aws cognito-idp
+delete-web-authn-credential` with their access token); Cognito has no
+admin-side API for it. If the mailbox or account is compromised, delete the user
+(`aws cognito-idp admin-delete-user`) and re-run the invite script. Note that a
+re-created user gets a new `sub`, so sessions created by the old one are no
+longer visible to them.
 
 ### "Login pages unavailable"
 
@@ -153,6 +173,17 @@ what you can do:
 A session is visible only to the user who created it (its `createdBy` sub).
 
 ## Troubleshooting sign-in
+
+- **No invitation email**: check spam; the default Cognito sender is rate
+  limited (about 50/day). The user exists once the script succeeds, so you can
+  also just ask them to start `kiro-remote login` and request an email code.
+- **Passkey registration fails or is not offered**: passkeys are bound to the
+  relying-party id (`<prefix>.auth.<region>.amazoncognito.com`); open managed
+  login from that host (via `kiro-remote login`), not a different domain, and
+  use a browser/authenticator that supports user verification.
+- **Password prompt appears**: managed login still lists the password option
+  because Cognito cannot disable it; nobody knows a password, so use the passkey
+  or email code instead.
 
 - **"Login pages unavailable"** — the app client has no managed-login branding
   style. Create one with `aws cognito-idp create-managed-login-branding` (see

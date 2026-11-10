@@ -18,6 +18,7 @@
     "synth": "./scripts/deploy.sh --synth",
     "diff": "./scripts/deploy.sh --diff",
     "deploy": "./scripts/deploy.sh",
+    "invite": "./scripts/invite-user.sh",
     "e2e": "pnpm --filter @nikovirtala/kiro-remote-e2e e2e"
   },
   "devDependencies": {

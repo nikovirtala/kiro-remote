@@ -39,6 +39,52 @@ describe("KiroRemoteAuth", () => {
     });
   });
 
+  test("is invite-only with a passkey-first factor set and the invite template", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      AdminCreateUserConfig: Match.objectLike({
+        AllowAdminCreateUserOnly: true,
+        InviteMessageTemplate: Match.objectLike({
+          EmailSubject: Match.stringLikeRegexp("passkey"),
+          EmailMessage: Match.stringLikeRegexp("register a passkey"),
+        }),
+      }),
+      Policies: Match.objectLike({
+        SignInPolicy: {
+          AllowedFirstAuthFactors: Match.arrayEquals(["PASSWORD", "EMAIL_OTP", "WEB_AUTHN"]),
+        },
+      }),
+      // No self-service password reset path to set a known password.
+      AccountRecoverySetting: {
+        RecoveryMechanisms: [{ Name: "admin_only", Priority: 1 }],
+      },
+    });
+  });
+
+  test("requires passkey user verification and defaults the RP id to the managed-login host", () => {
+    const pools = Object.values(template.findResources("AWS::Cognito::UserPool"));
+    const rp = JSON.stringify(
+      (pools[0]?.Properties as { WebAuthnRelyingPartyID?: unknown } | undefined)
+        ?.WebAuthnRelyingPartyID,
+    );
+    expect(rp).toContain("kiro-remote-test.auth.");
+    expect(rp).toContain(".amazoncognito.com");
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      WebAuthnUserVerification: "required",
+    });
+  });
+
+  test("honours an explicit passkeyRelyingPartyId override", () => {
+    const stack = new Stack(new App(), "RpStack");
+    new KiroRemoteAuth(stack, "Auth", {
+      publicBaseUrl: "https://kiro.example.com",
+      cognitoDomainPrefix: "x",
+      passkeyRelyingPartyId: "kiro.example.com",
+    });
+    Template.fromStack(stack).hasResourceProperties("AWS::Cognito::UserPool", {
+      WebAuthnRelyingPartyID: "kiro.example.com",
+    });
+  });
+
   test("creates the MCP resource server with three scopes", () => {
     template.hasResourceProperties("AWS::Cognito::UserPoolResourceServer", {
       Identifier: "https://kiro.example.com/mcp",
