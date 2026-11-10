@@ -1,23 +1,25 @@
 /**
- * Unit tests for the SERVERLESS bridge consumer (FEAT-003). These construct a
- * {@link LambdaConsumer} with NO AcpGateway -- only a Repository over the
- * in-memory DynamoDB/S3 fakes, a collecting metric sink, a scripted
- * HeadlessRunner, and a logger -- exactly the wiring the real Lambda uses, and
- * drive it with FAKE SQS event records.
+ * Tests for the SERVERLESS bridge consumer on the direct engine path. Each
+ * test builds a {@link LambdaConsumer} over the in-memory DynamoDB/S3 fakes,
+ * a recording catch-up scheduler, and a spawner that runs the fake ACP agent
+ * as the engine (one scenario per spawn, picked by call index), then drives it
+ * with fake SQS records.
  *
  * They prove the Lambda path:
- *  - drives headlessLaunch on a `launch` record and persists the SAME events as
- *    the ECS path (tool.call/tool.update/message.chunk, chat-cloud source),
- *    reaching idle;
- *  - resumes on a `prompt` record;
- *  - rejects an unsupported op (mid-turn steer / cancel / whenBusy=queue /
- *    adopt) by persisting a client-visible rejection and NOT returning it as a
- *    batch item failure (so SQS deletes it);
- *  - returns a GENUINE transient failure in batchItemFailures for retry;
- *  - is idempotent on a redelivered launch/prompt (a logged no-op).
- * Each assertion would FAIL if the handler logic were reverted.
+ *  - launches over a cloud-sandbox session/new and records the streamed turn;
+ *  - fails a launch loudly when session/new yields no session;
+ *  - runs a follow-up as a remote session/load (replay not recorded) + prompt,
+ *    also from a fresh consumer instance (META hydration);
+ *  - detaches near the deadline, schedules a catch-up, and finishes the turn
+ *    from catch-up runs that append only what the log is missing;
+ *  - ignores stale catch-ups and fails expired ones;
+ *  - deletes the remote session;
+ *  - rejects unsupported ops (acked) and retries transient failures.
  */
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   type Command,
@@ -26,20 +28,94 @@ import {
   sessionPk,
 } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
-import type { HeadlessRunner } from "../src/headless.ts";
+import {
+  CATCH_UP_DELAY_SECONDS,
+  CATCH_UP_MAX_AGE_MS,
+  type CatchUpMessage,
+  type CatchUpScheduler,
+} from "../src/catch-up.ts";
 import { LambdaConsumer, type SQSEvent, type SQSRecord } from "../src/lambda-consumer.ts";
 import { createLogger, type Logger } from "../src/logger.ts";
 import { CollectingMetricSink } from "../src/metrics.ts";
+import { echoed, exited, type FakeAgentSpawner, fakeAgentSpawner } from "./fake-agent-spawn.ts";
 import { FakeDocClient, FakeS3Client } from "./fakes.ts";
-import { cloudStreams } from "./harness.ts";
+import { initResult } from "./scenarios.ts";
 
-const CLOUD_ID = "08047063-f7b4-4ce5-b79a-2aea9a7a1d29";
+const CLOUD_ID = "sess_08047063-f7b4-4ce5-b79a-2aea9a7a1d29";
+
+/* ------------------------------ scenario bits ----------------------------- */
+
+const notify = (params: Record<string, unknown>) => ({
+  kind: "notify",
+  method: "session/update",
+  params,
+});
+const info = (kind: string, extra: Record<string, unknown> = {}) =>
+  notify({ sessionUpdate: "session_info_update", _meta: { kiro: { kind } }, ...extra });
+const chunk = (text: string) =>
+  notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+const toolCall = (id: string, status: string) =>
+  notify({ sessionUpdate: "tool_call", toolCallId: id, title: "fs_read README.md", status });
+const toolUpdate = (id: string, status: string) =>
+  notify({ sessionUpdate: "tool_call_update", toolCallId: id, status });
+const completion = () => info("turn_completion", { status: "end_turn" });
+
+/** A full launch turn streamed live. */
+const LAUNCH = {
+  initialize: initResult(),
+  newSessionId: CLOUD_ID,
+  onPrompt: {
+    messages: [
+      info("turn_start"),
+      chunk("Here is "),
+      chunk("the answer."),
+      toolCall("t1", "pending"),
+      toolUpdate("t1", "completed"),
+      completion(),
+      info("turn_end"),
+    ],
+    response: { stopReason: "end_turn" },
+  },
+};
+
+/** A launch whose turn is still running when the invocation detaches. */
+const LAUNCH_NEVER_ENDS = {
+  initialize: initResult(),
+  newSessionId: CLOUD_ID,
+  onPrompt: { messages: [info("turn_start"), chunk("Hello wo")], neverRespond: true },
+};
+
+/** The detached turn as a later session/load replays it (after an older turn). */
+const OLDER_TURN = [info("turn_start"), chunk("old"), completion(), info("turn_end")];
+const DETACHED_RUNNING = [
+  info("turn_start"),
+  chunk("Hello world"),
+  toolCall("t1", "pending"),
+  toolUpdate("t1", "completed"),
+];
+const DETACHED_DONE = [...DETACHED_RUNNING, completion(), info("turn_end")];
+
+function loadScenario(messages: unknown[]) {
+  return { initialize: initResult(), onLoad: { replayBeforeResponse: true, messages } };
+}
+
+/* --------------------------------- wiring --------------------------------- */
 
 function top(ev: { payload: unknown } | undefined): Record<string, unknown> {
   return (ev?.payload ?? {}) as Record<string, unknown>;
 }
 function inner(ev: { payload: unknown } | undefined): Record<string, unknown> {
   return (top(ev).payload ?? {}) as Record<string, unknown>;
+}
+function textOf(ev: { payload: unknown }): string {
+  return String((top(ev).content as { text?: unknown } | undefined)?.text);
+}
+
+class RecordingScheduler implements CatchUpScheduler {
+  readonly scheduled: { msg: CatchUpMessage; delaySeconds: number }[] = [];
+  async schedule(msg: CatchUpMessage, delaySeconds: number): Promise<void> {
+    this.scheduled.push({ msg, delaySeconds });
+  }
 }
 
 interface Wired {
@@ -48,10 +124,17 @@ interface Wired {
   metrics: CollectingMetricSink;
   logLines: string[];
   logger: Logger;
+  scheduler: RecordingScheduler;
+  spawner: FakeAgentSpawner;
+  /** Build another consumer over the same table, spawner and scheduler. */
+  newConsumer(): Promise<LambdaConsumer>;
   seed(id: string, overrides?: Partial<SessionMetaItem>): Promise<SessionMetaItem>;
 }
 
-async function wire(runner: HeadlessRunner): Promise<Wired> {
+async function wire(
+  scenarios: unknown[],
+  opts: { detachMarginMs?: number; ddb?: DynamoDBDocumentClient } = {},
+): Promise<Wired> {
   const ddb = new FakeDocClient();
   const s3 = new FakeS3Client();
   const docClient = ddb as unknown as DynamoDBDocumentClient;
@@ -65,27 +148,32 @@ async function wire(runner: HeadlessRunner): Promise<Wired> {
   const metrics = new CollectingMetricSink();
   const logLines: string[] = [];
   const logger = createLogger({ level: "debug", sink: (l) => logLines.push(l) });
+  const scheduler = new RecordingScheduler();
+  const spawner = fakeAgentSpawner(scenarios);
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "kiro-remote-ws-"));
   let clock = 1_000;
   const now = () => (clock += 1);
 
-  const consumer = await LambdaConsumer.create({
-    config: {
-      tableName: "kiro-remote-test",
-      bucketName: "kiro-remote-test-bucket",
-      workspaceRoot: "/workspace",
-      additionalDirectories: ["/workspace/shared"],
-      mcpServers: [],
-      region: "us-east-1",
-    },
-    ddb: docClient,
-    // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
-    s3: s3 as any,
-    headlessRunner: runner,
-    logger,
-    metricSink: metrics,
-    env: {},
-    now,
-  });
+  const newConsumer = () =>
+    LambdaConsumer.create({
+      config: {
+        tableName: "kiro-remote-test",
+        bucketName: "kiro-remote-test-bucket",
+        workspaceRoot,
+        catchUpQueueUrl: "https://sqs.test/catch-up",
+        region: "us-east-1",
+      },
+      ddb: opts.ddb ?? docClient,
+      // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
+      s3: s3 as any,
+      spawnFn: spawner.spawnFn,
+      catchUpScheduler: scheduler,
+      ...(opts.detachMarginMs !== undefined ? { detachMarginMs: opts.detachMarginMs } : {}),
+      logger,
+      metricSink: metrics,
+      env: { KIRO_API_KEY: "ksk_test_key" },
+      now,
+    });
 
   async function seed(
     id: string,
@@ -118,32 +206,16 @@ async function wire(runner: HeadlessRunner): Promise<Wired> {
     return item;
   }
 
-  return { consumer, repo, metrics, logLines, logger, seed };
+  const consumer = await newConsumer();
+  return { consumer, repo, metrics, logLines, logger, scheduler, spawner, newConsumer, seed };
 }
 
-/** A runner returning fixed plain-text cloud streams with a given exit code. */
-function fixedRunner(opts: {
-  code?: number | null;
-  cloudSessionId?: string;
-  tools?: { title: string; status?: string }[];
-  assistant?: string;
-}): HeadlessRunner {
-  return async () => ({
-    code: opts.code ?? 0,
-    ...cloudStreams({
-      cloudSessionId: opts.cloudSessionId ?? CLOUD_ID,
-      tools: opts.tools,
-      assistant: opts.assistant,
-    }),
-  });
-}
-
-/** Wrap a command as a single-record SQS event. */
-function event(command: Command, messageId = "m-1", groupId = command.sessionId): SQSEvent {
+/** Wrap a command or catch-up message as a single-record SQS event. */
+function event(body: Command | CatchUpMessage, messageId = "m-1"): SQSEvent {
   const record: SQSRecord = {
     messageId,
-    body: JSON.stringify(command),
-    attributes: { MessageGroupId: groupId },
+    body: JSON.stringify(body),
+    attributes: { MessageGroupId: body.sessionId },
   };
   return { Records: [record] };
 }
@@ -159,38 +231,93 @@ function launchCmd(id: string): Command {
   };
 }
 
+function promptCmd(id: string, turnId: string, prompt = "again"): Command {
+  return {
+    kind: "prompt",
+    sub: "user-sub-1",
+    sessionId: id,
+    commandId: `cmd-${turnId}`,
+    turnId,
+    prompt,
+    whenBusy: "steer",
+  };
+}
+
+/* ---------------------------------- tests --------------------------------- */
+
 describe("LambdaConsumer launch", () => {
-  test("a launch record drives headlessLaunch and persists the same events as the ECS path", async () => {
-    const w = await wire(
-      fixedRunner({
-        tools: [{ title: "fs_read /workspace/README.md", status: "Completed" }],
-        assistant: "Here is the answer.",
-      }),
-    );
+  test("a launch creates a cloud-sandbox session and records the streamed turn", async () => {
+    const w = await wire([LAUNCH]);
     await w.seed("sl");
 
     const res = await w.consumer.handleEvent(event(launchCmd("sl")));
-    // Synchronous settlement: the turn is DONE when handleEvent returns.
     expect(res.batchItemFailures).toEqual([]);
+
+    expect(echoed(w.logLines, "fakeAgentNewSessionParams")).toEqual([
+      {
+        cwd: expect.any(String),
+        mcpServers: [],
+        _meta: {
+          kiro: {
+            executionTarget: { kind: "cloud-sandbox" },
+            sessionSource: "remote",
+            repositories: ["octo/repo"],
+          },
+        },
+      },
+    ]);
+    expect(echoed(w.logLines, "fakeAgentPromptParams")).toEqual([
+      { sessionId: CLOUD_ID, prompt: [{ type: "text", text: "do it" }] },
+    ]);
 
     const session = await w.repo.getSession("sl");
     expect(session?.status).toBe("idle");
+    expect(session?.activeTurnId).toBeNull();
     expect(session?.kiroSessionId).toBe(CLOUD_ID);
     expect(w.metrics.sum("SessionsLaunched")).toBe(1);
     const launchPath = w.metrics.data.find((d) => d.name === "LaunchPath");
-    expect(launchPath?.dimensions?.path).toBe("headless");
+    expect(launchPath?.dimensions?.path).toBe("engine");
 
     const events = await w.repo.queryEvents("sl", 0, { limit: 100 });
-    const call = events.find((e) => e.type === "tool.call");
-    expect(top(call).toolCallId).toBe("1");
-    expect(inner(call).source).toBe("chat-cloud");
-    expect(top(events.find((e) => e.type === "tool.update")).status).toBe("Completed");
-    const message = events.find((e) => e.type === "message.chunk");
-    expect((top(message).content as { text?: string }).text).toBe("Here is the answer.");
+    expect(events.map((e) => e.type)).toEqual([
+      "session.info",
+      "message.chunk",
+      "tool.call",
+      "tool.update",
+      "turn.completed",
+      "session.info",
+    ]);
+    const turnId = events[0]?.turnId;
+    expect(turnId).toEqual(expect.any(String));
+    expect(events.every((e) => e.turnId === turnId)).toBe(true);
+    expect(textOf(events[1] as { payload: unknown })).toBe("Here is the answer.");
+    expect(top(events.find((e) => e.type === "tool.call")).toolCallId).toBe("t1");
+
+    // The engine child was stopped and no secret reached the logs or items.
+    const child = w.spawner.children[0];
+    if (!child) {
+      throw new Error("no engine spawned");
+    }
+    await exited(child);
+    expect(child.killed).toBe(true);
+    expect(w.logLines.join("\n")).not.toContain("ksk_");
+    expect(JSON.stringify(events)).not.toContain("ksk_");
+  });
+
+  test("a launch whose session/new yields no session fails loudly", async () => {
+    const w = await wire([{ initialize: initResult(), emptyNewSessionId: true }]);
+    await w.seed("sf");
+
+    const res = await w.consumer.handleEvent(event(launchCmd("sf")));
+    expect(res.batchItemFailures).toEqual([]);
+    expect((await w.repo.getSession("sf"))?.status).toBe("failed");
+    expect(w.metrics.sum("CloudLaunchFailed")).toBe(1);
+    expect(w.metrics.sum("SessionsLaunched")).toBe(0);
+    expect(w.logLines.some((l) => l.includes("cloud_launch_failed"))).toBe(true);
   });
 
   test("an idempotent redelivered launch is a no-op (still acked, one launch)", async () => {
-    const w = await wire(fixedRunner({ assistant: "a" }));
+    const w = await wire([LAUNCH]);
     await w.seed("sdup");
 
     const first = await w.consumer.handleEvent(event(launchCmd("sdup"), "m-1"));
@@ -200,80 +327,286 @@ describe("LambdaConsumer launch", () => {
 
     expect(w.logLines.some((l) => l.includes("launch_idempotent_skip"))).toBe(true);
     expect(w.metrics.sum("SessionsLaunched")).toBe(1);
+    expect(w.spawner.specs).toHaveLength(1);
+    expect(w.scheduler.scheduled).toEqual([]);
   });
 });
 
 describe("LambdaConsumer prompt (follow-up)", () => {
-  async function launched(w: Wired, id: string): Promise<void> {
-    await w.seed(id);
-    await w.consumer.handleEvent(event(launchCmd(id)));
+  const FOLLOW_UP = {
+    initialize: initResult(),
+    onLoad: {
+      replayBeforeResponse: true,
+      messages: [info("turn_start"), chunk("old history"), info("turn_end")],
+    },
+    onPrompt: {
+      messages: [info("turn_start"), chunk("follow up answer"), info("turn_end")],
+      response: { stopReason: "end_turn" },
+    },
+  };
+
+  async function assertFollowUp(w: Wired): Promise<void> {
+    expect(echoed(w.logLines, "fakeAgentLoadParams")).toEqual([
+      {
+        sessionId: CLOUD_ID,
+        cwd: expect.any(String),
+        mcpServers: [],
+        _meta: { kiro: { sessionSource: "remote" } },
+      },
+    ]);
+    const session = await w.repo.getSession("sr");
+    expect(session?.status).toBe("idle");
+    expect(session?.activeTurnId).toBeNull();
+    const events = await w.repo.queryEvents("sr", 0, { limit: 100 });
+    const texts = events.filter((e) => e.type === "message.chunk").map(textOf);
+    expect(texts).toContain("follow up answer");
+    // The load replay is history, never recorded.
+    expect(texts).not.toContain("old history");
+    const followUp = events.filter((e) => e.turnId === "turn-1");
+    expect(followUp.map((e) => e.type)).toEqual(["session.info", "message.chunk", "session.info"]);
   }
 
-  test("a prompt record resumes the session and persists the answer", async () => {
-    const w = await wire(fixedRunner({ assistant: "follow up answer" }));
-    await launched(w, "sr");
+  test("a prompt loads the remote session, records only the prompt stream, and ends idle", async () => {
+    const w = await wire([LAUNCH, FOLLOW_UP]);
+    await w.seed("sr");
+    await w.consumer.handleEvent(event(launchCmd("sr")));
 
-    const prompt: Command = {
-      kind: "prompt",
-      sub: "user-sub-1",
-      sessionId: "sr",
-      commandId: "cmd-prompt",
-      turnId: "turn-1",
-      prompt: "again",
-      whenBusy: "steer",
-    };
-    const res = await w.consumer.handleEvent(event(prompt, "m-prompt"));
+    const res = await w.consumer.handleEvent(event(promptCmd("sr", "turn-1"), "m-prompt"));
     expect(res.batchItemFailures).toEqual([]);
+    await assertFollowUp(w);
+  });
 
-    expect((await w.repo.getSession("sr"))?.status).toBe("idle");
-    const events = await w.repo.queryEvents("sr", 0, { limit: 100 });
-    const texts = events
-      .filter((e) => e.type === "message.chunk")
-      .map((e) => (top(e).content as { text?: string }).text);
-    expect(texts).toContain("follow up answer");
+  test("a follow-up on a NEW consumer instance hydrates from META", async () => {
+    const w = await wire([LAUNCH, FOLLOW_UP]);
+    await w.seed("sr");
+    await w.consumer.handleEvent(event(launchCmd("sr")));
+
+    const fresh = await w.newConsumer();
+    expect(fresh.runtime("sr")).toBeUndefined();
+    const res = await fresh.handleEvent(event(promptCmd("sr", "turn-1"), "m-prompt"));
+    expect(res.batchItemFailures).toEqual([]);
+    await assertFollowUp(w);
   });
 
   test("an idempotent redelivered prompt (same turn id) is a no-op", async () => {
-    const w = await wire(fixedRunner({ assistant: "x" }));
-    await launched(w, "sdd");
+    const w = await wire([LAUNCH, FOLLOW_UP]);
+    await w.seed("sdd");
+    await w.consumer.handleEvent(event(launchCmd("sdd")));
 
-    const prompt: Command = {
-      kind: "prompt",
-      sub: "user-sub-1",
-      sessionId: "sdd",
-      commandId: "cmd-prompt",
-      turnId: "t-7",
-      prompt: "p",
-      whenBusy: "steer",
-    };
-    const first = await w.consumer.handleEvent(event(prompt, "m-1"));
+    const first = await w.consumer.handleEvent(event(promptCmd("sdd", "t-7"), "m-1"));
     expect(first.batchItemFailures).toEqual([]);
-    const second = await w.consumer.handleEvent(event(prompt, "m-2"));
+    const second = await w.consumer.handleEvent(event(promptCmd("sdd", "t-7"), "m-2"));
     expect(second.batchItemFailures).toEqual([]);
     expect(w.logLines.some((l) => l.includes("prompt_idempotent_skip"))).toBe(true);
+    expect(w.spawner.specs).toHaveLength(2);
+  });
+});
+
+describe("LambdaConsumer detach + catch-up", () => {
+  async function detached(scenarios: unknown[]): Promise<{ w: Wired; msg: CatchUpMessage }> {
+    const w = await wire([LAUNCH_NEVER_ENDS, ...scenarios], { detachMarginMs: 100 });
+    await w.seed("sd");
+    const res = await w.consumer.handleEvent(event(launchCmd("sd")), {
+      remainingTimeMs: () => 300,
+    });
+    expect(res.batchItemFailures).toEqual([]);
+    const scheduled = w.scheduler.scheduled[0];
+    if (!scheduled) {
+      throw new Error("no catch-up scheduled");
+    }
+    return { w, msg: scheduled.msg };
+  }
+
+  async function turnEvents(w: Wired, turnId: string) {
+    return (await w.repo.queryEvents("sd", 0, { limit: 100 })).filter((e) => e.turnId === turnId);
+  }
+
+  test("a turn still running near the deadline detaches and schedules a catch-up", async () => {
+    const { w, msg } = await detached([]);
+
+    const session = await w.repo.getSession("sd");
+    expect(session?.status).toBe("running");
+    expect(session?.kiroSessionId).toBe(CLOUD_ID);
+    expect(session?.activeTurnId).toEqual(expect.any(String));
+    expect(w.scheduler.scheduled).toHaveLength(1);
+    expect(w.scheduler.scheduled[0]?.delaySeconds).toBe(CATCH_UP_DELAY_SECONDS);
+    expect(msg).toEqual({
+      kind: "catchUp",
+      sessionId: "sd",
+      kiroSessionId: CLOUD_ID,
+      turnId: session?.activeTurnId,
+      afterSeq: 0,
+      attempt: 1,
+      detachedAt: expect.any(Number),
+    });
+    expect(w.metrics.sum("TurnDetached")).toBe(1);
+    expect(w.logLines.some((l) => l.includes("turn_detached"))).toBe(true);
+
+    // What streamed before detaching is recorded (the buffered chunk flushed).
+    const events = await turnEvents(w, msg.turnId);
+    expect(events.map((e) => e.type)).toEqual(["session.info", "message.chunk"]);
+    expect(textOf(events[1] as { payload: unknown })).toBe("Hello wo");
+
+    // The engine child was killed; the cloud turn keeps running remotely.
+    const child = w.spawner.children[0];
+    if (!child) {
+      throw new Error("no engine spawned");
+    }
+    await exited(child);
+    expect(child.killed).toBe(true);
+  });
+
+  test("a catch-up through turn_end appends only the missing events and settles the turn", async () => {
+    const { w, msg } = await detached([loadScenario([...OLDER_TURN, ...DETACHED_DONE])]);
+    const before = (await turnEvents(w, msg.turnId)).length;
+
+    const res = await w.consumer.handleEvent(event(msg, "m-catch-up"));
+    expect(res.batchItemFailures).toEqual([]);
+
+    expect(echoed(w.logLines, "fakeAgentLoadParams")).toEqual([
+      {
+        sessionId: CLOUD_ID,
+        cwd: expect.any(String),
+        mcpServers: [],
+        _meta: { kiro: { sessionSource: "remote" } },
+      },
+    ]);
+    const added = (await turnEvents(w, msg.turnId)).slice(before);
+    expect(added.map((e) => e.type)).toEqual([
+      "message.chunk",
+      "tool.call",
+      "tool.update",
+      "turn.completed",
+      "session.info",
+    ]);
+    expect(textOf(added[0] as { payload: unknown })).toBe("rld");
+    expect(added.every((e) => e.replay === false)).toBe(true);
+    // Nothing from the older turn was appended.
+    const all = await w.repo.queryEvents("sd", 0, { limit: 100 });
+    expect(all.filter((e) => e.type === "message.chunk").map(textOf)).not.toContain("old");
+
+    const session = await w.repo.getSession("sd");
+    expect(session?.status).toBe("idle");
+    expect(session?.activeTurnId).toBeNull();
+    expect(w.metrics.sum("CatchUpCompleted")).toBe(1);
+    expect(w.scheduler.scheduled).toHaveLength(1);
+
+    // Delivering the same catch-up again writes nothing (the turn settled).
+    const count = (await w.repo.queryEvents("sd", 0, { limit: 100 })).length;
+    await w.consumer.handleEvent(event(msg, "m-catch-up-again"));
+    expect((await w.repo.queryEvents("sd", 0, { limit: 100 })).length).toBe(count);
+    expect(w.logLines.some((l) => l.includes("catch_up_stale"))).toBe(true);
+  });
+
+  test("a catch-up without turn_end records progress and reschedules attempt + 1", async () => {
+    const { w, msg } = await detached([
+      loadScenario([...OLDER_TURN, ...DETACHED_RUNNING]),
+      loadScenario([...OLDER_TURN, ...DETACHED_DONE]),
+    ]);
+
+    await w.consumer.handleEvent(event(msg, "m-catch-up-1"));
+    expect((await w.repo.getSession("sd"))?.status).toBe("running");
+    expect(w.scheduler.scheduled).toHaveLength(2);
+    const next = w.scheduler.scheduled[1]?.msg;
+    expect(next).toEqual({ ...msg, attempt: 2 });
+    expect(w.logLines.some((l) => l.includes("catch_up_pending"))).toBe(true);
+    const afterFirst = await turnEvents(w, msg.turnId);
+    expect(afterFirst.map((e) => e.type)).toEqual([
+      "session.info",
+      "message.chunk",
+      "message.chunk",
+      "tool.call",
+      "tool.update",
+    ]);
+
+    // The next attempt sees the same replay plus the end: only the end is new.
+    if (!next) {
+      throw new Error("no next catch-up");
+    }
+    await w.consumer.handleEvent(event(next, "m-catch-up-2"));
+    const added = (await turnEvents(w, msg.turnId)).slice(afterFirst.length);
+    expect(added.map((e) => e.type)).toEqual(["turn.completed", "session.info"]);
+    expect((await w.repo.getSession("sd"))?.status).toBe("idle");
+    expect(w.metrics.sum("CatchUpCompleted")).toBe(1);
+  });
+
+  test("a stale catch-up writes nothing and starts no engine", async () => {
+    const w = await wire([LAUNCH]);
+    await w.seed("ss", { status: "idle", kiroSessionId: CLOUD_ID, activeTurnId: null });
+    const msg: CatchUpMessage = {
+      kind: "catchUp",
+      sessionId: "ss",
+      kiroSessionId: CLOUD_ID,
+      turnId: "t-old",
+      afterSeq: 0,
+      attempt: 3,
+      detachedAt: 0,
+    };
+    const res = await w.consumer.handleEvent(event(msg));
+    expect(res.batchItemFailures).toEqual([]);
+    expect(await w.repo.queryEvents("ss", 0, { limit: 100 })).toEqual([]);
+    expect(w.spawner.specs).toHaveLength(0);
+    expect(w.scheduler.scheduled).toEqual([]);
+    expect(w.logLines.some((l) => l.includes("catch_up_stale"))).toBe(true);
+  });
+
+  test("an expired catch-up fails the turn and returns the session to idle", async () => {
+    const w = await wire([LAUNCH]);
+    await w.seed("se", { status: "running", kiroSessionId: CLOUD_ID, activeTurnId: "t-long" });
+    const msg: CatchUpMessage = {
+      kind: "catchUp",
+      sessionId: "se",
+      kiroSessionId: CLOUD_ID,
+      turnId: "t-long",
+      afterSeq: 0,
+      attempt: 360,
+      detachedAt: -CATCH_UP_MAX_AGE_MS,
+    };
+    const res = await w.consumer.handleEvent(event(msg));
+    expect(res.batchItemFailures).toEqual([]);
+
+    const events = await w.repo.queryEvents("se", 0, { limit: 100 });
+    const failed = events.find((e) => e.type === "turn.failed");
+    expect(failed?.rawType).toBe("catch_up_expired");
+    expect(failed?.turnId).toBe("t-long");
+    const session = await w.repo.getSession("se");
+    expect(session?.status).toBe("idle");
+    expect(session?.activeTurnId).toBeNull();
+    expect(w.metrics.sum("CatchUpExpired")).toBe(1);
+    expect(w.spawner.specs).toHaveLength(0);
+    expect(w.scheduler.scheduled).toEqual([]);
+  });
+});
+
+describe("LambdaConsumer delete", () => {
+  test("a delete sends the remote session/delete and marks the row deleted", async () => {
+    const w = await wire([LAUNCH, { initialize: initResult() }]);
+    await w.seed("sx");
+    await w.consumer.handleEvent(event(launchCmd("sx")));
+
+    const del: Command = {
+      kind: "delete",
+      sub: "user-sub-1",
+      sessionId: "sx",
+      commandId: "cmd-del",
+    };
+    const res = await w.consumer.handleEvent(event(del, "m-del"));
+    expect(res.batchItemFailures).toEqual([]);
+    expect(echoed(w.logLines, "fakeAgentDeleteParams")).toEqual([
+      { sessionId: CLOUD_ID, _meta: { kiro: { sessionSource: "remote" } } },
+    ]);
+    expect((await w.repo.getSession("sx"))?.status).toBe("deleted");
   });
 });
 
 describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
-  /**
-   * Make a session busy by beginning a resume WITHOUT settling it: drive a
-   * launch to idle, then reach into the runtime to begin a follow-up turn that
-   * leaves the machine turn=running (so a mid-turn op is rejected). We use a
-   * gated runner so the launch settles but the resume parks.
-   */
+  /** Seed a session whose turn META says is running. */
   async function busy(w: Wired, id: string): Promise<void> {
-    await w.seed(id);
-    await w.consumer.handleEvent(event(launchCmd(id)));
-    // Force the runtime into a running turn by starting (not settling) a resume.
-    const rt = w.consumer.runtime(id);
-    if (!rt) {
-      throw new Error("runtime missing");
-    }
-    rt.machine = { session: "running", turn: "running" };
+    await w.seed(id, { status: "running", activeTurnId: "t-running", kiroSessionId: CLOUD_ID });
   }
 
   test("a mid-turn steer is persisted as a rejection and NOT a batch failure", async () => {
-    const w = await wire(fixedRunner({ assistant: "a" }));
+    const w = await wire([LAUNCH]);
     await busy(w, "sste");
 
     const steer: Command = {
@@ -284,16 +617,16 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
       content: "interrupt",
     };
     const res = await w.consumer.handleEvent(event(steer, "m-steer"));
-    // PERMANENT rejection: acked (no batch failure), loud log + persisted event.
     expect(res.batchItemFailures).toEqual([]);
     expect(w.logLines.some((l) => l.includes("command_unsupported_cloud"))).toBe(true);
     const events = await w.repo.queryEvents("sste", 0, { limit: 100 });
     const rej = events.find((e) => e.type === "turn.failed" && e.rawType === "operation_rejected");
     expect(inner(rej).operation).toBe("steer");
+    expect(rej?.turnId).toBe("t-running");
   });
 
   test("a mid-turn cancel is persisted as a rejection and NOT a batch failure", async () => {
-    const w = await wire(fixedRunner({ assistant: "a" }));
+    const w = await wire([LAUNCH]);
     await busy(w, "sca");
 
     const cancel: Command = {
@@ -310,7 +643,7 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
   });
 
   test("a whenBusy=queue follow-up is persisted as a rejection and NOT a batch failure", async () => {
-    const w = await wire(fixedRunner({ assistant: "a" }));
+    const w = await wire([LAUNCH]);
     await busy(w, "squ");
 
     const queued: Command = {
@@ -327,10 +660,11 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
     const events = await w.repo.queryEvents("squ", 0, { limit: 100 });
     const rej = events.find((e) => e.type === "turn.failed" && e.rawType === "operation_rejected");
     expect(inner(rej).operation).toBe("queue");
+    expect(w.spawner.specs).toHaveLength(0);
   });
 
   test("adopt on the Lambda path is rejected loudly as unsupported (deferred to Fargate)", async () => {
-    const w = await wire(fixedRunner({ assistant: "a" }));
+    const w = await wire([LAUNCH]);
     await w.seed("sad");
 
     const adopt: Command = {
@@ -341,32 +675,21 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
       kiroSessionId: "existing-cloud-id",
     };
     const res = await w.consumer.handleEvent(event(adopt, "m-adopt"));
-    // Acked (not retried) but persisted as a client-visible rejection.
     expect(res.batchItemFailures).toEqual([]);
     expect(w.logLines.some((l) => l.includes("command_unsupported_cloud"))).toBe(true);
     const events = await w.repo.queryEvents("sad", 0, { limit: 100 });
     const rej = events.find((e) => e.type === "turn.failed" && e.rawType === "operation_rejected");
     expect(rej).toBeDefined();
     expect(inner(rej).operation).toBe("adopt");
-    // The rejection reason names the Fargate (ACP) bridge as the adopt host.
     expect(String(inner(rej).reason)).toContain("Fargate");
   });
 });
 
 describe("LambdaConsumer transient failures (retried via batchItemFailures)", () => {
   test("a transient dispatch failure returns the record id in batchItemFailures", async () => {
-    // Model a genuine TRANSIENT infrastructure failure: the consumer's repo read
-    // throws (e.g. DynamoDB throttling). settleLaunch swallows a runner throw
-    // (it drives the session to `failed`, never rethrows), so to exercise a
-    // RETHROWN transient we make a repo READ on the delete path throw a plain
-    // Error. We inject a ddb fake that throws once on a GetCommand so the error
+    // A DynamoDB read that throws once (e.g. throttling) on the delete path
     // propagates out of dispatch into handleRecord -> batchItemFailures.
     const ddb = new FakeDocClient();
-    const s3 = new FakeS3Client();
-    const docClient = ddb as unknown as DynamoDBDocumentClient;
-    const logLines: string[] = [];
-    const logger = createLogger({ level: "debug", sink: (l) => logLines.push(l) });
-
     let throwNext = false;
     const throwingDdb = {
       // biome-ignore lint/suspicious/noExplicitAny: wrap the fake's send to throw once.
@@ -378,11 +701,13 @@ describe("LambdaConsumer transient failures (retried via batchItemFailures)", ()
         return ddb.send(command);
       },
     } as unknown as DynamoDBDocumentClient;
-
+    const w = await wire([LAUNCH], { ddb: throwingDdb });
+    // Seed through the throwing client (it only throws once armed) so the
+    // consumer reads the same store.
     const repo = new Repository({
-      ddb: docClient,
+      ddb: throwingDdb,
       // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
-      s3: s3 as any,
+      s3: new FakeS3Client() as any,
       tableName: "kiro-remote-test",
       bucketName: "kiro-remote-test-bucket",
     });
@@ -409,22 +734,6 @@ describe("LambdaConsumer transient failures (retried via batchItemFailures)", ()
       GSI1SK: ts,
     });
 
-    const consumer = await LambdaConsumer.create({
-      config: {
-        tableName: "kiro-remote-test",
-        bucketName: "kiro-remote-test-bucket",
-        workspaceRoot: "/workspace",
-        region: "us-east-1",
-      },
-      ddb: throwingDdb,
-      // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
-      s3: s3 as any,
-      headlessRunner: fixedRunner({ assistant: "a" }),
-      logger,
-      metricSink: new CollectingMetricSink(),
-      env: {},
-    });
-
     throwNext = true;
     const del: Command = {
       kind: "delete",
@@ -432,19 +741,18 @@ describe("LambdaConsumer transient failures (retried via batchItemFailures)", ()
       sessionId: "st",
       commandId: "cmd-del",
     };
-    const res = await consumer.handleEvent(event(del, "m-del"));
-    // The transient error is returned for retry.
+    const res = await w.consumer.handleEvent(event(del, "m-del"));
     expect(res.batchItemFailures).toEqual([{ itemIdentifier: "m-del" }]);
-    expect(logLines.some((l) => l.includes("command_dispatch_error"))).toBe(true);
+    expect(w.logLines.some((l) => l.includes("command_dispatch_error"))).toBe(true);
   });
 });
 
 describe("LambdaConsumer batch ordering", () => {
   test("processes multiple records of the same group sequentially and reports only transient failures", async () => {
-    const w = await wire(fixedRunner({ assistant: "a" }));
+    const w = await wire([LAUNCH]);
     await w.seed("sb");
 
-    const steerAfterLaunch: Command = {
+    const cancelAfterLaunch: Command = {
       kind: "cancel",
       sub: "user-sub-1",
       sessionId: "sb",
@@ -461,7 +769,7 @@ describe("LambdaConsumer batch ordering", () => {
         },
         {
           messageId: "r2",
-          body: JSON.stringify(steerAfterLaunch),
+          body: JSON.stringify(cancelAfterLaunch),
           attributes: { MessageGroupId: "sb" },
         },
       ],

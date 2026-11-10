@@ -80,11 +80,12 @@ import type { Logger } from "./logger.ts";
 import type { Metrics } from "./metrics.ts";
 
 /**
- * Which launch path was taken for a session. Cloud launch + follow-up turns go
- * through `kiro-cli chat --cloud` subprocesses ("headless"); adopt reconnects an
- * existing cloud id over ACP ("adopt").
+ * Which launch path was taken for a session. On the Fargate bridge, cloud
+ * launch + follow-up turns go through `kiro-cli chat --cloud` subprocesses
+ * ("headless") and adopt reconnects an existing cloud id over ACP ("adopt");
+ * the Lambda bridge drives the bundled KAS engine directly ("engine").
  */
-export type LaunchPath = "headless" | "adopt";
+export type LaunchPath = "headless" | "adopt" | "engine";
 
 /**
  * A PERMANENT "this operation cannot be honored for a cloud session" rejection.
@@ -168,7 +169,11 @@ export interface CloudSessionDeps {
   repo: Repository;
   logger: Logger;
   metrics: Metrics;
-  headlessRunner: HeadlessRunner;
+  /**
+   * Runs `kiro-cli chat` subprocesses. Required by settleLaunch, settleResume
+   * and deleteCloud; the Lambda consumer drives the engine instead and omits it.
+   */
+  headlessRunner?: HeadlessRunner;
   /**
    * Maps the cloud (Kiro) session id back to our session id for update routing.
    * Shared with {@link SessionManager} so an adopted session and a cloud-launched
@@ -214,7 +219,7 @@ export class CloudSession {
   private readonly repo: Repository;
   private readonly logger: Logger;
   private readonly metrics: Metrics;
-  private readonly headlessRunner: HeadlessRunner;
+  private readonly runner: HeadlessRunner | undefined;
   private readonly kiroToLocal: Map<string, string>;
   private readonly now: () => number;
 
@@ -222,9 +227,16 @@ export class CloudSession {
     this.repo = deps.repo;
     this.logger = deps.logger;
     this.metrics = deps.metrics;
-    this.headlessRunner = deps.headlessRunner;
+    this.runner = deps.headlessRunner;
     this.kiroToLocal = deps.kiroToLocal;
     this.now = deps.now;
+  }
+
+  private get headlessRunner(): HeadlessRunner {
+    if (!this.runner) {
+      throw new Error("headless runner not configured");
+    }
+    return this.runner;
   }
 
   /* ------------------------------ event writes ----------------------------- */
