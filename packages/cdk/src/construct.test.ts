@@ -2,16 +2,19 @@
  * CDK assertion tests for the KiroRemote construct (aws-cdk-lib/assertions).
  *
  * Every test synthesizes the stack offline (no AWS, no Docker: the bridge image
- * defaults to a placeholder and the Lambdas to inline placeholders) and asserts
- * the security- and contract-critical properties:
+ * defaults to a placeholder ECR reference and the Lambdas to inline
+ * placeholders) and asserts the security- and contract-critical properties:
  *   - the table is on-demand + PITR + GSI1 + has a `ttl` TTL attribute,
  *   - the bucket blocks public access and is encrypted,
  *   - the command queue is FIFO,
  *   - the KMS key grants are scoped to EXACTLY the callback/token handler roles,
- *   - the Fargate service runs in public subnets with a public IP, a
- *     no-ingress / egress-443-only SG, and the VPC has no NAT gateway,
- *   - the task role is scoped to its own table/bucket/queue/secret,
- *   - KIRO_API_KEY is a Secrets Manager ECS `secrets` entry (not a plain env),
+ *   - there are no ECS or EC2 (VPC) resources,
+ *   - the Lambda bridge: two arm64 container-image functions (SQS consumer +
+ *     caps publisher), the catch-up queue, the event-source mappings, the caps
+ *     schedule, and the consumer role scoped to its own table/bucket/queues/
+ *     secret,
+ *   - KIRO_API_KEY is resolved at runtime from Secrets Manager via
+ *     KIRO_API_KEY_SECRET_ARN (never a plain env var),
  *   - the HTTP API stage is throttled via native API Gateway rate limiting and
  *     carries no WAFv2 web ACL (WAFv2 cannot attach to an HTTP API),
  *   - the Cognito pool has self-sign-up off + passwordless passkey-first sign-in and the resource
@@ -50,21 +53,20 @@ function synth(
 }
 
 /**
- * Synthesize the construct in a specific bridge mode. `bridgeMode` omitted ==>
- * the default (`fargate`). Used by the per-mode resource-graph tests below.
+ * Image-package Lambda functions (PackageType: Image) are the bridge consumer +
+ * caps publisher. The API/OAuth Lambdas are Zip-package, so this cleanly
+ * isolates the bridge functions.
  */
-function synthMode(bridgeMode?: "fargate" | "lambda" | "both"): { template: Template } {
-  const app = new App();
-  const stack = new Stack(app, "TestStack", {
-    env: { account: "111111111111", region: "eu-west-1" },
+function imageFunctions(t: Template): Array<{ Properties: Record<string, unknown> }> {
+  const found = t.findResources("AWS::Lambda::Function", {
+    Properties: { PackageType: "Image" },
   });
-  new KiroRemote(stack, "KiroRemote", {
-    publicBaseUrl: "https://kiro.example.com",
-    cognitoDomainPrefix: "kiro-remote-test",
-    allowedRepos: ["acme/*"],
-    ...(bridgeMode ? { bridgeMode } : {}),
-  });
-  return { template: Template.fromStack(stack) };
+  return Object.values(found) as Array<{ Properties: Record<string, unknown> }>;
+}
+
+/** The environment variables of a synthesized Lambda function. */
+function envOf(fn: { Properties: Record<string, unknown> }): Record<string, unknown> {
+  return (fn.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables ?? {};
 }
 
 /**
@@ -176,7 +178,8 @@ describe("KiroRemote", () => {
     expect(kmsActionsByRole[tokenRole as string]).toContain("kms:Decrypt");
     // The API/bridge roles never touch the key.
     expect(roleRefs.some((r) => r.includes("ApiFn"))).toBe(false);
-    expect(roleRefs.some((r) => r.includes("TaskRole"))).toBe(false);
+    expect(roleRefs.some((r) => r.includes("BridgeConsumerFn"))).toBe(false);
+    expect(roleRefs.some((r) => r.includes("BridgeCapsPublisherFn"))).toBe(false);
   });
 
   test("the managed API/OAuth Lambdas target the Node 26 runtime (nodejs26.x)", () => {
@@ -196,98 +199,37 @@ describe("KiroRemote", () => {
     }
   });
 
-  test("the VPC has no NAT gateway", () => {
-    template.resourceCountIs("AWS::EC2::NatGateway", 0);
+  test("there are no ECS or EC2 (VPC) resources", () => {
+    const types = Object.values(
+      template.toJSON().Resources as Record<string, { Type: string }>,
+    ).map((r) => r.Type);
+    expect(types.filter((t) => t.startsWith("AWS::ECS::"))).toEqual([]);
+    expect(types.filter((t) => t.startsWith("AWS::EC2::"))).toEqual([]);
   });
 
-  test("the Fargate service runs in public subnets with a public IP", () => {
-    template.hasResourceProperties("AWS::ECS::Service", {
-      DesiredCount: 1,
-      LaunchType: "FARGATE",
-      NetworkConfiguration: {
-        AwsvpcConfiguration: Match.objectLike({ AssignPublicIp: "ENABLED" }),
-      },
-    });
-    // The subnets map a public IP on launch (public subnets).
-    const publicSubnets = template.findResources("AWS::EC2::Subnet", {
-      Properties: { MapPublicIpOnLaunch: true },
-    });
-    expect(Object.keys(publicSubnets).length).toBeGreaterThanOrEqual(2);
-  });
-
-  test("the bridge SG has NO ingress and egress on 443 only", () => {
-    template.hasResourceProperties("AWS::EC2::SecurityGroup", {
-      SecurityGroupEgress: [
-        Match.objectLike({ FromPort: 443, ToPort: 443, IpProtocol: "tcp", CidrIp: "0.0.0.0/0" }),
-      ],
-    });
-    // No SecurityGroup carries an ingress rule.
-    const sgs = template.findResources("AWS::EC2::SecurityGroup");
-    for (const sg of Object.values(sgs)) {
-      const ingress = (sg.Properties as { SecurityGroupIngress?: unknown[] }).SecurityGroupIngress;
-      expect(ingress === undefined || ingress.length === 0).toBe(true);
+  test("the placeholder path (no lambdaImage prop) references the placeholder ECR repo, no Docker asset", () => {
+    // With no lambdaImage override both image functions point at the
+    // not-yet-deployed placeholder ECR repo -- NOT a CDK container asset
+    // (which would require a Docker build at synth time).
+    const images = imageFunctions(template);
+    expect(images.length).toBe(2);
+    for (const fn of images) {
+      const imageUri = JSON.stringify((fn.Properties.Code as { ImageUri?: unknown }).ImageUri);
+      expect(imageUri).toContain("kiro-remote-bridge-lambda-placeholder");
+      expect(imageUri).not.toContain("container-assets");
     }
   });
 
-  test("the placeholder path (no bridgeImage prop) references the placeholder registry image, no Docker asset", () => {
-    // With no bridgeImage override the task definition points at the public
-    // placeholder registry image -- a plain string image, NOT an ECR asset
-    // reference (which would require a Docker build at synth time).
-    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
-    const container = (
-      Object.values(taskDefs)[0].Properties as {
-        ContainerDefinitions: Array<{ Image: unknown }>;
-      }
-    ).ContainerDefinitions[0];
-    expect(container.Image).toBe("public.ecr.aws/amazonlinux/amazonlinux:2023");
-  });
-
-  test("the bridge container runs the bundle (command 'serve') and its healthCheck never touches the raw cli.ts path or an unimplemented subcommand", () => {
-    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
-    const def = (
-      Object.values(taskDefs)[0].Properties as {
-        ContainerDefinitions: Array<{
-          Command?: string[];
-          HealthCheck?: { Command?: string[] };
-        }>;
-      }
-    ).ContainerDefinitions[0];
-    // The container runs the bundled entrypoint's `serve` subcommand.
-    expect(def.Command).toEqual(["serve"]);
-    // The old probe ran `node packages/bridge/src/cli.ts healthcheck`, which
-    // both hit the node_modules .ts type-strip crash and called a subcommand
-    // cli.ts does not implement. The new probe must do neither.
-    const healthCommand = (def.HealthCheck?.Command ?? []).join(" ");
-    expect(healthCommand).not.toContain("cli.ts");
-    expect(healthCommand).not.toContain("healthcheck");
-    expect(healthCommand).toContain("process.exit(0)");
-  });
-
-  test("the bridge log group is RETAINed so a rollback keeps the container logs", () => {
-    template.hasResource("AWS::Logs::LogGroup", {
-      DeletionPolicy: "Retain",
-      UpdateReplacePolicy: "Retain",
-    });
-  });
-
-  test("the arm64 Graviton runtime platform is set on the task definition", () => {
-    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
-      RuntimePlatform: { CpuArchitecture: "ARM64", OperatingSystemFamily: "LINUX" },
-    });
-  });
-
-  test("KIRO_API_KEY is a Secrets Manager ECS secret, never a plain env var", () => {
-    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
-    const container = Object.values(taskDefs)[0].Properties as {
-      ContainerDefinitions: Array<{
-        Secrets?: Array<{ Name: string; ValueFrom: unknown }>;
-        Environment?: Array<{ Name: string }>;
-      }>;
-    };
-    const def = container.ContainerDefinitions[0];
-    expect(def.Secrets?.some((s) => s.Name === "KIRO_API_KEY")).toBe(true);
-    // It must NOT appear as a plain environment variable.
-    expect(def.Environment?.some((e) => e.Name === "KIRO_API_KEY")).not.toBe(true);
+  test("the bridge functions' env raises verbosity so an engine crash is self-explanatory", () => {
+    // BRIDGE_LOG_LEVEL=debug makes the bridge verbose, and KIRO_LOG_LEVEL=debug
+    // makes the engine ITSELF emit verbose diagnostics to stderr (which the
+    // transport surfaces on failure).
+    const images = imageFunctions(template);
+    expect(images.length).toBe(2);
+    for (const fn of images) {
+      expect(envOf(fn).BRIDGE_LOG_LEVEL).toBe("debug");
+      expect(envOf(fn).KIRO_LOG_LEVEL).toBe("debug");
+    }
   });
 
   test("without kiroApiKeySecretArn the construct CREATES the KIRO_API_KEY secret (synth/dev fallback)", () => {
@@ -296,15 +238,16 @@ describe("KiroRemote", () => {
     // on rollback).
     template.resourceCountIs("AWS::SecretsManager::Secret", 1);
     template.hasResourceProperties("AWS::SecretsManager::Secret", {
-      Description: "Kiro API key (ksk_) injected into the bridge as an ECS secret",
+      Description: "Kiro API key (ksk_) read by the bridge Lambda functions at runtime",
     });
   });
 
-  test("with kiroApiKeySecretArn the construct IMPORTS the pre-existing secret: no created secret, bridge + roles reference THAT ARN", () => {
+  test("with kiroApiKeySecretArn the construct IMPORTS the pre-existing secret: no created secret, bridge functions + roles reference THAT ARN", () => {
     // A failed deploy must NOT delete the key, so a real deploy points at a
     // pre-existing secret by its full ARN. The construct imports it (no
-    // AWS::SecretsManager::Secret resource), wires it as the KIRO_API_KEY ECS
-    // secret, and grants GetSecretValue on THAT exact ARN -- never a wildcard.
+    // AWS::SecretsManager::Secret resource), passes it to the bridge functions
+    // as KIRO_API_KEY_SECRET_ARN, and grants GetSecretValue on THAT exact ARN
+    // -- never a wildcard.
     const arn =
       "arn:aws:secretsmanager:eu-north-1:111122223333:secret:kiro-remote/kiro-api-key-AbCdEf";
     const { template: t } = synth("eu-north-1", undefined, arn);
@@ -312,18 +255,15 @@ describe("KiroRemote", () => {
     // The secret is imported, not created.
     t.resourceCountIs("AWS::SecretsManager::Secret", 0);
 
-    // The bridge container's KIRO_API_KEY secret references the provided ARN.
-    const taskDefs = t.findResources("AWS::ECS::TaskDefinition");
-    const def = (
-      Object.values(taskDefs)[0].Properties as {
-        ContainerDefinitions: Array<{ Secrets?: Array<{ Name: string; ValueFrom: string }> }>;
-      }
-    ).ContainerDefinitions[0];
-    const apiKeySecret = def.Secrets?.find((s) => s.Name === "KIRO_API_KEY");
-    expect(apiKeySecret?.ValueFrom).toBe(arn);
+    // Both bridge functions resolve the key from the provided ARN.
+    const images = imageFunctions(t);
+    expect(images.length).toBe(2);
+    for (const fn of images) {
+      expect(envOf(fn).KIRO_API_KEY_SECRET_ARN).toBe(arn);
+    }
 
-    // Both the task role and the execution role are granted GetSecretValue on
-    // the exact imported ARN (no created secret Ref, no wildcard resource).
+    // Exactly the consumer and caps-publisher roles are granted GetSecretValue
+    // on the exact imported ARN (no created secret Ref, no wildcard resource).
     const policies = t.findResources("AWS::IAM::Policy");
     const secretGrantRoles = new Set<string>();
     for (const policy of Object.values(policies)) {
@@ -347,49 +287,8 @@ describe("KiroRemote", () => {
       }
     }
     expect(secretGrantRoles.size).toBe(2);
-    expect([...secretGrantRoles].some((r) => r.includes("BridgeTaskTaskRole"))).toBe(true);
-    expect([...secretGrantRoles].some((r) => r.includes("ExecutionRole"))).toBe(true);
-  });
-
-  test("the bridge container env raises verbosity so an ACP child crash is self-explanatory", () => {
-    // Without a visible log level the bridge logger (default info) drops the
-    // ACP child's own stderr, so a kiro-cli exit-1 on startup shows only a code
-    // with no reason. BRIDGE_LOG_LEVEL=debug makes the bridge verbose, and
-    // KIRO_LOG_LEVEL=debug makes kiro-cli ITSELF emit verbose startup
-    // diagnostics to stderr (which the transport surfaces on failure).
-    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
-    const def = (
-      Object.values(taskDefs)[0].Properties as {
-        ContainerDefinitions: Array<{ Environment?: Array<{ Name: string; Value: unknown }> }>;
-      }
-    ).ContainerDefinitions[0];
-    const env = new Map((def.Environment ?? []).map((e) => [e.Name, e.Value]));
-    expect(env.get("BRIDGE_LOG_LEVEL")).toBe("debug");
-    expect(env.get("KIRO_LOG_LEVEL")).toBe("debug");
-  });
-
-  test("the task role is scoped to its own table/bucket/queue/secret", () => {
-    // The task-role policy references the table, bucket, queue, and secret -- and
-    // only DynamoDB/S3/SQS/SecretsManager actions (no Action:* ).
-    const policies = template.findResources("AWS::IAM::Policy");
-    const taskPolicy = Object.values(policies).find((p) =>
-      ((p.Properties as { Roles?: Array<{ Ref?: string }> }).Roles ?? []).some((r) =>
-        (r.Ref ?? "").includes("BridgeTaskTaskRole"),
-      ),
-    );
-    expect(taskPolicy).toBeDefined();
-    const doc = (taskPolicy as { Properties: { PolicyDocument: { Statement: unknown[] } } })
-      .Properties.PolicyDocument;
-    const actions = (doc.Statement as Array<{ Action?: string | string[] }>).flatMap((s) =>
-      ([] as string[]).concat(s.Action ?? []),
-    );
-    const services = new Set(actions.map((a) => a.split(":")[0]));
-    expect(services.has("dynamodb")).toBe(true);
-    expect(services.has("s3")).toBe(true);
-    expect(services.has("sqs")).toBe(true);
-    expect(services.has("secretsmanager")).toBe(true);
-    // No star-everything action.
-    expect(actions).not.toContain("*");
+    expect([...secretGrantRoles].some((r) => r.includes("BridgeConsumerFn"))).toBe(true);
+    expect([...secretGrantRoles].some((r) => r.includes("BridgeCapsPublisherFn"))).toBe(true);
   });
 
   test("the HTTP API stage is throttled (native API Gateway rate limiting; WAFv2 cannot attach to an HTTP API)", () => {
@@ -543,54 +442,17 @@ describe("KiroRemote", () => {
 });
 
 /**
- * The deploy-time bridge-mode toggle (FEAT-004). These tests synthesize the
- * construct in each mode and assert the per-mode resource graph, so they would
- * FAIL if the toggle were ignored (e.g. a Lambda consumer leaking into the
- * default stack, or the FargateService being dropped from `both`).
+ * The Lambda bridge resource graph: the consumer + caps publisher, their
+ * queues, event-source mappings, schedule and scoped grants.
  */
-describe("KiroRemote bridge mode", () => {
-  // Image-package Lambda functions (PackageType: Image) are the serverless
-  // bridge consumer + caps publisher. The API/OAuth Lambdas are Zip-package, so
-  // this cleanly isolates the Lambda-path functions.
-  function imageFunctions(t: Template): Array<{ Properties: Record<string, unknown> }> {
-    const found = t.findResources("AWS::Lambda::Function", {
-      Properties: { PackageType: "Image" },
-    });
-    return Object.values(found) as Array<{ Properties: Record<string, unknown> }>;
-  }
+describe("KiroRemote Lambda bridge", () => {
+  let t: Template;
 
-  test("fargate (default) provisions exactly one FargateService and NO Lambda consumer/event-source", () => {
-    const { template: t } = synthMode(); // default
-    // Exactly one Fargate service, as today.
-    t.resourceCountIs("AWS::ECS::Service", 1);
-    // No container-image (serverless bridge) functions.
-    expect(imageFunctions(t).length).toBe(0);
-    // No SQS event-source mapping (the Fargate bridge polls the queue itself).
-    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 0);
-    // No caps-publisher schedule.
-    t.resourceCountIs("AWS::Events::Rule", 0);
-    // The queue visibility timeout is unchanged at 60s in the default stack.
-    t.hasResourceProperties("AWS::SQS::Queue", { VisibilityTimeout: 60 });
-    // Only the command queue: the catch-up queue is Lambda-path only.
-    t.resourceCountIs("AWS::SQS::Queue", 1);
+  beforeAll(() => {
+    t = synth().template;
   });
 
-  test("explicit fargate mode equals the default (one FargateService, no Lambda bridge)", () => {
-    const { template: t } = synthMode("fargate");
-    t.resourceCountIs("AWS::ECS::Service", 1);
-    expect(imageFunctions(t).length).toBe(0);
-    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 0);
-  });
-
-  test("lambda mode provisions the arm64 DockerImageFunction consumer wired to the FIFO queue, and NO FargateService", () => {
-    const { template: t } = synthMode("lambda");
-
-    // Fargate is NOT provisioned in lambda-only mode.
-    t.resourceCountIs("AWS::ECS::Service", 0);
-    t.resourceCountIs("AWS::ECS::TaskDefinition", 0);
-    // No VPC/NAT either (the whole Fargate networking block is skipped).
-    t.resourceCountIs("AWS::EC2::NatGateway", 0);
-
+  test("provisions the arm64 DockerImageFunction consumer wired to the FIFO queue", () => {
     // Two container-image functions: the SQS consumer + the caps publisher.
     const images = imageFunctions(t);
     expect(images.length).toBe(2);
@@ -617,9 +479,8 @@ describe("KiroRemote bridge mode", () => {
       };
       expect(props.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
       expect(props.BatchSize).toBe(1);
-      // In `lambda`-ONLY mode there is NO Fargate to serve a filtered-out
-      // adopt, so the consumer is deliberately NOT filtered: it still receives
-      // `adopt` and rejects it loudly. The catch-up mapping is never filtered.
+      // Neither mapping is filtered: the consumer receives every command,
+      // including `adopt`, and rejects unsupported ones loudly.
       expect(props.FilterCriteria).toBeUndefined();
     }
 
@@ -635,8 +496,6 @@ describe("KiroRemote bridge mode", () => {
     });
 
     // CATCH_UP_QUEUE_URL is on the consumer only, not the caps publisher.
-    const envOf = (fn: { Properties: Record<string, unknown> }) =>
-      (fn.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables ?? {};
     expect(
       envOf(consumer as { Properties: Record<string, unknown> }).CATCH_UP_QUEUE_URL,
     ).toBeDefined();
@@ -653,11 +512,10 @@ describe("KiroRemote bridge mode", () => {
     });
   });
 
-  test("lambda mode grants the consumer the SAME scoped data-plane access the Fargate task role has", () => {
-    const { template: t } = synthMode("lambda");
+  test("grants the consumer scoped data-plane access to its own table/bucket/queues/secret", () => {
     // Find the consumer role (the function with the 15-minute timeout) and
-    // collect the service prefixes it is granted. It must cover exactly the
-    // same services as the Fargate task role: DynamoDB, S3, SQS, SecretsManager.
+    // collect the service prefixes it is granted: DynamoDB, S3, SQS,
+    // SecretsManager.
     const policies = t.findResources("AWS::IAM::Policy");
     const servicesByRole: Record<string, Set<string>> = {};
     for (const policy of Object.values(policies)) {
@@ -686,8 +544,7 @@ describe("KiroRemote bridge mode", () => {
     expect(svc.has("*")).toBe(false);
   });
 
-  test("lambda mode resolves KIRO_API_KEY at runtime from Secrets Manager (ARN env, never a plain key)", () => {
-    const { template: t } = synthMode("lambda");
+  test("resolves KIRO_API_KEY at runtime from Secrets Manager (ARN env, never a plain key)", () => {
     const images = imageFunctions(t);
     for (const fn of images) {
       const env = (fn.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables;
@@ -700,63 +557,19 @@ describe("KiroRemote bridge mode", () => {
     }
   });
 
-  test("the managed Lambdas target nodejs26.x in lambda and both modes (reversion-sensitive)", () => {
-    // Guard the Node 26 choice across the modes that also provision the
+  test("the managed Lambdas target nodejs26.x alongside the bridge functions (reversion-sensitive)", () => {
+    // Guard the Node 26 choice in a stack that also provisions the
     // container-image bridge functions AND a custom-resource provider framework
     // Lambda: managedFunctionRuntimes isolates OUR three managed functions by
     // logical id, so neither the image functions (no Runtime) nor the CDK
     // framework Lambda can mask a regression. Reverting the shim to nodejs22.x
     // makes this FAIL.
-    for (const mode of ["lambda", "both"] as const) {
-      const { template: t } = synthMode(mode);
-      const runtimes = managedFunctionRuntimes(t);
-      // The three managed API/OAuth functions are present in both modes.
-      expect(runtimes.length).toBe(3);
-      for (const runtime of runtimes) {
-        expect(runtime).toBe("nodejs26.x");
-      }
-      // Sanity: the two container-image bridge functions carry no Runtime.
-      expect(imageFunctions(t).length).toBe(2);
+    const runtimes = managedFunctionRuntimes(t);
+    expect(runtimes.length).toBe(3);
+    for (const runtime of runtimes) {
+      expect(runtime).toBe("nodejs26.x");
     }
-  });
-
-  test("both mode provisions the FargateService AND the Lambda consumer", () => {
-    const { template: t } = synthMode("both");
-    // Fargate is retained.
-    t.resourceCountIs("AWS::ECS::Service", 1);
-    // AND the serverless bridge (consumer + publisher) exists.
+    // Sanity: the two container-image bridge functions carry no Runtime.
     expect(imageFunctions(t).length).toBe(2);
-    // Command-queue mapping + catch-up-queue mapping.
-    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 2);
-    t.resourceCountIs("AWS::Events::Rule", 1);
-  });
-
-  test("both mode routes adopt to Fargate by filtering it out of the Lambda consumer", () => {
-    const { template: t } = synthMode("both");
-    // The Lambda consumer's event-source mapping carries a FilterCriteria that
-    // excludes `adopt` so SQS never delivers an adopt command to the Lambda;
-    // it stays on the queue for the Fargate intake loop, which honors the ACP
-    // adopt/session-load path. This makes "adopt goes to Fargate" actually hold
-    // in `both` mode rather than being a race between the two consumers.
-    t.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
-      FunctionResponseTypes: ["ReportBatchItemFailures"],
-      BatchSize: 1,
-      FilterCriteria: {
-        Filters: [
-          {
-            // SQS body filtering: the command JSON's `kind` must be anything
-            // but "adopt". The pattern is a JSON string (what Lambda expects).
-            Pattern: Match.stringLikeRegexp('"kind".*"anything-but".*"adopt"'),
-          },
-        ],
-      },
-    });
-    // Exactly one mapping carries the filter; the catch-up mapping has none.
-    const mappings = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"));
-    expect(mappings.length).toBe(2);
-    const filtered = mappings.filter(
-      (esm) => (esm.Properties as { FilterCriteria?: unknown }).FilterCriteria !== undefined,
-    );
-    expect(filtered.length).toBe(1);
   });
 });

@@ -126,25 +126,6 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
       reason:
         "AdvancedSecurityMode is left at the feature-plan default for a single-tenant personal control plane; the facade API uses native API Gateway stage throttling (WAFv2 cannot be associated with an API Gateway v2 HTTP API).",
     },
-    // ECS: non-secret env vars are only resource names/limits; KIRO_API_KEY is
-    // injected via ECS `secrets` from Secrets Manager, never a plain env var.
-    {
-      id: "AwsSolutions-ECS2",
-      reason:
-        "The only non-secret environment variables are resource names/limits (table, bucket, queue, region, caps); KIRO_API_KEY is injected via ECS secrets from Secrets Manager.",
-    },
-    // EC2 SG: the bridge SG has NO ingress and egress on 443 only.
-    {
-      id: "AwsSolutions-EC23",
-      reason:
-        "The bridge security group has NO ingress; egress is restricted to tcp/443 to reach AWS service endpoints and kiro.dev from a public-subnet, no-NAT design.",
-    },
-    // VPC flow logs omitted for this single-task, public-subnet, no-NAT VPC.
-    {
-      id: "AwsSolutions-VPC7",
-      reason:
-        "Flow logs are omitted for this single-task, public-subnet, no-NAT VPC whose only traffic is 443 egress.",
-    },
     // API Gateway HTTP API observability + authorization boundary.
     {
       id: "AwsSolutions-APIG1",
@@ -170,26 +151,22 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
         "No DLQ: command messages are idempotent and left for visibility-timeout redelivery; catch-up messages are re-scheduled by the consumer until the turn settles or hits its 6 h limit; both expire via the retention period rather than dead-lettering.",
     },
     // ---------------------------------------------------------------------
-    // Serverless (Lambda) bridge path -- provisioned only in the `lambda` and
-    // `both` bridge modes (FEAT-004). The SQS FIFO consumer and the
-    // caps-publisher are container-image (DockerImageFunction) Lambdas whose
-    // Node version comes entirely from packages/bridge/Dockerfile.lambda (the
-    // AWS Lambda nodejs:26 base, also public preview) rather than a CDK
-    // `runtime:` prop, so they carry no NODEJS_26_X shim. They reuse the SAME
-    // scoped grants the Fargate task role gets
+    // Lambda bridge. The SQS FIFO consumer and the caps-publisher are
+    // container-image (DockerImageFunction) Lambdas whose Node version comes
+    // entirely from packages/bridge/Dockerfile.lambda (the AWS Lambda
+    // nodejs:26 base, also public preview) rather than a CDK `runtime:` prop,
+    // so they carry no NODEJS_26_X shim. Their scoped grants
     // (table.grantReadWriteData / bucket.grantReadWrite /
-    // commandQueue.grantConsumeMessages / kiroApiKeySecret.grantRead). Those
-    // grants emit the EXACT same wildcard shapes already acknowledged above
-    // (the S3 object-level / action wildcards, the DynamoDB GSI index wildcard)
-    // and the Lambda execution roles use the same AWS-managed basic-execution
-    // policy (AwsSolutions-IAM4) and the same pinned latest Node runtime
-    // (AwsSolutions-L1). Because acknowledgments cascade to descendants, the
-    // entries above cover the Lambda-path functions too; no NEW finding ids are
-    // introduced by enabling the `lambda`/`both` modes. The CDK Trigger custom
-    // resource (the one-shot post-deploy caps publish) is likewise covered by
-    // the cascading IAM4/L1 acknowledgments. This block is a deliberate
-    // no-additional-suppression marker, re-verified by the per-mode nag tests
-    // in nag.test.ts (lambda + both synth green).
+    // commandQueue.grantConsumeMessages / kiroApiKeySecret.grantRead) emit the
+    // EXACT same wildcard shapes already acknowledged above (the S3
+    // object-level / action wildcards, the DynamoDB GSI index wildcard), and
+    // their execution roles use the same AWS-managed basic-execution policy
+    // (AwsSolutions-IAM4). Because acknowledgments cascade to descendants, the
+    // IAM4/L1/IAM5 entries above cover the bridge functions too. The CDK
+    // Trigger custom resource (the one-shot post-deploy caps publish) is
+    // likewise covered by the cascading IAM4/L1 acknowledgments. This block is
+    // a deliberate no-additional-suppression marker, re-verified by the
+    // default-stack nag test in nag.test.ts.
     // ---------------------------------------------------------------------
   );
 }

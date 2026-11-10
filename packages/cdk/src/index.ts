@@ -22,7 +22,6 @@ export {
   DEFAULT_CIMD_ALLOWED_HOST,
   DEFAULT_EVENT_TTL_DAYS,
   DEFAULT_MAX_CLOUD_SESSIONS,
-  DEFAULT_PERMISSION_TIMEOUT,
   KiroRemote,
   type KiroRemoteProps,
 } from "./construct.ts";

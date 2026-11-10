@@ -155,7 +155,6 @@ AWS_REGION="${AWS_REGION:-$DEFAULT_AWS_REGION}"
 export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
 
 KIRO_CLI_VERSION="${KIRO_CLI_VERSION:-}"
-BRIDGE_MODE="${BRIDGE_MODE:-lambda}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-https://$DEFAULT_DOMAIN}"
 COGNITO_DOMAIN_PREFIX="${COGNITO_DOMAIN_PREFIX:-kiro-remote}"
 ALLOWED_REPOS="${ALLOWED_REPOS:-*/*}"
@@ -166,14 +165,15 @@ HOSTED_ZONE_NAME="${HOSTED_ZONE_NAME:-}"
 CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
 KIRO_API_KEY_SECRET_ARN="${KIRO_API_KEY_SECRET_ARN:-}"
 
+if [ -n "${BRIDGE_MODE:-}" ]; then
+  printf 'WARNING: BRIDGE_MODE in %s is obsolete and ignored (the Lambda bridge is the only bridge); remove the line.\n' "$CONFIG_FILE" >&2
+  unset BRIDGE_MODE
+fi
+
 [ -n "$KIRO_CLI_VERSION" ] || die "KIRO_CLI_VERSION is not set in $CONFIG_FILE.
 It pins the kiro-cli version baked into the bridge image."
 [ -n "$KIRO_API_KEY_SECRET_ARN" ] || die "KIRO_API_KEY_SECRET_ARN is not set in $CONFIG_FILE.
 Without it the stack creates an empty Kiro API key secret that is deleted on rollback."
-case "$BRIDGE_MODE" in
-  fargate|lambda|both) ;;
-  *) die "BRIDGE_MODE must be fargate, lambda, or both (got '$BRIDGE_MODE')." ;;
-esac
 case "$KIRO_API_KEY_SECRET_ARN" in
   arn:aws:secretsmanager:"$AWS_REGION":"$AWS_ACCOUNT_ID":secret:*) ;;
   *) die "KIRO_API_KEY_SECRET_ARN is not a secret in $AWS_REGION / $AWS_ACCOUNT_ID:
@@ -193,7 +193,6 @@ add_opt() {
   if [ -n "$2" ]; then CDK_ARGS+=( -c "$1=$2" ); fi
 }
 add_opt kiroCliVersion       "$KIRO_CLI_VERSION"
-add_opt bridgeMode           "$BRIDGE_MODE"
 add_opt publicBaseUrl        "$PUBLIC_BASE_URL"
 add_opt cognitoDomainPrefix  "$COGNITO_DOMAIN_PREFIX"
 add_opt allowedRepos         "$ALLOWED_REPOS"
@@ -274,7 +273,6 @@ info "config file:          $CONFIG_FILE"
 info "AWS profile:          $AWS_PROFILE"
 info "account / region:     $AWS_ACCOUNT_ID / $AWS_REGION"
 info "kiro-cli version:     $KIRO_CLI_VERSION"
-info "bridge mode:          $BRIDGE_MODE"
 info "public base URL:      $PUBLIC_BASE_URL"
 info "custom domain:        ${CUSTOM_DOMAIN_NAME:-<none, execute-api domain>}"
 info "DNS zone / zone id:   ${DNS_ZONE_NAME:-<none>} / ${HOSTED_ZONE_ID:-<none>}"

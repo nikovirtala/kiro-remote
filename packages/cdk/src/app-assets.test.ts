@@ -4,28 +4,24 @@
  * These exercise the `-c kiroCliVersion=<ver>` context plumbing WITHOUT ever
  * invoking a Docker build or an esbuild bundle: the asset factories are fakes,
  * and the tests assert WHEN they are (not) called. The real
- * `ContainerImage.fromAsset` / `buildApiLambdaCode` are never touched here
- * (they would need Docker/esbuild), which keeps this suite headless.
+ * `DockerImageCode.fromImageAsset` / `buildApiLambdaCode` are never touched
+ * here (they would need Docker/esbuild), which keeps this suite headless.
  */
 
-import type { ContainerImage } from "aws-cdk-lib/aws-ecs";
 import type { Code, DockerImageCode } from "aws-cdk-lib/aws-lambda";
 import { describe, expect, test, vi } from "vitest";
 import { type AppAssetsFactories, BRIDGE_IMAGE_EXCLUDES, selectAppAssets } from "./app-assets.ts";
 
 // Sentinel fakes standing in for the real (Docker/esbuild) assets. We only care
 // about identity + whether the factory ran, never the real resources.
-const FAKE_IMAGE = { __fakeBridgeImage: true } as unknown as ContainerImage;
 const FAKE_LAMBDA_IMAGE = { __fakeLambdaImage: true } as unknown as DockerImageCode;
 const FAKE_CODE = { __fakeApiCode: true } as unknown as Code;
 
 function fakeFactories(): AppAssetsFactories & {
-  buildBridgeImage: ReturnType<typeof vi.fn>;
   buildLambdaImage: ReturnType<typeof vi.fn>;
   buildApiLambdaCode: ReturnType<typeof vi.fn>;
 } {
   return {
-    buildBridgeImage: vi.fn((_version: string) => FAKE_IMAGE),
     buildLambdaImage: vi.fn((_version: string, _cmd: string[]) => FAKE_LAMBDA_IMAGE),
     buildApiLambdaCode: vi.fn(() => FAKE_CODE),
   };
@@ -37,12 +33,10 @@ describe("selectAppAssets", () => {
     const assets = selectAppAssets({}, factories);
 
     // No real assets: the construct falls back to its placeholders.
-    expect(assets.bridgeImage).toBeUndefined();
     expect(assets.lambdaImage).toBeUndefined();
     expect(assets.apiLambdaCode).toBeUndefined();
     expect(assets.kiroCliVersion).toBeUndefined();
     // Crucially, no Docker build / bundle was triggered.
-    expect(factories.buildBridgeImage).not.toHaveBeenCalled();
     expect(factories.buildLambdaImage).not.toHaveBeenCalled();
     expect(factories.buildApiLambdaCode).not.toHaveBeenCalled();
   });
@@ -52,9 +46,8 @@ describe("selectAppAssets", () => {
     const assets = selectAppAssets({ kiroCliVersion: "1.2.3" }, factories);
 
     expect(assets.kiroCliVersion).toBe("1.2.3");
-    expect(assets.bridgeImage).toBe(FAKE_IMAGE);
+    expect(typeof assets.lambdaImage).toBe("function");
     expect(assets.apiLambdaCode).toBe(FAKE_CODE);
-    expect(factories.buildBridgeImage).toHaveBeenCalledWith("1.2.3");
     expect(factories.buildApiLambdaCode).toHaveBeenCalledTimes(1);
   });
 
@@ -78,7 +71,8 @@ describe("selectAppAssets", () => {
     const assets = selectAppAssets({ kiroCliVersion: "  1.0.0  " }, factories);
 
     expect(assets.kiroCliVersion).toBe("1.0.0");
-    expect(factories.buildBridgeImage).toHaveBeenCalledWith("1.0.0");
+    assets.lambdaImage?.(["x"]);
+    expect(factories.buildLambdaImage).toHaveBeenCalledWith("1.0.0", ["x"]);
   });
 
   test("an empty-string version throws clearly and builds nothing (ARG has no default)", () => {
@@ -86,7 +80,6 @@ describe("selectAppAssets", () => {
     expect(() => selectAppAssets({ kiroCliVersion: "" }, factories)).toThrow(
       /kiroCliVersion context was supplied but is empty/,
     );
-    expect(factories.buildBridgeImage).not.toHaveBeenCalled();
     expect(factories.buildLambdaImage).not.toHaveBeenCalled();
     expect(factories.buildApiLambdaCode).not.toHaveBeenCalled();
   });
@@ -96,7 +89,6 @@ describe("selectAppAssets", () => {
     expect(() => selectAppAssets({ kiroCliVersion: "   " }, factories)).toThrow(
       /requires a concrete kiro-cli version/,
     );
-    expect(factories.buildBridgeImage).not.toHaveBeenCalled();
     expect(factories.buildLambdaImage).not.toHaveBeenCalled();
     expect(factories.buildApiLambdaCode).not.toHaveBeenCalled();
   });
@@ -104,14 +96,15 @@ describe("selectAppAssets", () => {
 
 describe("BRIDGE_IMAGE_EXCLUDES", () => {
   // These globs are passed as the `exclude` option to the bridge image's
-  // `ContainerImage.fromAsset(repoRoot, ...)` so CDK does not recursively stage
-  // packages/cdk/cdk.out into the asset (ENAMETOOLONG). We assert the critical
-  // entries directly here because the fromAsset excludes are not observable in
+  // `DockerImageCode.fromImageAsset(repoRoot, ...)` so CDK does not recursively
+  // stage packages/cdk/cdk.out into the asset (ENAMETOOLONG). We assert the
+  // critical entries directly here because the excludes are not observable in
   // the synthesized template (they only affect the staged context on disk).
 
   test("excludes cdk.out (the recursion source) and node_modules", () => {
     // cdk.out is the entry that actually triggered the failure; node_modules is
-    // re-installed by the Dockerfile's own deps stage so the host copy is waste.
+    // re-installed by the Dockerfile's own install stage so the host copy is
+    // waste.
     expect(BRIDGE_IMAGE_EXCLUDES).toContain("**/cdk.out");
     expect(BRIDGE_IMAGE_EXCLUDES).toContain("**/node_modules");
   });
@@ -131,7 +124,7 @@ describe("BRIDGE_IMAGE_EXCLUDES", () => {
       "tsconfig.base.json",
       "packages/core",
       "packages/bridge",
-      "packages/bridge/Dockerfile",
+      "packages/bridge/Dockerfile.lambda",
     ];
     for (const source of requiredCopySources) {
       expect(BRIDGE_IMAGE_EXCLUDES).not.toContain(source);
