@@ -4,14 +4,14 @@ Have you ever wanted to command your hosted coding agent from the Claude chat co
 
 Kiro Remote is a personal AWS control plane that wraps `kiro-cli` to launch and drive [Kiro Web](https://kiro.dev/web/) agentic coding sessions through an MCP server and a REST API.
 
-You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, stream events, answer permission prompts, and manage sessions, either over the REST API or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
+You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can launch repo-scoped Kiro Web sessions, send prompts, stream events, and manage sessions, either over the REST API or through the 14 MCP tools exposed by the bundled `kiro-remote` CLI.
 
 ## What's in the box?
 
 - **MCP server** (`packages/mcp`) exposed in two ways: a Streamable HTTP transport mounted at `<host>/mcp` and a stdio transport via the `kiro-remote` CLI.
 - **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`,with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at `/openapi.json`.
-- **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs `kiro-cli` to launch and drive Kiro Web sessions: it provisions each cloud session and runs every turn via `kiro-cli chat --cloud`, while negotiating capabilities over the Agent Client Protocol. See the [chat-only cloud path](./docs/deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only) for detail. The `lambda` bridge mode instead talks ACP directly to kiro-cli's bundled engine (see the [direct-engine path](./docs/deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
-- **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS,Cognito, the Fargate bridge, and the API (with native stage throttling).
+- **Bridge** (`packages/bridge`) two container-image Lambda functions (arm64) built from one image: an SQS consumer that launches and drives Kiro Web sessions over the Agent Client Protocol (ACP) against kiro-cli's bundled engine, and a publisher that records the engine's capabilities. See the [direct-engine path](./docs/deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine) for detail.
+- **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS, Cognito, the Lambda bridge, and the API (with native stage throttling).
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a live end-to-end harness (`e2e`).
 
 ## Documentation

@@ -17,11 +17,11 @@ a running bridge.
 
 - A container runtime that can build a `linux/arm64` OCI image (Docker or a
   compatible builder). The bridge image
-  ([`packages/bridge/Dockerfile`](../packages/bridge/Dockerfile)) is built as part
-  of a production deploy. See [Building the bridge image](#building-the-bridge-image).
+  ([`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)) is
+  built as part of a production deploy. See [Building the bridge image](#building-the-bridge-image).
 - Your personal **Kiro API key** (`ksk_...`) from
   [app.kiro.dev](https://app.kiro.dev) → **API Keys**. It becomes the bridge's
-  credential for `kiro-cli` and is stored in Secrets Manager, never on the command
+  credential for Kiro and is stored in Secrets Manager, never on the command
   line or in the image.
 
 ## 1. Install dependencies
@@ -67,11 +67,9 @@ toolchain pinned in [`.mise.toml`](../.mise.toml):
   ([aws/aws-cdk#39021](https://github.com/aws/aws-cdk/issues/39021)), so the
   construct uses a small shim (`new Runtime("nodejs26.x", RuntimeFamily.NODEJS,
   { supportsInlineCode: true })`) until that constant ships.
-- The serverless bridge image
+- The bridge image
   ([`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda))
-  is built on the `public.ecr.aws/lambda/nodejs:26` Lambda base, and the ECS
-  bridge image ([`packages/bridge/Dockerfile`](../packages/bridge/Dockerfile))
-  on `node:26-bookworm-slim` (a GA Docker Hub tag).
+  is built on the `public.ecr.aws/lambda/nodejs:26` Lambda base.
 
 > **Preview caveat.** AWS lists `nodejs26.x` (and its `public.ecr.aws/lambda/nodejs:26`
 > base image) as a **PUBLIC PREVIEW** runtime: it is **not covered by the AWS
@@ -80,9 +78,7 @@ toolchain pinned in [`.mise.toml`](../.mise.toml):
 > [AWS Lambda runtimes docs](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html)).
 > Node 26 is the default here because the repo pins 26.13.0 and is built to run
 > on Node 26, but a production operator should weigh the preview status before
-> deploying. The ECS image's `node:26-bookworm-slim` base is GA and unaffected;
-> the preview distinction applies only to the Lambda base image and the
-> `nodejs26.x` managed runtime. There is no Docker in CI here, so a Docker host
+> deploying. There is no Docker in CI here, so a Docker host
 > must confirm the `public.ecr.aws/lambda/nodejs:26` tag resolves before a real
 > `-c kiroCliVersion` deploy.
 
@@ -96,10 +92,11 @@ context values, passed with `-c key=value`:
 > has **no default**, so without a concrete version there is nothing to build
 > the real image from. With it:
 >
-> - the app **builds the real bridge container image locally** from
->   [`packages/bridge/Dockerfile`](../packages/bridge/Dockerfile) via
->   `ContainerImage.fromAsset` with the repo root as the build context,
->   `platform: linux/arm64` (Graviton) and `buildArgs: { KIRO_CLI_VERSION }`.
+> - the app **builds the real bridge Lambda image locally** from
+>   [`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)
+>   via `DockerImageCode.fromImageAsset` with the repo root as the build
+>   context, `platform: linux/arm64` (Graviton) and
+>   `buildArgs: { KIRO_CLI_VERSION }`.
 >   This **needs a working Docker/container runtime** on the machine running
 >   `cdk deploy` (synth only stages the build context), and it builds
 >   `linux/arm64`; and
@@ -128,17 +125,17 @@ context values, passed with `-c key=value`:
 >   -c hostedZoneId=<HostedZoneId output>
 > ```
 >
-> **CONFIG#CAPS caveat:** until the bridge first initializes and writes its
+> **CONFIG#CAPS caveat:** until the caps publisher first writes the
 > `CONFIG#CAPS` item, `GET /capabilities` and `GET /models` return the
-> empty-capabilities fallback. This is expected right after a fresh deploy and
-> resolves once the bridge task is healthy and has published its capabilities.
+> empty-capabilities fallback. The publisher runs right after each deploy (a
+> CDK Trigger) and then every 6 hours, so this resolves shortly after a fresh
+> deploy.
 
 | Context key           | Default      | Meaning                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `publicBaseUrl`       | — (required) | The canonical `https://<host>` **without** a trailing slash. Use a custom domain fronting the HTTP API, or the API Gateway default domain `https://<api-id>.execute-api.<region>.amazonaws.com`. Used verbatim for the RFC 9728 PRM, the RFC 8414 AS-metadata issuer, the Cognito resource identifier (`<host>/mcp`), and the CIMD allow-list, so for a real deploy it **must** be the real, reachable host. |
 | `cognitoDomainPrefix` | — (required) | The Cognito managed-login domain prefix. The hosted UI is served from `<prefix>.auth.<region>.amazoncognito.com`.                                                                                                                                                                                                                                                                                            |
 | `allowedRepos`        | — (required) | Comma-separated GitHub repo globs the bridge may launch sessions against. Launches outside this list are rejected with 403.                                                                                                                                                                                                                                                                                  |
-| `bridgeMode`          | `fargate`    | Which host(s) drive the cloud command path: `fargate` (default), `lambda`, or `both`. Pass with `-c bridgeMode=lambda\|fargate\|both`. See [Choosing the bridge mode](#choosing-the-bridge-mode). The default reproduces the Fargate-only stack exactly.                                                                                                                                                     |
 
 Three more context keys drive the optional custom domain (unset in the CDK app;
 `scripts/deploy.sh` defaults `customDomainName`/`dnsZoneName` to the scoped
@@ -168,7 +165,6 @@ You can still pass `-c key=value` directly to the CDK CLI for one-off synths.
 | `deploy.env` key          | Context key           |
 | ------------------------- | --------------------- |
 | `KIRO_CLI_VERSION`        | `kiroCliVersion`      |
-| `BRIDGE_MODE`             | `bridgeMode`          |
 | `PUBLIC_BASE_URL`         | `publicBaseUrl`       |
 | `COGNITO_DOMAIN_PREFIX`   | `cognitoDomainPrefix` |
 | `ALLOWED_REPOS`           | `allowedRepos`        |
@@ -193,110 +189,94 @@ Additional options exist on `KiroRemoteProps`
 entrypoint only wires the three context keys above; to set the rest you edit
 `bin/app.ts` (or your own thin app) and pass them to the stack. The most useful:
 
-| Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bridgeMode`           | `fargate`                                 | Which host(s) drive the cloud command path: `fargate` (default, the persistent ECS bridge and the ONLY host for the ACP adopt/session-load path), `lambda` (the serverless cloud path; adopt unsupported), or `both`. Also wired from the `bridgeMode` context key. See [Choosing the bridge mode](#choosing-the-bridge-mode).                                                                                                                                                                                             |
-| `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `permissionTimeout`    | `24h`                                     | How long a permission request stays answerable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the bridge image via the `KIRO_CLI_VERSION` build arg (which has no default). Also the single opt-in trigger for the real assets (see the [real-asset opt-in callout](#3-choose-your-deploy-context)). Operator-supplied, never hardcoded; required for a real deploy.                                                                                                                                                                                                                   |
-| `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade without a CIMD document. Each client presents its `name` as the `client_id` at `/oauth/authorize` and may only use the listed `callbackUrls` as `redirect_uri`. The stack provisions a Cognito app client for each and propagates the id + redirect URIs into the API Lambda so the facade accepts them at runtime.                                                                                  |
-| `kiroApiKeySecretArn`  | — (construct creates an empty secret)     | Full ARN of a **pre-existing** Secrets Manager secret holding the `ksk_` key. **Recommended for real deploys:** the construct imports it, grants the bridge read, and wires it as the `KIRO_API_KEY` ECS secret, and because it is external it **survives a stack rollback**. Omit it and the construct creates an empty secret (synth/dev only) that you must populate and that is destroyed on rollback. Also wired from the `kiroApiKeySecretArn` context key. See [Store the Kiro API key](#4-store-the-kiro-api-key). |
-| `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api).                                                             |
-| `bridgeImage`          | placeholder registry image                | Override the ECS/Fargate bridge container image. Production deploys pass `ContainerImage.fromAsset(...)` (see below).                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `lambdaImage`          | placeholder ECR image                     | Override the serverless (Lambda) bridge container image used in `lambda`/`both` modes. A factory `(cmd) => DockerImageCode` called once per function (consumer + caps-publisher) so each runs its own handler from the one image. Production deploys pass a factory wrapping `DockerImageCode.fromImageAsset(repoRoot, { file: "packages/bridge/Dockerfile.lambda", buildArgs: { KIRO_CLI_VERSION }, platform: linux/arm64, cmd })`. Gated behind `-c kiroCliVersion` like `bridgeImage`.                                  |
-| `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cimdAllowedHosts`     | facade host + `claude.ai` always included | Extra hosts permitted as CIMD `client_id` URL hosts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `maxCloudSessions`     | `10`                                      | Concurrent cloud-session cap (includes IDE/Web usage).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `eventTtlDays`         | `30`                                      | Event TTL in days.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `kiroCliVersion`       | —                                         | The `kiro-cli` version baked into the Lambda bridge image via the `KIRO_CLI_VERSION` build arg (which has no default). Also the single opt-in trigger for the real assets (see the [real-asset opt-in callout](#3-choose-your-deploy-context)). Operator-supplied, never hardcoded; required for a real deploy.                                                                                                                                                                                                                                |
+| `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade without a CIMD document. Each client presents its `name` as the `client_id` at `/oauth/authorize` and may only use the listed `callbackUrls` as `redirect_uri`. The stack provisions a Cognito app client for each and propagates the id + redirect URIs into the API Lambda so the facade accepts them at runtime.                                                                                                      |
+| `kiroApiKeySecretArn`  | — (construct creates an empty secret)     | Full ARN of a **pre-existing** Secrets Manager secret holding the `ksk_` key. **Recommended for real deploys:** the construct imports it and grants the bridge functions read; they resolve it at runtime via `KIRO_API_KEY_SECRET_ARN`. Because it is external it **survives a stack rollback**. Omit it and the construct creates an empty secret (synth/dev only) that you must populate and that is destroyed on rollback. Also wired from the `kiroApiKeySecretArn` context key. See [Store the Kiro API key](#4-store-the-kiro-api-key). |
+| `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api).                                                                                 |
+| `lambdaImage`          | placeholder ECR image                     | Override the bridge Lambda container image. A factory `(cmd) => DockerImageCode` called once per function (consumer + caps-publisher) so each runs its own handler from the one image. Production deploys pass a factory wrapping `DockerImageCode.fromImageAsset(repoRoot, { file: "packages/bridge/Dockerfile.lambda", buildArgs: { KIRO_CLI_VERSION }, platform: linux/arm64, cmd })`. Gated behind `-c kiroCliVersion`.                                                                                                                    |
+| `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-> The defaults for `bridgeImage`, `lambdaImage`, and `apiLambdaCode` are
+> The defaults for `lambdaImage` and `apiLambdaCode` are
 > placeholders so the construct synthesizes with no Docker build and no
 > bundling step (the CDK unit tests rely on this). A production deploy must
 > override them (image + Lambda code) so the stack actually serves traffic; this
 > repo's app always does, from the required `kiroCliVersion`.
 
-## Choosing the bridge mode
+## The Lambda bridge
 
-The cloud command path can be driven by two different hosts, selected per deploy
-with `bridgeMode` (the `bridgeMode` context key, or the `KiroRemoteProps` prop).
-The default is `fargate`, so an existing deploy that passes nothing is unchanged.
+The bridge is serverless. Every deploy provisions:
 
-| Mode                | What is provisioned                                                                                                                                                                      | Notes                                                                                                                                                                                                                                                       |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fargate` (default) | The persistent ECS Fargate ACP bridge (VPC, cluster, task, service). No Lambda bridge.                                                                                                   | The ONLY host for the ACP `adopt`/session-load path, so it is retained deliberately. Backward compatible: omitting `bridgeMode` reproduces today's stack.                                                                                                   |
-| `lambda`            | A container-image Lambda (arm64) that consumes the SQS FIFO command queue and a standard catch-up queue, plus a second function that publishes `CONFIG#CAPS`. No Fargate service or VPC. | The serverless cloud path. Both functions talk ACP directly to kiro-cli's bundled engine (see [direct engine](#how-the-lambda-path-drives-cloud-sessions-direct-engine)). `adopt` is NOT supported in this mode; use `fargate` or `both` if you need adopt. |
-| `both`              | The Fargate service AND the Lambda consumer + caps-publisher.                                                                                                                            | Run both side by side (e.g. to migrate). `adopt` is routed to Fargate and the Lambda consumer handles the headless cloud turns (see [adopt routing](#adopt-routing-in-both-mode) below).                                                                    |
+- the **consumer**, a container-image Lambda function (arm64) that consumes the
+  SQS FIFO command queue and the standard `CatchUpQueue`, and launches and
+  drives cloud sessions;
+- the **caps publisher**, a second function from the same image that writes
+  `CONFIG#CAPS`, invoked once right after deploy (a CDK Trigger custom
+  resource) and then on a 6-hour schedule.
 
-Enable a mode on the command line, for example the serverless path:
+Both functions talk ACP directly to kiro-cli's bundled engine (see
+[direct engine](#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
+There is no VPC and no long-running task. Operational details:
 
-```bash
-pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
-  -c kiroCliVersion=3.1.0 \
-  -c bridgeMode=lambda \
-  -c publicBaseUrl=https://kiro-remote.nikovirtala.dev
-```
-
-A few operational details for the `lambda` and `both` modes:
-
-- **Image.** The serverless functions run the container image built from
+- **Image.** Both functions run the container image built from
   [`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)
-  (arm64, both the consumer and caps-publisher handler bundles). Like the
-  Fargate image, it is built from the required `-c kiroCliVersion=<ver>`, so
-  deploy needs Docker. A build stage installs that kiro-cli version and runs
-  `kiro-cli acp --agent-engine=v3` once to unpack its bundled engine: the
-  `node` binary goes to `/opt/kiro/node` and the engine release directory to
-  `/opt/kiro/kas/<ver>-<hash>`, with `/opt/kiro/kas/current` symlinked to it.
-  The build fails loudly when `node` or `acp-server.js` is missing. The runtime
-  stage copies only `/opt/kiro`; kiro-cli itself is not in the runtime image.
-- **Catch-up queue.** The Lambda path adds a standard (non-FIFO) SQS queue,
-  `CatchUpQueue` (1-day retention, 15-minute visibility timeout), consumed by
-  the same consumer function through a second event-source mapping that is
-  never filtered. The consumer uses it to finish turns that outlive one
-  invocation (see
+  (arm64, both the consumer and caps-publisher handler bundles). It is built
+  from the required `-c kiroCliVersion=<ver>`, so deploy needs Docker. A build
+  stage installs that kiro-cli version and runs `kiro-cli acp --agent-engine=v3`
+  once to unpack its bundled engine: the `node` binary goes to `/opt/kiro/node`
+  and the engine release directory to `/opt/kiro/kas/<ver>-<hash>`, with
+  `/opt/kiro/kas/current` symlinked to it. The build fails loudly when `node`
+  or `acp-server.js` is missing. The runtime stage copies only `/opt/kiro`;
+  kiro-cli itself is not in the runtime image. See
+  [Building the bridge image](#building-the-bridge-image).
+- **Catch-up queue.** `CatchUpQueue` is a standard (non-FIFO) SQS queue (1-day
+  retention, 15-minute visibility timeout), consumed by the same consumer
+  function through a second event-source mapping. The consumer uses it to
+  finish turns that outlive one invocation (see
   [the catch-up](#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
   Its URL reaches the consumer as `CATCH_UP_QUEUE_URL`; the caps publisher does
-  not get it. `fargate`-only mode does not create it.
+  not get it.
 - **Concurrency.** `maxCloudSessions` maps to the consumer function's RESERVED
   CONCURRENCY. Because the queue is FIFO and the producer sets
   `MessageGroupId = sessionId`, SQS already serializes work per session; the
-  reserved concurrency caps how many DISTINCT sessions run in parallel to the
-  same global cap the Fargate host enforces in-process.
-- **Visibility timeout.** When the Lambda path is enabled the command queue's
-  visibility timeout is raised to 15 minutes (the consumer's timeout) so a long
-  cloud turn is not redelivered mid-flight. In `fargate`-only mode it stays at
-  60 seconds.
-- **Capabilities publish.** The caps-publisher writes `CONFIG#CAPS` on a 6-hour
-  schedule and is also invoked once right after deploy (a CDK Trigger custom
-  resource). Until the first publish succeeds, `GET /capabilities` and
-  `GET /models` return the empty-capabilities fallback, exactly like the
-  Fargate bridge's boot-time publish (see the CONFIG#CAPS caveat above). A
-  transient failure self-heals on the next scheduled run.
+  reserved concurrency caps how many DISTINCT sessions run in parallel.
+- **Visibility timeout.** The command queue's visibility timeout is 15 minutes
+  (the consumer's timeout), so a long cloud turn is not redelivered mid-flight.
+- **Capabilities publish.** Until the first publish succeeds,
+  `GET /capabilities` and `GET /models` return the empty-capabilities fallback
+  (see the CONFIG#CAPS caveat above). A transient failure self-heals on the
+  next scheduled run.
 - **Secret.** The functions resolve `KIRO_API_KEY` at runtime from Secrets
-  Manager via the `KIRO_API_KEY_SECRET_ARN` environment variable (there is no
-  ECS-style secret injection on Lambda); the function roles are granted read on
-  that exact secret. `AWS_REGION` is a reserved Lambda variable and is never set
-  by the construct.
+  Manager via the `KIRO_API_KEY_SECRET_ARN` environment variable; the function
+  roles are granted read on that exact secret. `AWS_REGION` is a reserved
+  Lambda variable and is never set by the construct.
 
-### adopt routing in `both` mode
+### Operations cloud sessions do not support
 
-Both hosts consume the SAME SQS FIFO command queue, and SQS delivers each
-message to exactly one consumer. Fargate is retained as the only host for the
-ACP `adopt`/session-load path, so in `both` mode the Lambda consumer's
-event-source mapping carries a filter that excludes `adopt`
-(`kind` is anything but `"adopt"`). A filtered-out `adopt` command is never
-delivered to the Lambda, stays on the queue, and is therefore picked up by the
-Fargate intake loop, which honors it via the ACP gateway. This makes the "adopt
-goes to Fargate" guarantee hold deterministically rather than depending on which
-consumer polls first.
+All 14 MCP tools and every REST route stay available, but some operations have
+no meaning on a cloud session:
 
-Every other command kind (`launch`, `prompt`, `steer`, `cancel`,
-`answerPermission`, `setConfig`, `delete`) is handled correctly by either host,
-so those are left unfiltered and go to whichever consumer SQS delivers them to.
+- **cancel** is rejected while a turn is running and is a no-op when the
+  session is idle. The turn runs to completion; send a new prompt afterwards.
+- **setConfig** and **answerPermission** commands are logged no-ops.
+- **Permission lists are always empty.** Cloud turns never ask for permission.
+- **adopt** (ACP session-load of an existing session) is rejected.
+- **A mid-turn steer** and a busy prompt with **`whenBusy=queue`** are
+  rejected. An idle-session steer is just a new prompt turn.
+- **`kiro_list_models` / `GET /v1/models` returning no models is expected** for
+  cloud and autonomous sessions.
 
-In `lambda`-only mode there is no Fargate to serve a filtered-out `adopt`, so
-the consumer is deliberately NOT filtered: it still receives `adopt` and rejects
-it loudly with a client-visible rejection event, rather than letting the message
-sit unconsumed and silently expire. `lambda`-only still does not support
-`adopt`; it just fails it visibly instead of silently.
+Each rejection is persisted as a client-visible `turn.failed` event
+(`rawType: "operation_rejected"`, with the rejected `operation` and a `reason`
+in the payload), so a client polling `GET /v1/sessions/{id}/events` sees why the
+command did nothing. The command message is then acked (deleted). The command
+queue is a DLQ-less FIFO keyed by `MessageGroupId = sessionId`, so leaving a
+permanently unsupported command for redelivery would redeliver it every
+visibility timeout and block every later command for that session.
 
 ### How the Lambda path drives cloud sessions (direct engine)
 
@@ -365,12 +345,12 @@ session that is gone, failed, or has moved to another turn is dropped
 
 Because META stays `running`, a follow-up, steer, cancel or `whenBusy=queue`
 sent during a detached turn is rejected as mid-turn, exactly as it is during a
-live turn. `adopt` remains unsupported on the Lambda path.
+live turn. `adopt` is not supported.
 
 **Version pinning.** The engine's launch command, environment and `_meta`
 fields are an internal, unversioned kiro-cli interface. They were verified
 against kiro-cli 3.1.0; bumping `KIRO_CLI_VERSION` needs the engine smoke in
-[testing.md](testing.md#building-the-bridge-images-and-the-engine-smoke) to
+[testing.md](testing.md#building-the-bridge-image-and-the-engine-smoke) to
 pass again.
 
 ## Pointing `publicBaseUrl` at the API
@@ -567,178 +547,76 @@ between the two steps.
 
 ## Building the bridge image
 
-The bridge image is `linux/arm64` (ECS Fargate on Graviton). It installs
-`kiro-cli` via the official install script pinned by the `KIRO_CLI_VERSION` build
-ARG.
+The bridge image
+([`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)) is
+`linux/arm64` (the Lambda functions run on Graviton) and is built on the AWS
+Lambda Node base image. It has three stages:
 
-At **build time** the image esbuild-bundles the bridge CLI
-([`packages/bridge/src/cli.ts`](../packages/bridge/src/cli.ts)) into a single
-self-contained CommonJS file (`dist/bridge.cjs`) and the container then runs
-`node dist/bridge.cjs serve`. The bundle inlines the `@nikovirtala/*` workspace
-code **and** `@aws-sdk/*`, so the runtime image carries no `node_modules` and no
-raw `.ts` source. This mirrors the API Lambda's build-time bundling in
-[`packages/cdk/src/api-asset.ts`](../packages/cdk/src/api-asset.ts).
+- **deps** installs the workspace with pnpm and esbuild-bundles both Lambda
+  entries, [`lambda-consumer.ts`](../packages/bridge/src/lambda-consumer.ts) and
+  [`caps-publisher.ts`](../packages/bridge/src/caps-publisher.ts), into
+  self-contained CommonJS files (`dist/lambda-consumer.cjs`,
+  `dist/caps-publisher.cjs`). The bundles inline the `@nikovirtala/*`
+  workspace code **and** `@aws-sdk/*`, so the runtime image carries no
+  `node_modules` and no raw `.ts` source.
+- **kiro** installs `kiro-cli` with the official install script, pinned by the
+  `KIRO_CLI_VERSION` build ARG (no default), and runs
+  `kiro-cli acp --agent-engine=v3` once so it unpacks its bundled engine. The
+  engine's `node` binary and KAS release are copied to `/opt/kiro`, with
+  `/opt/kiro/kas/current` pointing at the release. The build fails loudly if
+  that layout changes.
+- **runtime** copies only `/opt/kiro` and the two bundles. kiro-cli itself is
+  not in the runtime image. The default `CMD` is the consumer handler; the
+  construct overrides it for the caps publisher, so one image serves both
+  functions.
 
 Why bundle instead of running the TypeScript source directly? Node refuses to
 type-strip `.ts` files that resolve under a `node_modules` path (see the Node
 ["Type stripping in dependencies"](https://nodejs.org/api/typescript.html)
-docs). The bridge's entry imports `@nikovirtala/kiro-remote-core`, whose
-package.json exports a raw `./src/index.ts` reached through pnpm's `node_modules`
-symlink, so running `node packages/bridge/src/cli.ts` crashed the container at
-module load (exit 1, before any log). Bundling inlines that code, so there is no
-bare `@nikovirtala` import and no `.ts` under `node_modules` at runtime. The
-container `HEALTHCHECK` is a cheap `node -e "process.exit(0)"` liveness probe
-(the same intent as the ECS container health check), not an invocation of the
-bridge CLI.
+docs). The handlers import `@nikovirtala/kiro-remote-core`, whose package.json
+exports a raw `./src/index.ts` reached through pnpm's `node_modules` symlink,
+so the unbundled source would fail at module load. Bundling inlines that code,
+so there is no bare `@nikovirtala` import and no `.ts` under `node_modules` at
+runtime. This mirrors the API Lambda's build-time bundling in
+[`packages/cdk/src/api-asset.ts`](../packages/cdk/src/api-asset.ts).
 
-`KIRO_API_KEY` is **never** baked into the image; it is injected as an ECS secret
-at runtime. The `kiro-cli` child process is spawned as a runtime PATH binary via
-`child_process`, so it is neither bundled nor externalized.
+`KIRO_API_KEY` is **never** baked into the image. The functions resolve it at
+runtime from Secrets Manager via `KIRO_API_KEY_SECRET_ARN`.
 
-### How the bridge drives cloud sessions (chat-only == cloud-only)
-
-This section describes the **Fargate** bridge. The Lambda path talks ACP
-directly to the bundled engine instead; see
-[How the Lambda path drives cloud sessions](#how-the-lambda-path-drives-cloud-sessions-direct-engine).
-
-The Fargate bridge provisions **and** drives cloud sessions **entirely** through
-`kiro-cli chat --cloud` subprocesses. It has no ACP cloud-session path.
-
-- **Launch (first turn).** `POST /v1/sessions` enqueues a `launch` command; the
-  bridge runs
-  `kiro-cli chat --cloud --repo <r> [--repo <r2> …] --no-interactive "<prompt>"`.
-  The subprocess output is **plain text** (there is no JSON/stream-json output
-  mode for `--cloud`): interleaved `[INFO] …`, `[cloud] session <uuid>`,
-  `[tool] …`, `[tool] status: Completed`, `[sandbox] …` lines, then the
-  assistant's free-text answer. The bridge parses the **real cloud session id**
-  from the `[cloud] session <uuid>` line, persists the assistant text + tool
-  activity as normalized events (so `GET /v1/sessions/{id}/events` returns the
-  turn), and drives the session to `idle`.
-- **Loud failure.** If the subprocess emits **no** `[cloud] session` line, or it
-  exits **non-zero** (and a `null` exit code — signal-killed, e.g. OOM mid-turn —
-  counts as a failure, **not** a truncated success), the bridge drives the
-  session to `failed`, logs `cloud_launch_failed`, and emits the
-  `CloudLaunchFailed` metric. It never leaves a silent/idle session.
-- **Follow-up turns.** A `POST /v1/sessions/{id}/turns` on an idle cloud session
-  runs `kiro-cli chat --cloud --resume-id <cloudSessionId> --no-interactive
-  "<prompt>"` (the CLI help documents `--resume-id <SESSION_ID>`, "Resume a
-  specific conversation by session ID"), targeting the **same** cloud id, and
-  persists its output as events the same way. A follow-up is **idempotent** on
-  its `turnId`: a redelivered `prompt` command (SQS at-least-once) is a logged
-  no-op (`prompt_idempotent_skip`), never a second resume turn and never a
-  mid-turn re-dispatch. A **failed** resume turn is just as loud as a failed
-  launch: it emits the `CloudTurnFailed` metric, logs `cloud_turn_failed`, and
-  persists a client-visible `turn.failed` event before the session returns to
-  `idle` — so a client polling events sees the failure, not a silent missing
-  answer.
-- **Mid-turn steer / cancel are rejected (not silently dropped).** Because a
-  cloud turn runs in a detached `chat --cloud` subprocess and ACP cannot drive a
-  cloud session, there is no way to steer or cancel a cloud turn in flight.
-  Rather than issuing a doomed ACP `_session/steer`/`session/cancel` that the
-  agent silently ignores, the bridge **rejects** a mid-turn steer or a cancel on
-  a cloud session with a clear error (`steer_unsupported_cloud` /
-  `cancel_unsupported_cloud`); the in-flight turn runs to completion, then the
-  caller can send a new prompt. (An idle-session "steer" is still just a new
-  prompt turn, unchanged.)
-
-  The rejection is a **permanent** condition, so it is handled as a _loud but
-  terminal_ command: `SessionManager` throws an `UnsupportedCloudOperationError`
-  and the SQS intake catches that sentinel, logs `command_unsupported_cloud`,
-  persists a client-visible `turn.failed` rejection event
-  (`rawType: "operation_rejected"`, with the rejected `operation` in the
-  payload), and then **deletes** the command message. This is deliberate: the
-  command queue is a DLQ-less FIFO keyed by `MessageGroupId = sessionId`, so if
-  the message were left for redelivery (the policy for a genuine _transient_
-  dispatch failure) it would redeliver every visibility timeout **and**
-  head-of-line-block every later command for that session (next prompt,
-  answerPermission, even delete) until the turn happened to settle. Deleting the
-  message keeps the FIFO group moving while a polling client still sees _why_ the
-  steer/cancel did nothing via `GET /v1/sessions/{id}/events`. Genuine transient
-  failures (e.g. an un-advertised `setConfig`) still throw a plain error and are
-  left for redelivery.
-- **`whenBusy=queue` is rejected the same way (for now).** A busy `prompt` with
-  `whenBusy=queue` cannot be honored on the cloud path either: there is no
-  queue-drain mechanism, and a cloud turn runs in a detached subprocess the
-  bridge cannot interleave with, so a "queued" turn would never actually run.
-  Rather than tell the caller the turn is `queued` and then never drain it, the
-  bridge rejects it the same visible, non-state-mutating way as a mid-turn steer
-  (`steer_queue_unsupported_cloud` + the same deleted-message + rejection-event
-  contract). Draining queued turns after the active one settles is a possible
-  future enhancement.
-- **Delete.** `kiro-cli chat --delete-session <cloudSessionId>` (unchanged).
-
-**Why not `kiro-cli acp`?** As the Fargate bridge uses it, the ACP child
-(`kiro-cli acp --agent-engine=v3`) **cannot drive a cloud session**. (The
-Lambda path drives cloud sessions over ACP by talking to the engine directly
-with `sessionSource: "remote"`; see the direct-engine section above.) Confirmed
-empirically: `initialize` + `session/load` +
-`session/prompt` against a real cloud id
-(`08047063-f7b4-4ce5-b79a-2aea9a7a1d29`) returns
-`{"error":{"code":-32000,"message":"Session '08047063-…' not found"}}` on
-`session/prompt`. The earlier `session/new` `executionTarget`/`sessionSource`
-approach was likewise rejected by the live agent and has been reverted. The ACP
-child remains only for non-cloud concerns (capability negotiation, session
-discovery, reconnect/adopt); it never launches or prompts a cloud session.
-
-**Permissions.** `--no-interactive` governs tool-permission behavior on the chat
-path: the subprocess auto-proceeds or refuses rather than prompting. The
-interactive ACP `answerPermission` flow does **not** apply to `chat --cloud`, so
-the bridge does not wire ACP permissions into the chat path. (`kiro-cli chat
---help` was not re-checkable in the build sandbox for an explicit
-auto-approve/trust flag; if a future `--trust-all-tools`-style flag is confirmed
-it can be added, otherwise the documented `--no-interactive` behavior stands.)
-
-**Operational guarantees (preserved).** The `chat --cloud` subprocess is long
-(~30–40 s), so the bridge runs it as **background work**: `launch()` returns
-promptly and intake deletes the SQS message **on dispatch**, so a slow
-subprocess never head-of-line-blocks other sessions (ack-on-dispatch). A
-**redelivered** launch is idempotent — it never spawns a second `chat --cloud`
-or a second Space. All subprocess stdout/stderr is routed through the redacting
-logger, so a `ksk_`/`KIRO_API_KEY`/bearer token never appears in logs; the
-numeric exit is logged under `exitCode` (not `code`, which core `redact()`
-scrubs as the OAuth code).
-
-**Redeploy scope.** This behavior lives entirely in the **bridge image**
-(`packages/bridge`). No CDK/infrastructure change is required — redeploy the
-bridge image only. After redeploy, watch the live bridge logs for
-`launch_path_decision` (path `headless`), `session_launched`
-(`kiroSessionId=<uuid>`), and the absence of `cloud_launch_failed`; and confirm
-the new session appears as a Space in **app.kiro.dev**. A `cloud_launch_failed`
-log + `CloudLaunchFailed` metric means the subprocess did not emit a
-`[cloud] session` line (or exited non-zero) — inspect the redacted
-`headless_launch_failed` record for the child output.
-
-`bin/app.ts` wires this image automatically on the real-asset path: passing
-`-c kiroCliVersion=<ver>` makes the app set the construct's `bridgeImage` prop to
-a `fromAsset` build of the repo root (the build context is the repo root because
+`bin/app.ts` wires this image automatically: the required
+`-c kiroCliVersion=<ver>` makes the app pass the construct a `lambdaImage`
+factory that builds the repo root (the build context is the repo root because
 the Dockerfile COPYs `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
-`tsconfig.base.json` and the `packages/core` + `packages/bridge` trees). The call
-it makes is:
+`tsconfig.base.json` and the `packages/core`, `packages/bridge` and
+`packages/cdk` trees). The call it makes for each function is:
 
 ```ts
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
-import { ContainerImage } from "aws-cdk-lib/aws-ecs";
+import { DockerImageCode } from "aws-cdk-lib/aws-lambda";
 
-bridgeImage: ContainerImage.fromAsset(repoRoot, {
-  file: "packages/bridge/Dockerfile",
-  buildArgs: { KIRO_CLI_VERSION: "<version>" },
+DockerImageCode.fromImageAsset(repoRoot, {
+  file: "packages/bridge/Dockerfile.lambda",
   platform: Platform.LINUX_ARM64,
-}),
+  buildArgs: { KIRO_CLI_VERSION: "<version>" },
+  cmd, // ["lambda-consumer.handler"] or ["caps-publisher.handler"]
+  exclude: [...BRIDGE_IMAGE_EXCLUDES],
+});
 ```
 
 Building this requires a working container runtime (Docker) that can produce a
 `linux/arm64` image; CDK builds it during `cdk deploy` on the operator's
 machine (`cdk synth` only stages the build context). The app requires
-`-c kiroCliVersion`, so every deploy builds the image. The `KIRO_CLI_VERSION` value is operator-supplied (in
-`deploy.env`) and never hardcoded in the CDK code.
+`-c kiroCliVersion`, so every deploy builds the image. The `KIRO_CLI_VERSION`
+value is operator-supplied (in `deploy.env`) and never hardcoded in the CDK
+code.
 
 ## 4. Store the Kiro API key
 
 The bridge needs a **valid** `ksk_` key in Secrets Manager to start. The
 recommended flow is to create and populate that secret **once, out of band**,
 and point the deploy at it by its **full ARN** (`-c kiroApiKeySecretArn=...`).
-The stack then **imports** the secret, grants the bridge read access, and
-injects it as the `KIRO_API_KEY` ECS secret. Because the secret is external, it
+The stack then **imports** the secret and grants the bridge functions read
+access; they read it at runtime. Because the secret is external, it
 **survives a stack rollback**, so iterating on a failed deploy never destroys
 your key.
 
@@ -844,7 +722,7 @@ the Cognito managed-login host becomes `<cognitoDomainPrefix>.auth.<region>.amaz
 (e.g. `kiro-remote.auth.eu-north-1.amazoncognito.com` for an `eu-north-1` deploy).
 
 **Kiro cloud sandboxes always run in `us-east-1` regardless of where this stack is
-deployed** — that is Kiro's side (the `kiro-cli` in the bridge talks to Kiro's
+deployed** — that is Kiro's side (the bridge's engine talks to Kiro's
 `us-east-1` sandboxes no matter your stack region). Deploying the stack in
 `us-east-1` as well minimizes latency between the bridge and Kiro, but any region
 works.
