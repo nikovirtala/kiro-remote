@@ -44,7 +44,7 @@ the confusion:
 
 | Credential                 | What it is                                                                          | Where it lives                                                      | Used for                                                                                       |
 | -------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `KIRO_API_KEY` (`ksk_...`) | Your personal Kiro API key from [app.kiro.dev](https://app.kiro.dev) → **API Keys** | AWS Secrets Manager, read at runtime by the bridge Lambda functions | The bridge's own credential so `kiro-cli` can talk to Kiro cloud. **Never** a REST/MCP bearer. |
+| `KIRO_API_KEY` (`ksk_...`) | Your personal Kiro API key from [app.kiro.dev](https://app.kiro.dev) → **API Keys** | AWS Secrets Manager, read at runtime by the bridge Lambda functions | The bridge's own credential for Kiro, used by the bundled engine. **Never** a REST/MCP bearer. |
 | Cognito OAuth access token | A short-lived (15 min) bearer minted by the Cognito facade after you log in         | Your machine's keychain (via `kiro-remote login`)                   | The `Authorization: Bearer <token>` you send to `/v1/*` and `/mcp`.                            |
 
 The `ksk_` key never leaves the server side and is never passed to the REST API or

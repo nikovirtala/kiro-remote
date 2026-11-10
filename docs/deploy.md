@@ -587,8 +587,9 @@ runtime from Secrets Manager via `KIRO_API_KEY_SECRET_ARN`.
 `-c kiroCliVersion=<ver>` makes the app pass the construct a `lambdaImage`
 factory that builds the repo root (the build context is the repo root because
 the Dockerfile COPYs `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
-`tsconfig.base.json` and the `packages/core`, `packages/bridge` and
-`packages/cdk` trees). The call it makes for each function is:
+`tsconfig.base.json`, `packages/cdk/package.json` (so pnpm installs esbuild
+for the bundle step), and the `packages/core` and `packages/bridge` trees).
+The call it makes for each function is:
 
 ```ts
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
