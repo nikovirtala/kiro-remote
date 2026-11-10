@@ -6,9 +6,6 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "bin": {
-    "bridge": "./src/cli.ts"
-  },
   "scripts": {
     "build": "tsc --noEmit",
     "test": "vitest run",

@@ -1,13 +1,11 @@
 /**
- * The KiroGateway interface: the abstraction over one `kiro-cli acp
- * --agent-engine=v3` child process. The bridge package implements it; core
- * only defines the contract so the service layer and tests can depend on it
- * without pulling in process/transport code.
+ * Shared ACP types and the capability model. The bridge drives the engine over
+ * ACP; core only defines the data shapes (and, in capabilities.ts, the
+ * normalized view of the initialize result) so the API and the bridge agree on
+ * them without pulling in process/transport code.
  */
 
-import type { Capabilities, InitializeResult } from "./capabilities.ts";
-
-/** Inputs sent on session/new and re-sent on session/load. */
+/** Client-owned session inputs, sent on session/new and re-sent on session/load. */
 export interface SessionInputs {
   cwd: string;
   additionalDirectories?: string[];
@@ -16,80 +14,11 @@ export interface SessionInputs {
   modelId?: string;
   effortLevel?: string;
   /**
-   * Target GitHub repositories for a cloud execution target. Carried on
-   * session/new under `_meta.kiro.repos` alongside modeId/modelId/effortLevel
-   * (the V3 migration guide shows Kiro-aware initial values travel there; it
-   * does not name a dedicated top-level repos field, so this is the most
-   * faithful documented placement). The chat --cloud launch path passes the
-   * same repos via the `--repo` flag.
+   * Target GitHub repositories for a cloud execution target. The bridge sends
+   * them on session/new under `_meta.kiro.repositories` with the cloud-sandbox
+   * execution target.
    */
   repos?: string[];
-}
-
-/** Result of creating or loading a session. */
-export interface GatewaySession {
-  sessionId: string;
-}
-
-/** Outcome of answering a permission request. */
-export interface PermissionAnswer {
-  optionId: string;
-  consent?: {
-    scope: string;
-    resource: string;
-    workspaceRoot: string;
-  };
-}
-
-/**
- * Abstraction over a single ACP V3 connection. All optional/extension methods
- * must be gated on {@link capabilities}; implementations answer unknown
- * agent-to-client requests with a JSON-RPC error.
- */
-export interface KiroGateway {
-  /** The raw initialize result, as negotiated. */
-  readonly initializeResult: InitializeResult;
-
-  /** Normalized, queryable capabilities derived from {@link initializeResult}. */
-  capabilities(): Capabilities;
-
-  /** Create a new session. */
-  newSession(inputs: SessionInputs): Promise<GatewaySession>;
-
-  /**
-   * Load an existing session. Callers MUST register the update handler before
-   * calling this (replay arrives during load) and MUST re-send client-owned
-   * inputs. Never auto-resends a prompt.
-   */
-  loadSession(sessionId: string, inputs: SessionInputs): Promise<GatewaySession>;
-
-  /** Start a turn. Resolves only when the prompt response/error arrives. */
-  prompt(sessionId: string, content: unknown): Promise<{ stopReason?: string }>;
-
-  /** Steer an active turn (keeps the `_session/steer` method name). */
-  steer(sessionId: string, content: unknown): Promise<void>;
-
-  /** Cancel the active turn. */
-  cancel(sessionId: string): Promise<void>;
-
-  /** Change an advertised config option (model/effortLevel). */
-  setConfigOption(sessionId: string, configId: string, value: string): Promise<void>;
-
-  /** Change the active mode. */
-  setMode(sessionId: string, modeId: string): Promise<void>;
-
-  /**
-   * Answer a pending permission request, matched by requestId/toolCallId.
-   * Resolves to true when a held-open request was resolved, false when there
-   * was no pending request (e.g. a bridge restart cleared the in-memory state,
-   * or the requestId is unknown). A false result is a soft signal, NOT an
-   * error: callers treat it as a logged no-op so the answer never hangs/throws.
-   */
-  answerPermission(
-    sessionId: string,
-    requestId: string,
-    answer: PermissionAnswer,
-  ): Promise<boolean>;
 }
 
 export * from "./capabilities.ts";

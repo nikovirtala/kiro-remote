@@ -1,8 +1,8 @@
 /**
- * The SERVERLESS bridge consumer: an AWS Lambda SQS handler that drives cloud
- * sessions over ACP against the bundled KAS engine ({@link KasEngine}), using
- * the SAME {@link CloudSession} persistence/state primitives the Fargate bridge
- * uses, so both hosts produce identical durable events and session state.
+ * The bridge consumer: an AWS Lambda SQS handler that drives cloud sessions
+ * over ACP against the bundled KAS engine ({@link KasEngine}), using the
+ * {@link CloudSession} persistence/state primitives for durable events and
+ * session state.
  *
  * WHY THE ENGINE IS STARTED DIRECTLY
  * The Kiro CLI cannot start its engine inside Lambda (`prctl(PR_SET_PDEATHSIG)`
@@ -34,10 +34,10 @@
  * stays `running`, a mid-turn steer, cancel or `whenBusy=queue` is rejected
  * exactly as before.
  *
- * OUTCOME HANDLING (mirrors intake.ts)
+ * OUTCOME HANDLING
  *  - An {@link UnsupportedCloudOperationError} is PERMANENT: log a warning,
  *    persist a client-visible rejection event, and ack the record (`adopt` is
- *    rejected this way on the Lambda path).
+ *    rejected this way).
  *  - A genuine TRANSIENT error returns the record id in
  *    {@link SQSBatchResponse.batchItemFailures} so the event-source mapping
  *    (ReportBatchItemFailures) retries only that message.
@@ -150,8 +150,7 @@ export interface HandleOptions {
 /* -------------------------------- config ---------------------------------- */
 
 /**
- * The consumer's configuration, read from the SAME env contract the ECS bridge
- * uses (see cli.ts configFromEnv) MINUS the ACP-only knobs. There is no
+ * The consumer's configuration, read from the function env. There is no
  * COMMAND_QUEUE_URL here: the event-source mapping delivers the messages.
  */
 export interface ConsumerConfig {
@@ -190,7 +189,7 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-/** Build a {@link ConsumerConfig} from the bridge's existing env contract. */
+/** Build a {@link ConsumerConfig} from the function env. */
 export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ConsumerConfig {
   return {
     tableName: requireEnv(env, "TABLE_NAME"),
@@ -234,7 +233,7 @@ export class LambdaConsumer {
   private readonly now: () => number;
 
   private readonly runtimes = new Map<string, SessionRuntime>();
-  /** Cloud (Kiro) id -> our session id. The SAME instance the engine holds. */
+  /** Cloud (Kiro) id -> our session id. */
   private readonly kiroToLocal: Map<string, string>;
 
   private constructor(args: {
@@ -269,9 +268,9 @@ export class LambdaConsumer {
 
   /**
    * Build the consumer: the Repository (DynamoDB + S3), Metrics, Logger, the
-   * shared CloudSession (no subprocess runner), the catch-up scheduler, and the
-   * engine spawn spec. KIRO_API_KEY is resolved once, the SAME way serve.ts
-   * does, and placed only in the engine's env.
+   * CloudSession primitives, the catch-up scheduler, and the engine spawn
+   * spec. KIRO_API_KEY is resolved once per container and placed only in the
+   * engine's env.
    */
   static async create(deps: ConsumerDeps): Promise<LambdaConsumer> {
     const env = deps.env ?? process.env;
@@ -313,7 +312,7 @@ export class LambdaConsumer {
     }
 
     const kiroToLocal = new Map<string, string>();
-    const cloud = new CloudSession({ repo, logger, metrics, kiroToLocal, now });
+    const cloud = new CloudSession({ repo, logger, metrics, now });
 
     return new LambdaConsumer({
       repo,
@@ -432,9 +431,9 @@ export class LambdaConsumer {
     } catch (err) {
       if (err instanceof UnsupportedCloudOperationError) {
         // PERMANENT rejection (mid-turn steer/cancel, a queued follow-up with no
-        // drain, or `adopt` on the Lambda path). Keep it LOUD -- a warn log AND a
-        // client-visible rejection event -- but ack the record so SQS deletes it
-        // and the FIFO group keeps moving. This mirrors intake.ts exactly.
+        // drain, or `adopt`). Keep it LOUD -- a warn log AND a client-visible
+        // rejection event -- but ack the record so SQS deletes it and the FIFO
+        // group keeps moving.
         this.logger.warn("command_unsupported_cloud", {
           kind: command.kind,
           sessionId: command.sessionId,
@@ -460,7 +459,7 @@ export class LambdaConsumer {
     }
   }
 
-  /** Dispatch a command by kind, mirroring intake.ts dispatch(). */
+  /** Dispatch a command by kind. */
   async dispatch(command: Command, opts: HandleOptions = {}): Promise<void> {
     const log = this.logger.child({
       sub: command.sub,
@@ -499,19 +498,19 @@ export class LambdaConsumer {
         return;
       case "setConfig":
         // The per-turn model/effort/mode travel with the launch command; a
-        // standalone setConfig is a logged no-op on the Lambda path.
+        // standalone setConfig is a logged no-op.
         log.info("set_config_noop_cloud");
         return;
       case "delete":
         await this.markDeleted(command.sessionId);
         return;
       case "adopt":
-        // adopt is not supported on the Lambda path; reject it LOUDLY so it is
-        // logged + persisted as a client-visible rejection + deleted.
+        // adopt is not supported; reject it LOUDLY so it is logged + persisted
+        // as a client-visible rejection + deleted.
         await this.refresh(command.sessionId);
         throw new UnsupportedCloudOperationError(
           "adopt",
-          "adopt/session-load is not supported on the Lambda bridge; it requires the Fargate (ACP) bridge",
+          "adopt/session-load is not supported by the bridge",
         );
       default: {
         const never: never = command;
@@ -641,7 +640,7 @@ export class LambdaConsumer {
     opts: HandleOptions,
   ): Promise<void> {
     const tid = turnId ?? ulid();
-    const begun = await this.cloud.beginResume(rt, id, prompt, turnId, tid);
+    const begun = await this.cloud.beginResume(rt, id, turnId, tid);
     if (!begun) {
       return;
     }
@@ -989,8 +988,7 @@ export class LambdaConsumer {
 
   /**
    * Persist a client-visible rejection for an unsupported operation. A no-op
-   * when the runtime is gone. Delegates to the shared engine so the Lambda path
-   * persists the identical rejection event the ECS path does.
+   * when the runtime is gone.
    */
   private async recordUnsupportedRejection(
     id: string,

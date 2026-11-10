@@ -11,11 +11,9 @@ import type { Logger } from "./logger.ts";
 
 /** The complete set of metric names the bridge emits. */
 export const METRIC_NAMES = [
-  "AcpRestarts",
   "EventsWritten",
   "TimeToFirstEvent",
   "TurnDuration",
-  "PermissionWait",
   "RawEventsUnmapped",
   "SessionsLaunched",
   "LaunchPath",
@@ -42,11 +40,9 @@ export interface MetricSink {
 }
 
 const UNIT_FOR: Record<MetricName, MetricUnit> = {
-  AcpRestarts: "Count",
   EventsWritten: "Count",
   TimeToFirstEvent: "Milliseconds",
   TurnDuration: "Milliseconds",
-  PermissionWait: "Milliseconds",
   RawEventsUnmapped: "Count",
   SessionsLaunched: "Count",
   LaunchPath: "Count",

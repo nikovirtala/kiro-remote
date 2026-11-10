@@ -4,26 +4,30 @@
  * The REST API GET /v1/capabilities, the lambda capability gate, and the MCP
  * kiro_capabilities tool all READ one CONFIG#CAPS item. Writing it takes a
  * single ACP `initialize`, so no long-running ACP host is needed: this
- * publisher starts the bundled KAS engine directly (see {@link kasSpawnSpec}),
- * `initialize`s it to obtain the REAL initializeResult, writes
- * CONFIG#CAPS via the SAME {@link persistCaps} logic the ECS bridge uses, then
- * stops the engine. On the Lambda deployment it is invoked once on deploy and
- * on a schedule (EventBridge), so a transient failure self-heals on the next
- * run and the API's empty-caps fallback is the only impact until a publish
- * succeeds.
+ * publisher starts the bundled KAS engine through {@link KasEngine} (see
+ * {@link kasSpawnSpec}), `initialize`s it to obtain the REAL initializeResult,
+ * writes CONFIG#CAPS via {@link persistCaps}, then stops the engine. It is
+ * invoked once on deploy and on a schedule (EventBridge), so a transient
+ * failure self-heals on the next run and the API's empty-caps fallback is the
+ * only impact until a publish succeeds.
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { Repository } from "@nikovirtala/kiro-remote-core";
-import { AcpGateway } from "./gateway.ts";
-import { kasSpawnSpec } from "./kas-engine.ts";
+import { type InitializeResult, Repository } from "@nikovirtala/kiro-remote-core";
+import { KasEngine, kasSpawnSpec } from "./kas-engine.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { type PersistCapsOptions, persistCaps } from "./persist-caps.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
-import { defaultSpawn, type SpawnFn, StdioJsonRpcTransport } from "./transport.ts";
+import type { SpawnFn } from "./transport.ts";
+
+/**
+ * The client capabilities the publisher advertises on `initialize`, so the
+ * persisted advertisement reflects a client that can open external URLs.
+ */
+export const CAPS_CLIENT_CAPABILITIES = { _meta: { kiro: { openExternalUrl: true } } };
 
 export interface CapsPublisherConfig {
   tableName: string;
@@ -51,7 +55,7 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-/** Build a {@link CapsPublisherConfig} from the bridge's existing env contract. */
+/** Build a {@link CapsPublisherConfig} from the function env. */
 export function capsPublisherConfigFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): CapsPublisherConfig {
@@ -63,26 +67,25 @@ export function capsPublisherConfigFromEnv(
 }
 
 /**
- * Run the one-shot capability publish against the provided gateway + repo: a
+ * Run the one-shot capability publish against the provided engine + repo: a
  * single ACP `initialize` to obtain the real initializeResult, then persistCaps.
  * Split out from {@link runCapsPublish} so a test can drive it with a FAKE
- * gateway/initializeResult over the in-memory fakes (no real ACP child).
+ * engine/initializeResult over the in-memory fakes (no real ACP child).
  */
 export async function publishCaps(
   repo: Repository,
-  gateway: Pick<AcpGateway, "initialize" | "initializeResult" | "capabilities">,
+  engine: Pick<KasEngine, "initialize">,
   logger: Logger,
   options: PersistCapsOptions = {},
 ): Promise<void> {
-  // Register handlers (inside initialize) + negotiate to obtain the REAL
-  // advertisement. This is the ONLY RPC the publisher makes.
-  await gateway.initialize();
-  logger.info("caps_publisher_initialize_result", {
-    initializeResult: gateway.initializeResult,
-  });
-  // Persist CONFIG#CAPS via the SAME logic the ECS bridge uses at boot. The
-  // direct engine reports no agentInfo, so pass the image's kiro-cli version.
-  await persistCaps(repo, gateway as AcpGateway, logger, options);
+  // Negotiate to obtain the REAL advertisement. This is the ONLY RPC the
+  // publisher makes.
+  const initializeResult = ((await engine.initialize(CAPS_CLIENT_CAPABILITIES)) ??
+    {}) as InitializeResult;
+  logger.info("caps_publisher_initialize_result", { initializeResult });
+  // The direct engine reports no agentInfo, so options carry the image's
+  // kiro-cli version.
+  await persistCaps(repo, initializeResult, logger, options);
 }
 
 /**
@@ -111,30 +114,20 @@ export async function runCapsPublish(deps: CapsPublisherDeps): Promise<void> {
   // The engine needs KIRO_API_KEY in its env (never logged).
   const apiKey = await resolveKiroApiKey({ secretsManager, logger, env });
 
-  const transport = new StdioJsonRpcTransport({
+  const engine = new KasEngine({
     spec: kasSpawnSpec({ env, apiKey }),
-    spawnFn: deps.spawnFn ?? defaultSpawn,
+    ...(deps.spawnFn ? { spawnFn: deps.spawnFn } : {}),
     logger,
-  });
-  const gateway = new AcpGateway({
-    transport,
-    logger,
-    now,
-    // The publisher never drives sessions, so the hooks are inert.
-    hooks: {
-      onSessionUpdate: () => {},
-      onPermissionRequested: () => {},
-    },
   });
 
-  transport.start();
+  engine.start();
   try {
-    await publishCaps(repo, gateway, logger, {
+    await publishCaps(repo, engine, logger, {
       ...(env.KIRO_CLI_VERSION ? { kiroCliVersion: env.KIRO_CLI_VERSION } : {}),
     });
   } finally {
     // Always stop the short-lived engine so the invocation returns.
-    await transport.stop("SIGTERM");
+    await engine.stop();
   }
 }
 

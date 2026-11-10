@@ -42,25 +42,3 @@ export function initResult(adv: InitAdvertisement = {}): Record<string, unknown>
     ],
   };
 }
-
-/** A standard four-option permission request for a shell tool call. */
-export const SHELL_PERMISSION_PARAMS = {
-  toolCall: { toolCallId: "call-1", title: "Run tests", status: "pending" },
-  options: [
-    { optionId: "accept", name: "Allow", kind: "allow_once" },
-    { optionId: "always-accept", name: "Always allow", kind: "allow_always" },
-    { optionId: "reject", name: "Deny", kind: "reject_once" },
-    { optionId: "always-reject", name: "Always deny", kind: "reject_always" },
-  ],
-  requestId: "perm-1",
-  _meta: {
-    kiro: {
-      consent: {
-        capability: "shell",
-        resource: "npm run test",
-        workspaceRoot: "/workspace/project",
-        persistableConsent: true,
-      },
-    },
-  },
-};
