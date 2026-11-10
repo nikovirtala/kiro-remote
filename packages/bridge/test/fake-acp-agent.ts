@@ -55,8 +55,14 @@ interface Scenario {
     response?: { stopReason?: string };
     /** When set, the agent does NOT resolve the prompt until a steer arrives. */
     waitForSteer?: boolean;
+    /** When set, the agent never answers session/prompt (a turn still running). */
+    neverRespond?: boolean;
   };
-  onLoad?: { messages?: ScriptedMessage[] };
+  onLoad?: {
+    messages?: ScriptedMessage[];
+    /** Emit `messages` BEFORE the load result (the order ACP requires). */
+    replayBeforeResponse?: boolean;
+  };
   sendUnknownRequest?: boolean;
   /**
    * Bug B lock-in: when true, the agent replies to session/prompt with a
@@ -167,12 +173,23 @@ rl.on("line", (line) => {
     }
 
     case "session/load":
+      process.stderr.write(`${JSON.stringify({ fakeAgentLoadParams: params })}\n`);
       lastSessionId = String(params.sessionId ?? lastSessionId);
+      if (scenario.onLoad?.replayBeforeResponse && scenario.onLoad.messages) {
+        emitScripted(scenario.onLoad.messages, lastSessionId);
+        send({ jsonrpc: "2.0", id, result: { sessionId: lastSessionId } });
+        return;
+      }
       send({ jsonrpc: "2.0", id, result: { sessionId: lastSessionId } });
       // Emit replay updates on load, if scripted.
       if (scenario.onLoad?.messages) {
         emitScripted(scenario.onLoad.messages, lastSessionId);
       }
+      return;
+
+    case "session/delete":
+      process.stderr.write(`${JSON.stringify({ fakeAgentDeleteParams: params })}\n`);
+      send({ jsonrpc: "2.0", id, result: {} });
       return;
 
     case "session/prompt": {
@@ -228,6 +245,9 @@ rl.on("line", (line) => {
       const respond = (): void => {
         send({ jsonrpc: "2.0", id, result: onPrompt.response ?? { stopReason: "end_turn" } });
       };
+      if (onPrompt.neverRespond) {
+        return;
+      }
       if (onPrompt.waitForSteer) {
         steerResolver = respond;
       } else if (scenario.waitForPermissionReply) {

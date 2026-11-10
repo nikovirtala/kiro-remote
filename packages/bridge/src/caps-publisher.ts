@@ -1,27 +1,16 @@
 /**
  * The one-shot capability publisher.
  *
- * WHY A SHORT-LIVED CAPS PUBLISH IS SUFFICIENT
- * The live account findings show the persistent ACP child (the Fargate bridge's
- * `kiro-cli acp --agent-engine=v3` process) NEVER drove a cloud session: over a
- * multi-hour window there were 0 adopt / 0 session_adopted events and every
- * launch took the headless `chat --cloud` path. The child's ONLY realized job
- * was a SINGLE boot-time capability publish: `bridge_initialize_result` ->
- * `config_caps_persisted` wrote the CONFIG#CAPS item (extensionMethodCount 32,
- * cloudExecution true). The REST API GET /v1/capabilities, the lambda capability
- * gate, and the MCP kiro_capabilities tool all READ that one item.
- *
- * So the persistent ACP host is NOT needed to serve capabilities -- only a
- * one-shot `initialize` is. This publisher runs exactly that: spin up the ACP
- * child, `initialize` it to obtain the REAL initializeResult, write CONFIG#CAPS
- * via the SAME {@link persistCaps} logic the ECS bridge uses, then exit. On the
- * Lambda deployment it is invoked once on deploy and on a schedule (EventBridge,
- * wired in FEAT-004), so a transient failure self-heals on the next run and the
- * API's empty-caps fallback is the only impact until a publish succeeds.
- *
- * This is the ONLY place the Lambda path touches the ACP transport/gateway, and
- * it does so briefly and off the hot command path -- the cloud TURN path
- * ({@link lambda-consumer}) remains entirely gateway-free.
+ * The REST API GET /v1/capabilities, the lambda capability gate, and the MCP
+ * kiro_capabilities tool all READ one CONFIG#CAPS item. Writing it takes a
+ * single ACP `initialize`, so no long-running ACP host is needed: this
+ * publisher starts the bundled KAS engine directly (see {@link kasSpawnSpec}),
+ * `initialize`s it to obtain the REAL initializeResult, writes
+ * CONFIG#CAPS via the SAME {@link persistCaps} logic the ECS bridge uses, then
+ * stops the engine. On the Lambda deployment it is invoked once on deploy and
+ * on a schedule (EventBridge), so a transient failure self-heals on the next
+ * run and the API's empty-caps fallback is the only impact until a publish
+ * succeeds.
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -30,10 +19,10 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { Repository } from "@nikovirtala/kiro-remote-core";
 import { AcpGateway } from "./gateway.ts";
+import { kasSpawnSpec } from "./kas-engine.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { persistCaps } from "./persist-caps.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
-import { ACP_ARGS, ACP_COMMAND } from "./serve.ts";
 import { defaultSpawn, type SpawnFn, StdioJsonRpcTransport } from "./transport.ts";
 
 export interface CapsPublisherConfig {
@@ -95,7 +84,7 @@ export async function publishCaps(
 }
 
 /**
- * Spin up the ACP child, initialize, publish CONFIG#CAPS, and stop the child.
+ * Start the engine, initialize, publish CONFIG#CAPS, and stop the engine.
  * Resolves once the publish completes (or its guarded failure is logged) and
  * the transport is stopped, so the Lambda invocation returns promptly.
  */
@@ -117,16 +106,11 @@ export async function runCapsPublish(deps: CapsPublisherDeps): Promise<void> {
     now,
   });
 
-  // The ACP child needs KIRO_API_KEY exactly like serve.ts.
+  // The engine needs KIRO_API_KEY in its env (never logged).
   const apiKey = await resolveKiroApiKey({ secretsManager, logger, env });
-  const childEnv: Record<string, string> = {};
-  if (apiKey) {
-    childEnv.KIRO_API_KEY = apiKey;
-  }
-  childEnv.KIRO_LOG_LEVEL = env.KIRO_LOG_LEVEL ?? "debug";
 
   const transport = new StdioJsonRpcTransport({
-    spec: { command: ACP_COMMAND, args: [...ACP_ARGS], env: childEnv },
+    spec: kasSpawnSpec({ env, apiKey }),
     spawnFn: deps.spawnFn ?? defaultSpawn,
     logger,
   });
@@ -145,7 +129,7 @@ export async function runCapsPublish(deps: CapsPublisherDeps): Promise<void> {
   try {
     await publishCaps(repo, gateway, logger);
   } finally {
-    // Always stop the short-lived ACP child so the invocation returns.
+    // Always stop the short-lived engine so the invocation returns.
     await transport.stop("SIGTERM");
   }
 }

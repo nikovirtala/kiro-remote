@@ -20,8 +20,9 @@ import {
 import { describe, expect, test } from "vitest";
 import { publishCaps, runCapsPublish } from "../src/caps-publisher.ts";
 import type { AcpGateway } from "../src/gateway.ts";
+import { KAS_NODE_PATH, KAS_SERVER_PATH } from "../src/kas-engine.ts";
 import { createLogger } from "../src/logger.ts";
-import { defaultSpawn, type SpawnFn } from "../src/transport.ts";
+import { defaultSpawn, type SpawnFn, type SpawnSpec } from "../src/transport.ts";
 import { FakeDocClient, FakeS3Client } from "./fakes.ts";
 import { initResult } from "./scenarios.ts";
 
@@ -30,15 +31,19 @@ const FAKE_AGENT = fileURLToPath(new URL("./fake-acp-agent.ts", import.meta.url)
 /**
  * A SpawnFn that launches the real fake ACP agent as a Node child (exactly the
  * harness pattern) but routes its advertisement through FAKE_ACP_SCENARIO. It
- * records the spawned child so a test can assert the transport actually killed
- * it (the SIGTERM in runCapsPublish's finally).
+ * records the requested spec and the spawned child so a test can assert what
+ * the publisher would start and that the transport actually killed it (the
+ * SIGTERM in runCapsPublish's finally).
  */
 function recordingFakeAgentSpawn(scenario: unknown): {
   spawnFn: SpawnFn;
+  specs: SpawnSpec[];
   children: ChildProcessWithoutNullStreams[];
 } {
+  const specs: SpawnSpec[] = [];
   const children: ChildProcessWithoutNullStreams[] = [];
   const spawnFn: SpawnFn = (spec) => {
+    specs.push(spec);
     const child = defaultSpawn({
       command: process.execPath,
       args: [FAKE_AGENT],
@@ -47,7 +52,7 @@ function recordingFakeAgentSpawn(scenario: unknown): {
     children.push(child);
     return child;
   };
-  return { spawnFn, children };
+  return { spawnFn, specs, children };
 }
 
 function wireRepo(): { repo: Repository; ddb: FakeDocClient } {
@@ -142,11 +147,11 @@ describe("caps-publisher publishCaps", () => {
 });
 
 describe("caps-publisher runCapsPublish lifecycle", () => {
-  test("spawns the ACP child, publishes CONFIG#CAPS, and stops the child on finish", async () => {
+  test("spawns the engine, publishes CONFIG#CAPS, and stops the child on finish", async () => {
     const { ddb } = wireRepo();
     const logLines: string[] = [];
     const logger = createLogger({ level: "debug", sink: (l) => logLines.push(l) });
-    const { spawnFn, children } = recordingFakeAgentSpawn({
+    const { spawnFn, specs, children } = recordingFakeAgentSpawn({
       initialize: initResult({
         extensionMethods: ["_kiro/openExternalUrl", "_kiro/session/context"],
         executionTargets: ["cloud", "local"],
@@ -168,6 +173,18 @@ describe("caps-publisher runCapsPublish lifecycle", () => {
 
     // The child was actually spawned (the real transport ran against it).
     expect(children.length).toBe(1);
+
+    // The publisher starts the bundled engine directly, not kiro-cli.
+    const spec = specs[0];
+    expect(spec?.command).toBe(KAS_NODE_PATH);
+    expect(spec?.args).toEqual([
+      "--experimental-wasm-modules",
+      KAS_SERVER_PATH,
+      "--transport=stdio",
+    ]);
+    expect(spec?.env?.CLOUD_CONFIG_ENDPOINT).toBe("https://app.kiro.dev");
+    // Compare, never print: the resolved key reaches the child env.
+    expect(spec?.env?.KIRO_API_KEY !== undefined).toBe(true);
     const child = children[0];
 
     // runCapsPublish SIGTERMs the child in its finally; wait for the exit to
