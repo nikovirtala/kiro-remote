@@ -602,6 +602,7 @@ export class KiroRemote extends Construct {
     // Public redirect to the Cognito managed-login passkey registration page
     // (the invitation email links here; see the router).
     this.httpApi.addRoutes({ path: "/passkeys/add", methods: [HttpMethod.GET], integration });
+    this.httpApi.addRoutes({ path: "/passkeys/added", methods: [HttpMethod.GET], integration });
     // The OAuth facade endpoints route to their dedicated KMS-scoped handlers.
     this.httpApi.addRoutes({
       path: "/oauth/callback",

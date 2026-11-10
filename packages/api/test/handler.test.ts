@@ -42,8 +42,34 @@ describe("Lambda handler over API Gateway HTTP API v2 events", () => {
     const result = await handler(makeEvent({ method: "GET", path: "/passkeys/add" }));
     expect(result.statusCode).toBe(302);
     expect(result.headers?.location).toBe(
-      "https://cognito.example.com/passkeys/add?client_id=cognito-app-client&redirect_uri=https%3A%2F%2Fkiro.example.com%2Foauth%2Fcallback",
+      "https://cognito.example.com/passkeys/add?client_id=cognito-app-client&redirect_uri=https%3A%2F%2Fkiro.example.com%2Fpasskeys%2Fadded",
     );
+  });
+
+  test("GET /passkeys/added renders a static success page unauthenticated", async () => {
+    const h = buildHarness();
+    const handler = createHandler(h.ctx);
+    const result = await handler(
+      makeEvent({ method: "GET", path: "/passkeys/added", query: { code: "x" } }),
+    );
+    expect(result.statusCode).toBe(200);
+    expect(result.headers?.["content-type"]).toContain("text/html");
+    expect(result.body).toContain("Passkey added");
+  });
+
+  test("GET /passkeys/added shows an escaped Cognito error", async () => {
+    const h = buildHarness();
+    const handler = createHandler(h.ctx);
+    const result = await handler(
+      makeEvent({
+        method: "GET",
+        path: "/passkeys/added",
+        query: { error: "access_denied", error_description: "<script>x</script>" },
+      }),
+    );
+    expect(result.statusCode).toBe(400);
+    expect(result.body).toContain("access_denied");
+    expect(result.body).not.toContain("<script>");
   });
 
   test("unknown path returns 404 problem+json", async () => {
