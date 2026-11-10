@@ -150,6 +150,11 @@ export const DEFAULT_MAX_CLOUD_SESSIONS = 10;
 export const DEFAULT_EVENT_TTL_DAYS = 30;
 /** Default permission-answer window. */
 export const DEFAULT_PERMISSION_TIMEOUT = Duration.hours(24);
+/**
+ * Memory for every Node.js Lambda function (API, OAuth, bridge consumer and
+ * caps publisher). The OAuth callback ran out of memory at 256 MB.
+ */
+export const LAMBDA_MEMORY_MB = 2048;
 
 export interface KiroRemoteProps {
   /**
@@ -537,7 +542,7 @@ export class KiroRemote extends Construct {
       runtime: NODEJS_26_X,
       handler: "index.handler",
       code: lambdaCode,
-      memorySize: 512,
+      memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.seconds(29),
       environment: commonEnv,
     });
@@ -547,7 +552,7 @@ export class KiroRemote extends Construct {
       runtime: NODEJS_26_X,
       handler: "index.handler",
       code: lambdaCode,
-      memorySize: 256,
+      memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.seconds(29),
       environment: commonEnv,
     });
@@ -557,7 +562,7 @@ export class KiroRemote extends Construct {
       runtime: NODEJS_26_X,
       handler: "index.handler",
       code: lambdaCode,
-      memorySize: 256,
+      memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.seconds(29),
       environment: commonEnv,
     });
@@ -885,7 +890,7 @@ export class KiroRemote extends Construct {
       this.consumerFn = new DockerImageFunction(this, "BridgeConsumerFn", {
         code: buildLambdaImage(CONSUMER_CMD),
         architecture: Architecture.ARM_64,
-        memorySize: 1024,
+        memorySize: LAMBDA_MEMORY_MB,
         timeout: Duration.minutes(15),
         reservedConcurrentExecutions: maxCloudSessions,
         environment: {
@@ -951,7 +956,7 @@ export class KiroRemote extends Construct {
       this.capsPublisherFn = new DockerImageFunction(this, "BridgeCapsPublisherFn", {
         code: buildLambdaImage(CAPS_CMD),
         architecture: Architecture.ARM_64,
-        memorySize: 1024,
+        memorySize: LAMBDA_MEMORY_MB,
         timeout: Duration.minutes(5),
         environment: bridgeLambdaEnv,
       });
