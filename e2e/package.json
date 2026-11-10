@@ -13,6 +13,7 @@
     "lint": "biome check ."
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@nikovirtala/kiro-remote-api": "workspace:*",
     "@nikovirtala/kiro-remote-core": "workspace:*",
     "@nikovirtala/kiro-remote-mcp": "workspace:*"
