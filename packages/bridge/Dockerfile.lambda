@@ -7,13 +7,23 @@
 # Lambda container runtime rather than a long-running ECS task:
 #
 # - linux/arm64 (the Lambda functions run on Graviton, Architecture.ARM_64).
-# - Installs kiro-cli via the OFFICIAL install script, pinned by a build ARG
-#   (never hardcode a version here) -- EXACTLY the stanza from
-#   packages/bridge/Dockerfile, including the kiro-cli AND kiro-cli-chat
-#   presence asserts. The caps-publisher spawns an ACP child
-#   (`kiro-cli acp ...`) which internally exec's `kiro-cli-chat`, and the
-#   consumer spawns `kiro-cli chat ...`, so BOTH binaries must be present and
-#   on PATH or the image is silently broken.
+# - Runs the Kiro agent engine (KAS) DIRECTLY, not through kiro-cli. kiro-cli
+#   3.x starts its engine only after prctl(PR_SET_PDEATHSIG), which Lambda's
+#   sandbox rejects with EPERM, so `kiro-cli acp` cannot run there. Instead the
+#   `kiro` stage installs kiro-cli (pinned by the KIRO_CLI_VERSION build ARG,
+#   never hardcoded here), runs `kiro-cli acp --agent-engine=v3` once so it
+#   unpacks its bundled Node and KAS release into
+#   `$HOME/.local/share/kiro-cli/{node,kas/<ver>-<hash>/}`, and copies them to
+#   /opt/kiro with a `kas/current` symlink. The runtime stage copies only
+#   /opt/kiro (no kiro-cli). The handlers start
+#   `/opt/kiro/node --experimental-wasm-modules
+#   /opt/kiro/kas/current/node_modules/@kiro/agent/dist/server/acp-server.js
+#   --transport=stdio` (KAS_NODE_PATH / KAS_SERVER_PATH in
+#   packages/bridge/src/kas-engine.ts; both must match this file).
+# - The engine is pinned to the kiro-cli version it came from. Its launch
+#   command and env are an INTERNAL, unversioned interface of kiro-cli, so a
+#   KIRO_CLI_VERSION bump must re-run the engine smoke before deploy; the
+#   build fails loudly here if the unpacked layout changes.
 # - esbuild-bundles BOTH Lambda entries at IMAGE-BUILD time into single
 #   self-contained CommonJS files (mirroring the ECS image's `bridge.cjs`
 #   step), so there is no bare `@nikovirtala/*` import and no raw `.ts` under a
@@ -88,8 +98,8 @@ COPY packages/bridge ./packages/bridge
 # --resolve-extensions includes `.ts` so esbuild resolves the repo's explicit
 # `.ts` import specifiers (allowImportingTsExtensions +
 # rewriteRelativeImportExtensions in tsconfig) without a custom plugin. The
-# kiro-cli child process is a runtime PATH binary spawned via child_process,
-# not an import, so it is neither bundled nor externalized.
+# engine child process (/opt/kiro/node) is spawned via child_process, not
+# imported, so it is neither bundled nor externalized.
 #
 # esbuild is a devDependency of @nikovirtala/kiro-remote-cdk; under pnpm's
 # isolated node_modules layout its bin is linked ONLY into that package's
@@ -111,12 +121,11 @@ RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/lambda-consumer.t
       --outfile=/app/dist/caps-publisher.cjs
 
 ############################
-# runtime: AWS Lambda Node base + kiro-cli + the self-contained bundles
+# kiro: install kiro-cli and unpack its bundled engine into /opt/kiro
 ############################
-# The AWS Lambda base image ships the Runtime Interface Client/Emulator so the
-# bundled `handler` export is invokable by the Lambda service. public.ecr.aws
-# is the canonical source for the managed base images.
-FROM public.ecr.aws/lambda/nodejs:26 AS runtime
+# Same base as the runtime stage so the unpacked Node binary links against the
+# same Amazon Linux 2023 userland it runs on.
+FROM public.ecr.aws/lambda/nodejs:26 AS kiro
 
 # The kiro-cli version to install is a REQUIRED build arg (no default pin here).
 ARG KIRO_CLI_VERSION
@@ -125,19 +134,12 @@ ARG KIRO_CLI_VERSION
 # `curl -fsSL https://cli.kiro.dev/install | bash` (note: no `.sh` suffix).
 ARG KIRO_CLI_INSTALL_URL=https://cli.kiro.dev/install
 
-# Install kiro-cli EXACTLY like the ECS image: the official script needs a
-# downloader (curl), `unzip`, and `sha256sum`. The AWS Lambda base image is
-# Amazon Linux 2023, so packages come from `dnf`/`microdnf`, not apt. The
-# script's shebang is `#!/bin/bash` and it uses bash-only features, so it MUST
-# be piped to `bash`. The version is passed via `--version` (strict semver).
-#
-# CRITICAL: the CLI ships TWO binaries -- `kiro-cli` (the entrypoint) and
-# `kiro-cli-chat` (the headless chat/ACP engine that both `kiro-cli chat` and
-# `kiro-cli acp` internally exec). We set `Q_INSTALL_GLOBAL=1` so BOTH binaries
-# land in /usr/local/bin (on the default PATH and siblings of each other), then
-# ASSERT both are present+executable so a standalone zip (which ships no
-# kiro-cli-chat) fails the build LOUDLY here instead of producing a broken
-# image. This mirrors packages/bridge/Dockerfile's install stanza 1:1.
+# Install kiro-cli like the ECS image: the official script needs a downloader
+# (curl), `unzip`, and `sha256sum`. The AWS Lambda base image is Amazon Linux
+# 2023, so packages come from `dnf`/`microdnf`, not apt. The script's shebang is
+# `#!/bin/bash` and it uses bash-only features, so it MUST be piped to `bash`.
+# The version is passed via `--version` (strict semver). kiro-cli 3.x ships one
+# binary; `Q_INSTALL_GLOBAL=1` puts it in /usr/local/bin.
 #
 # `curl` is NOT in the package list: the Lambda AL2023 base already ships
 # `curl-minimal` (which provides /usr/bin/curl), and asking dnf/microdnf for
@@ -149,15 +151,55 @@ RUN (command -v microdnf >/dev/null 2>&1 \
     && curl -fsSL "${KIRO_CLI_INSTALL_URL}" | Q_INSTALL_GLOBAL=1 bash -s -- --version "${KIRO_CLI_VERSION}" --no-modify-path \
     && { [ -x /usr/local/bin/kiro-cli ] || { [ -d /root/.local/bin ] && cp -a /root/.local/bin/. /usr/local/bin/; }; } \
     && { [ -x /usr/local/bin/kiro-cli ] || { echo "kiro-cli not found after install" >&2; exit 1; }; } \
-    && { command -v kiro-cli-chat >/dev/null 2>&1 \
-      || { echo "kiro-cli-chat not found after install (need the bundle zip that ships it)" >&2; exit 1; }; } \
-    && chmod 0755 /usr/local/bin/kiro-cli /usr/local/bin/kiro-cli-chat \
+    && chmod 0755 /usr/local/bin/kiro-cli \
     && kiro-cli --version
 
-# kiro-cli needs a WRITABLE HOME/KIRO_HOME for its config/sessions/agent state.
-# The Lambda execution environment only guarantees /tmp is writable, so point
-# HOME and KIRO_HOME under /tmp (the handlers never persist anything that must
-# survive an invocation -- durable state lives in DynamoDB/S3).
+# Unpack the engine. `kiro-cli acp --agent-engine=v3` extracts its embedded Node
+# and KAS release under $HOME/.local/share/kiro-cli on first start. Feed it an
+# `initialize` and hold stdin open so it gets that far, then let `timeout` end
+# it; its exit status does not matter (a dummy key, no network auth), only the
+# files it leaves behind. The checks after it fail the build LOUDLY, printing
+# the unpack log, if the layout is not exactly one `node` binary plus one
+# `kas/<ver>-<hash>/` release. The `*.lock` files kiro-cli leaves next to the
+# release are dropped so nothing stale ships.
+RUN mkdir -p /build \
+    && { (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}'; sleep 30) \
+      | HOME=/build KIRO_API_KEY=dummy timeout 90 kiro-cli acp --agent-engine=v3 >/tmp/unpack.log 2>&1 || true; } \
+    && share=/build/.local/share/kiro-cli \
+    && { [ -x "${share}/node" ] \
+      || { echo "engine unpack failed: ${share}/node missing or not executable" >&2; cat /tmp/unpack.log >&2; exit 1; }; } \
+    && set -- "${share}"/kas/*/ \
+    && { [ "$#" -eq 1 ] && [ -d "$1" ] \
+      || { echo "engine unpack failed: expected exactly one directory in ${share}/kas, got: $*" >&2; cat /tmp/unpack.log >&2; exit 1; }; } \
+    && kas_dir="${1%/}" \
+    && kas_name="${kas_dir##*/}" \
+    && mkdir -p /opt/kiro/kas \
+    && cp -L "${share}/node" /opt/kiro/node \
+    && cp -a "${kas_dir}" "/opt/kiro/kas/${kas_name}" \
+    && ln -s "${kas_name}" /opt/kiro/kas/current \
+    && rm -f /opt/kiro/kas/*.lock \
+    && chmod -R a+rX /opt/kiro \
+    && { test -f /opt/kiro/kas/current/node_modules/@kiro/agent/dist/server/acp-server.js \
+      || { echo "engine unpack failed: acp-server.js missing under /opt/kiro/kas/current" >&2; cat /tmp/unpack.log >&2; exit 1; }; } \
+    && /opt/kiro/node --version \
+    && echo "engine unpacked: kas/${kas_name}"
+
+############################
+# runtime: AWS Lambda Node base + the unpacked engine + the bundles
+############################
+# The AWS Lambda base image ships the Runtime Interface Client/Emulator so the
+# bundled `handler` export is invokable by the Lambda service. public.ecr.aws
+# is the canonical source for the managed base images.
+FROM public.ecr.aws/lambda/nodejs:26 AS runtime
+
+# Only the engine (its Node binary and the KAS release); kiro-cli itself is not
+# needed at runtime.
+COPY --from=kiro /opt/kiro /opt/kiro
+
+# The engine needs a WRITABLE HOME/KIRO_HOME for its config/sessions/agent
+# state. The Lambda execution environment only guarantees /tmp is writable, so
+# point HOME and KIRO_HOME under /tmp (the handlers never persist anything that
+# must survive an invocation -- durable state lives in DynamoDB/S3).
 ENV HOME=/tmp \
     KIRO_HOME=/tmp/.kiro
 
