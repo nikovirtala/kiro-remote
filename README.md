@@ -18,7 +18,6 @@ Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in thro
 How sign-in works:
 
 - The user pool is invite-only, and users sign in with a passkey.
-- MFA is off because a passkey sign-in is already multi-factor.
 - The email-code factor used to bootstrap the first passkey stays usable afterwards. Cognito cannot enforce passkey-only sign-in.
 
 The API and OAuth callback Lambdas run on the Node 26 runtime, which AWS lists as public preview (the bridge Lambdas are container images). See [Registering a user](./docs/users.md), [SECURITY.md](./SECURITY.md) and [Toolchain](#toolchain).
