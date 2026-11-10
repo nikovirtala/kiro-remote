@@ -94,6 +94,42 @@ rejected by Kiro, which proves the engine reached it). Add
 `--user 10001:10001` after `--rm` to check that a non-root user, like Lambda's
 sandbox user, can run `/opt/kiro`.
 
+The Fargate bridge starts `kiro-cli acp --agent-engine=v3` at boot, which
+unpacks the engine into `$HOME/.local/share/kiro-cli` before it answers. The
+same smoke against the Fargate image, as the `bridge` user (uid 10001):
+
+```bash
+docker run --rm --platform linux/arm64 --user 10001:10001 --entrypoint /bin/sh kiro-remote-bridge:3.1.0 -c '(printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/tmp\",\"mcpServers\":[],\"_meta\":{\"kiro\":{\"executionTarget\":{\"kind\":\"cloud-sandbox\"},\"sessionSource\":\"remote\",\"repositories\":[\"octo/repo\"]}}}}"; sleep 40) | KIRO_API_KEY=dummy timeout 90 kiro-cli acp --agent-engine=v3 2>/dev/null'
+```
+
+Expected: the same `"id":1` result and `"id":2` `Identity provider is required`
+error.
+
+## Live-test checklist (Lambda direct engine)
+
+The unit tests drive a fake engine. These checks need a deployed `lambda`
+stack and a real Kiro API key:
+
+- **Launch and follow-up.** Launch a session, then send a follow-up. Both
+  settle `idle`, and the consumer logs `session_launched` and no
+  `cloud_turn_failed`.
+- **Forced detach.** Ordinary turns finish long before the 90 s margin, so the
+  detach path only runs when forced. Set `DETACH_MARGIN_MS` on the consumer
+  function (in the Lambda console, so the other env vars stay as they are) to
+  `890000`, which detaches about 10 s into a turn on the 15-minute function.
+  Send a prompt that runs longer than that, once as a launch and once as a
+  follow-up. Expect `turn_detached`, then one or more `catch_up_pending`, then
+  `catch_up_completed`, with the session back to `idle` and the turn's text in
+  the event log once, without duplicates. This shows whether stopping the
+  engine leaves the cloud turn running and whether a remote `session/load`
+  replays a running turn. A `catch_up_segment_mismatch` or a catch-up that
+  stays pending after the turn finished in Kiro is a failure to report.
+  Remove the variable afterwards.
+- **Fargate on 3.1.0** (only before deploying `fargate` or `both` with
+  `KIRO_CLI_VERSION=3.1.0`). `headless.ts` parses `[cloud] session <uuid>` from
+  `kiro-cli chat --cloud` stderr. Confirm a real 3.1.0 cloud chat still prints
+  that line.
+
 ## The live end-to-end harness
 
 ```bash

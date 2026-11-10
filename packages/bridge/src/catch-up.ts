@@ -8,10 +8,16 @@
  * and {@link planCatchUp} works out which of the replayed events for the
  * detached turn the DynamoDB event log does not hold yet.
  *
- * Deduplication uses the event log as the ledger. The detached turn is always
- * the session's latest turn, so only the replay segment from the LAST
- * `turn_start` marker is considered, compared against the events already
- * recorded under the turn's id:
+ * The replay segment of the detached turn is found by its ordinal: the
+ * message carries {@link CatchUpMessage.turnOrdinal} (1 for a launch, the
+ * number of `turn_start` markers in the pre-prompt load replay + 1 for a
+ * follow-up), and a replay with fewer turns does not hold the turn yet. Without
+ * an ordinal (a redelivered command recovering a hard-killed turn) the segment
+ * from the LAST `turn_start` is used, and a segment whose text diverges from
+ * the recorded text is treated as an earlier turn: nothing is written.
+ *
+ * Deduplication uses the event log as the ledger. The segment is compared
+ * against the events already recorded under the turn's id:
  *  - message/thought/user chunks: per-type text-prefix matching on the
  *    concatenated text (live streaming and the replay split text differently);
  *  - tool.call / tool.update: key `(type, toolCallId, status)`;
@@ -42,6 +48,11 @@ export interface CatchUpMessage {
   attempt: number;
   /** Epoch ms when the turn was detached. */
   detachedAt: number;
+  /**
+   * 1-based position of the detached turn among the replay's `turn_start`
+   * markers. Absent when unknown (a hard-kill recovery).
+   */
+  turnOrdinal?: number;
 }
 
 export function isCatchUpMessage(value: unknown): value is CatchUpMessage {
@@ -56,7 +67,9 @@ export function isCatchUpMessage(value: unknown): value is CatchUpMessage {
     typeof v.turnId === "string" &&
     typeof v.afterSeq === "number" &&
     typeof v.attempt === "number" &&
-    typeof v.detachedAt === "number"
+    typeof v.detachedAt === "number" &&
+    (v.turnOrdinal === undefined ||
+      (typeof v.turnOrdinal === "number" && Number.isInteger(v.turnOrdinal) && v.turnOrdinal >= 1))
   );
 }
 
@@ -86,10 +99,16 @@ export class SqsCatchUpScheduler implements CatchUpScheduler {
 }
 
 export interface CatchUpPlan {
-  /** The replay holds a `turn_start` marker. */
+  /** The replay holds the detached turn's `turn_start` marker. */
   turnFound: boolean;
-  /** The last turn's segment holds a `turn_end` marker. */
+  /** The turn's segment holds a `turn_end` marker. */
   ended: boolean;
+  /**
+   * Set when no ordinal was given and the last turn's text diverges from the
+   * recorded text: the segment is probably an earlier turn, so nothing is
+   * written.
+   */
+  mismatch?: true;
   /** The last `turn.completed` stopReason in the segment. */
   stopReason?: string;
   /** Events to append, in replay order, under `turnId` with `replay: false`. */
@@ -123,19 +142,27 @@ function otherKey(ev: NormalizedEvent): string {
   return `${ev.type}|${ev.rawType}|${kind}`;
 }
 
+/** Count the `turn_start` markers in raw `session/update` objects (a load replay). */
+export function countTurnStarts(updates: unknown[]): number {
+  return updates.filter((u) => isTurnMarker(normalizeUpdate("", u), "turn_start")).length;
+}
+
 /**
  * Work out which replayed events of the detached turn are missing from the
  * event log. Pure: `updates` are raw ACP `session/update` objects from the
- * load replay, `recorded` the normalized payloads already logged for `turnId`.
+ * load replay, `recorded` the normalized payloads already logged for `turnId`,
+ * `turnOrdinal` the turn's 1-based position among the replay's turns.
  */
 export function planCatchUp(args: {
   sessionId: string;
   turnId: string;
   updates: unknown[];
   recorded: NormalizedEvent[];
+  turnOrdinal?: number;
   onUnmapped?: (rawType: string) => void;
 }): CatchUpPlan {
-  const { sessionId, turnId } = args;
+  const { sessionId, turnId, turnOrdinal } = args;
+  const notFound: CatchUpPlan = { turnFound: false, ended: false, events: [] };
   const normalized = args.updates.map((u) =>
     normalizeUpdate(sessionId, u, {
       turnId,
@@ -143,18 +170,20 @@ export function planCatchUp(args: {
     }),
   );
 
-  let start = -1;
-  for (let i = normalized.length - 1; i >= 0; i--) {
-    const ev = normalized[i];
-    if (ev && isTurnMarker(ev, "turn_start")) {
-      start = i;
-      break;
+  const starts: number[] = [];
+  normalized.forEach((ev, i) => {
+    if (isTurnMarker(ev, "turn_start")) {
+      starts.push(i);
     }
+  });
+  // With an ordinal the segment runs from that turn's start to the next
+  // turn's start; a replay with fewer turns does not hold the turn yet.
+  const index = turnOrdinal !== undefined ? turnOrdinal - 1 : starts.length - 1;
+  const start = starts[index];
+  if (start === undefined) {
+    return notFound;
   }
-  if (start < 0) {
-    return { turnFound: false, ended: false, events: [] };
-  }
-  const segment = normalized.slice(start);
+  const segment = normalized.slice(start, starts[index + 1] ?? normalized.length);
 
   // What the log already holds for the turn.
   const remainingText = new Map<TextType, string>();
@@ -199,6 +228,10 @@ export function planCatchUp(args: {
       } else if (t.startsWith(r)) {
         emit({ ...ev, content: { ...ev.content, text: t.slice(r.length) } });
         remainingText.set(ev.type, "");
+      } else if (turnOrdinal === undefined) {
+        // Without an ordinal, diverging text means the last turn in the
+        // replay is not the detached one (the replay lacks it): write nothing.
+        return { ...notFound, mismatch: true };
       } else {
         emit(ev);
         remainingText.set(ev.type, "");

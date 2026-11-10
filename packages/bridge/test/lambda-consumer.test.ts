@@ -34,7 +34,12 @@ import {
   type CatchUpMessage,
   type CatchUpScheduler,
 } from "../src/catch-up.ts";
-import { LambdaConsumer, type SQSEvent, type SQSRecord } from "../src/lambda-consumer.ts";
+import {
+  createHandler,
+  LambdaConsumer,
+  type SQSEvent,
+  type SQSRecord,
+} from "../src/lambda-consumer.ts";
 import { createLogger, type Logger } from "../src/logger.ts";
 import { CollectingMetricSink } from "../src/metrics.ts";
 import { echoed, exited, type FakeAgentSpawner, fakeAgentSpawner } from "./fake-agent-spawn.ts";
@@ -85,7 +90,7 @@ const LAUNCH_NEVER_ENDS = {
   onPrompt: { messages: [info("turn_start"), chunk("Hello wo")], neverRespond: true },
 };
 
-/** The detached turn as a later session/load replays it (after an older turn). */
+/** A finished earlier turn, and the detached turn as a later session/load replays it. */
 const OLDER_TURN = [info("turn_start"), chunk("old"), completion(), info("turn_end")];
 const DETACHED_RUNNING = [
   info("turn_start"),
@@ -131,13 +136,19 @@ interface Wired {
   seed(id: string, overrides?: Partial<SessionMetaItem>): Promise<SessionMetaItem>;
 }
 
-async function wire(
-  scenarios: unknown[],
-  opts: { detachMarginMs?: number; ddb?: DynamoDBDocumentClient } = {},
-): Promise<Wired> {
+interface WireOptions {
+  detachMarginMs?: number;
+  ddb?: DynamoDBDocumentClient;
+  /** Wrap the consumer's view of the shared table (the test's repo reads it raw). */
+  wrapDdb?: (inner: DynamoDBDocumentClient) => DynamoDBDocumentClient;
+  env?: NodeJS.ProcessEnv;
+}
+
+async function wire(scenarios: unknown[], opts: WireOptions = {}): Promise<Wired> {
   const ddb = new FakeDocClient();
   const s3 = new FakeS3Client();
   const docClient = ddb as unknown as DynamoDBDocumentClient;
+  const consumerDdb = opts.ddb ?? (opts.wrapDdb ? opts.wrapDdb(docClient) : docClient);
   const repo = new Repository({
     ddb: docClient,
     // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
@@ -163,7 +174,7 @@ async function wire(
         catchUpQueueUrl: "https://sqs.test/catch-up",
         region: "us-east-1",
       },
-      ddb: opts.ddb ?? docClient,
+      ddb: consumerDdb,
       // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
       s3: s3 as any,
       spawnFn: spawner.spawnFn,
@@ -171,7 +182,7 @@ async function wire(
       ...(opts.detachMarginMs !== undefined ? { detachMarginMs: opts.detachMarginMs } : {}),
       logger,
       metricSink: metrics,
-      env: { KIRO_API_KEY: "ksk_test_key" },
+      env: { KIRO_API_KEY: "ksk_test_key", ...opts.env },
       now,
     });
 
@@ -388,6 +399,28 @@ describe("LambdaConsumer prompt (follow-up)", () => {
     await assertFollowUp(w);
   });
 
+  test("a follow-up whose session/load fails fails the turn loudly and ends idle", async () => {
+    const w = await wire([
+      LAUNCH,
+      { initialize: initResult(), onLoad: { error: { code: -32603, message: "load failed" } } },
+    ]);
+    await w.seed("sfl");
+    await w.consumer.handleEvent(event(launchCmd("sfl")));
+
+    const res = await w.consumer.handleEvent(event(promptCmd("sfl", "turn-1"), "m-prompt"));
+    expect(res.batchItemFailures).toEqual([]);
+    const events = await w.repo.queryEvents("sfl", 0, { limit: 100 });
+    const failed = events.find((e) => e.type === "turn.failed");
+    expect(failed?.turnId).toBe("turn-1");
+    expect(inner(failed).source).toBe("kas-engine");
+    expect(w.metrics.sum("CloudTurnFailed")).toBe(1);
+    // Only the launch prompt reached the engine.
+    expect(echoed(w.logLines, "fakeAgentPromptParams")).toHaveLength(1);
+    const session = await w.repo.getSession("sfl");
+    expect(session?.status).toBe("idle");
+    expect(session?.activeTurnId).toBeNull();
+  });
+
   test("an idempotent redelivered prompt (same turn id) is a no-op", async () => {
     const w = await wire([LAUNCH, FOLLOW_UP]);
     await w.seed("sdd");
@@ -402,9 +435,47 @@ describe("LambdaConsumer prompt (follow-up)", () => {
   });
 });
 
+/** A consumer view of the table whose event Query pages hold at most `max` items (like the 1 MB cap). */
+function pagedQueries(max: number) {
+  return (inner: DynamoDBDocumentClient) =>
+    ({
+      // biome-ignore lint/suspicious/noExplicitAny: wrap the fake's send.
+      send: async (command: any) => {
+        // biome-ignore lint/suspicious/noExplicitAny: the fake returns plain objects.
+        const res: any = await inner.send(command);
+        if (command.constructor?.name === "QueryCommand" && !command.input.IndexName) {
+          return { ...res, Items: (res.Items ?? []).slice(0, max) };
+        }
+        return res;
+      },
+    }) as unknown as DynamoDBDocumentClient;
+}
+
+/** A consumer view of the table whose next EVT# put fails once `state.armed` is set. */
+function failNextEventPut(state: { armed: boolean }) {
+  return (inner: DynamoDBDocumentClient) =>
+    ({
+      // biome-ignore lint/suspicious/noExplicitAny: wrap the fake's send.
+      send: async (command: any) => {
+        if (
+          state.armed &&
+          command.constructor?.name === "PutCommand" &&
+          String(command.input?.Item?.SK).startsWith("EVT#")
+        ) {
+          state.armed = false;
+          throw new Error("ddb put failed (transient)");
+        }
+        return inner.send(command);
+      },
+    }) as unknown as DynamoDBDocumentClient;
+}
+
 describe("LambdaConsumer detach + catch-up", () => {
-  async function detached(scenarios: unknown[]): Promise<{ w: Wired; msg: CatchUpMessage }> {
-    const w = await wire([LAUNCH_NEVER_ENDS, ...scenarios], { detachMarginMs: 100 });
+  async function detached(
+    scenarios: unknown[],
+    opts: WireOptions = {},
+  ): Promise<{ w: Wired; msg: CatchUpMessage }> {
+    const w = await wire([LAUNCH_NEVER_ENDS, ...scenarios], { detachMarginMs: 100, ...opts });
     await w.seed("sd");
     const res = await w.consumer.handleEvent(event(launchCmd("sd")), {
       remainingTimeMs: () => 300,
@@ -438,6 +509,7 @@ describe("LambdaConsumer detach + catch-up", () => {
       afterSeq: 0,
       attempt: 1,
       detachedAt: expect.any(Number),
+      turnOrdinal: 1,
     });
     expect(w.metrics.sum("TurnDetached")).toBe(1);
     expect(w.logLines.some((l) => l.includes("turn_detached"))).toBe(true);
@@ -457,7 +529,11 @@ describe("LambdaConsumer detach + catch-up", () => {
   });
 
   test("a catch-up through turn_end appends only the missing events and settles the turn", async () => {
-    const { w, msg } = await detached([loadScenario([...OLDER_TURN, ...DETACHED_DONE])]);
+    // A launch turn is the session's first turn (ordinal 1); later turns in
+    // the replay must be ignored.
+    const { w, msg } = await detached([
+      loadScenario([...DETACHED_DONE, info("turn_start"), chunk("later")]),
+    ]);
     const before = (await turnEvents(w, msg.turnId)).length;
 
     const res = await w.consumer.handleEvent(event(msg, "m-catch-up"));
@@ -481,9 +557,9 @@ describe("LambdaConsumer detach + catch-up", () => {
     ]);
     expect(textOf(added[0] as { payload: unknown })).toBe("rld");
     expect(added.every((e) => e.replay === false)).toBe(true);
-    // Nothing from the older turn was appended.
+    // Nothing from the later turn was appended.
     const all = await w.repo.queryEvents("sd", 0, { limit: 100 });
-    expect(all.filter((e) => e.type === "message.chunk").map(textOf)).not.toContain("old");
+    expect(all.filter((e) => e.type === "message.chunk").map(textOf)).not.toContain("later");
 
     const session = await w.repo.getSession("sd");
     expect(session?.status).toBe("idle");
@@ -500,8 +576,8 @@ describe("LambdaConsumer detach + catch-up", () => {
 
   test("a catch-up without turn_end records progress and reschedules attempt + 1", async () => {
     const { w, msg } = await detached([
-      loadScenario([...OLDER_TURN, ...DETACHED_RUNNING]),
-      loadScenario([...OLDER_TURN, ...DETACHED_DONE]),
+      loadScenario(DETACHED_RUNNING),
+      loadScenario(DETACHED_DONE),
     ]);
 
     await w.consumer.handleEvent(event(msg, "m-catch-up-1"));
@@ -527,6 +603,196 @@ describe("LambdaConsumer detach + catch-up", () => {
     const added = (await turnEvents(w, msg.turnId)).slice(afterFirst.length);
     expect(added.map((e) => e.type)).toEqual(["turn.completed", "session.info"]);
     expect((await w.repo.getSession("sd"))?.status).toBe("idle");
+    expect(w.metrics.sum("CatchUpCompleted")).toBe(1);
+  });
+
+  test("a catch-up reads every page of the event log (no re-appended events)", async () => {
+    // Each consumer Query returns one item, as a 1 MB page would on a long log.
+    const { w, msg } = await detached([loadScenario(DETACHED_DONE)], {
+      wrapDdb: pagedQueries(1),
+    });
+    const before = (await turnEvents(w, msg.turnId)).length;
+
+    await w.consumer.handleEvent(event(msg, "m-catch-up"));
+    const added = (await turnEvents(w, msg.turnId)).slice(before);
+    expect(added.map((e) => e.type)).toEqual([
+      "message.chunk",
+      "tool.call",
+      "tool.update",
+      "turn.completed",
+      "session.info",
+    ]);
+    expect(textOf(added[0] as { payload: unknown })).toBe("rld");
+    expect((await w.repo.getSession("sd"))?.status).toBe("idle");
+  });
+
+  test("a catch-up whose session/load fails reschedules attempt + 1", async () => {
+    const { w, msg } = await detached([
+      { initialize: initResult(), onLoad: { error: { code: -32603, message: "load failed" } } },
+    ]);
+    const before = (await turnEvents(w, msg.turnId)).length;
+
+    const res = await w.consumer.handleEvent(event(msg, "m-catch-up"));
+    expect(res.batchItemFailures).toEqual([]);
+    expect(w.logLines.some((l) => l.includes("catch_up_load_failed"))).toBe(true);
+    expect(w.scheduler.scheduled[1]?.msg).toEqual({ ...msg, attempt: 2 });
+    expect((await turnEvents(w, msg.turnId)).length).toBe(before);
+    expect((await w.repo.getSession("sd"))?.status).toBe("running");
+  });
+
+  test("the handler passes the Lambda context's remaining time (detaches)", async () => {
+    const w = await wire([LAUNCH_NEVER_ENDS], { detachMarginMs: 100 });
+    await w.seed("sh");
+    const handler = createHandler(async () => w.consumer);
+
+    const res = await handler(event(launchCmd("sh")), { getRemainingTimeInMillis: () => 300 });
+    expect(res.batchItemFailures).toEqual([]);
+    expect(w.scheduler.scheduled).toHaveLength(1);
+    expect((await w.repo.getSession("sh"))?.status).toBe("running");
+  });
+
+  test("the DETACH_MARGIN_MS env var overrides the detach margin", async () => {
+    const w = await wire([LAUNCH_NEVER_ENDS], { env: { DETACH_MARGIN_MS: "899800" } });
+    await w.seed("sm");
+
+    // 900 s left - 899.8 s margin: detach after 200 ms (the default would wait 810 s).
+    await w.consumer.handleEvent(event(launchCmd("sm")), { remainingTimeMs: () => 900_000 });
+    expect(w.metrics.sum("TurnDetached")).toBe(1);
+    expect(w.scheduler.scheduled).toHaveLength(1);
+
+    const invalid = await wire([], { env: { DETACH_MARGIN_MS: "soon" } });
+    expect(invalid.logLines.some((l) => l.includes("detach_margin_invalid"))).toBe(true);
+  });
+
+  test("a detached follow-up is placed by turn ordinal and is not settled from an older turn", async () => {
+    const FOLLOW_UP_NEVER_ENDS = {
+      initialize: initResult(),
+      onLoad: { replayBeforeResponse: true, messages: OLDER_TURN },
+      onPrompt: { messages: [info("turn_start"), chunk("Hello wo")], neverRespond: true },
+    };
+    const w = await wire(
+      [
+        LAUNCH,
+        FOLLOW_UP_NEVER_ENDS,
+        // First catch-up: the replay does not hold the running turn yet.
+        loadScenario(OLDER_TURN),
+        loadScenario([...OLDER_TURN, ...DETACHED_DONE]),
+      ],
+      { detachMarginMs: 100 },
+    );
+    await w.seed("sfd");
+    await w.consumer.handleEvent(event(launchCmd("sfd")));
+    const launchEvents = await w.repo.queryEvents("sfd", 0, { limit: 100 });
+
+    await w.consumer.handleEvent(event(promptCmd("sfd", "turn-2"), "m-prompt"), {
+      remainingTimeMs: () => 300,
+    });
+    const msg = w.scheduler.scheduled[0]?.msg;
+    expect(msg).toEqual({
+      kind: "catchUp",
+      sessionId: "sfd",
+      kiroSessionId: CLOUD_ID,
+      turnId: "turn-2",
+      afterSeq: launchEvents.length,
+      attempt: 1,
+      detachedAt: expect.any(Number),
+      turnOrdinal: 2,
+    });
+    if (!msg) {
+      throw new Error("no catch-up scheduled");
+    }
+    const followUp = async () =>
+      (await w.repo.queryEvents("sfd", 0, { limit: 100 })).filter((e) => e.turnId === "turn-2");
+    const recorded = (await followUp()).length;
+
+    // A redelivered prompt for the running turn schedules a leftover catch-up.
+    await w.consumer.handleEvent(event(promptCmd("sfd", "turn-2"), "m-prompt-again"));
+    expect(w.logLines.some((l) => l.includes("prompt_idempotent_skip"))).toBe(true);
+    expect(w.scheduler.scheduled[1]?.msg).toEqual({
+      kind: "catchUp",
+      sessionId: "sfd",
+      kiroSessionId: CLOUD_ID,
+      turnId: "turn-2",
+      afterSeq: 0,
+      attempt: 1,
+      detachedAt: expect.any(Number),
+    });
+
+    // The replay only holds the launch turn: nothing written, still running.
+    await w.consumer.handleEvent(event(msg, "m-catch-up-1"));
+    expect((await followUp()).length).toBe(recorded);
+    expect((await w.repo.getSession("sfd"))?.status).toBe("running");
+    const next = w.scheduler.scheduled[2]?.msg;
+    expect(next).toEqual({ ...msg, attempt: 2 });
+    if (!next) {
+      throw new Error("no next catch-up");
+    }
+
+    // The replay now holds turn 2 through turn_end.
+    await w.consumer.handleEvent(event(next, "m-catch-up-2"));
+    const added = (await followUp()).slice(recorded);
+    expect(added.map((e) => e.type)).toEqual([
+      "message.chunk",
+      "tool.call",
+      "tool.update",
+      "turn.completed",
+      "session.info",
+    ]);
+    expect(textOf(added[0] as { payload: unknown })).toBe("rld");
+    const session = await w.repo.getSession("sfd");
+    expect(session?.status).toBe("idle");
+    expect(session?.activeTurnId).toBeNull();
+  });
+
+  test("a write failure mid-turn is retried, and the redelivered launch schedules a leftover catch-up", async () => {
+    const state = { armed: false };
+    const w = await wire(
+      [
+        LAUNCH,
+        loadScenario([
+          info("turn_start"),
+          chunk("Here is the answer."),
+          completion(),
+          info("turn_end"),
+        ]),
+      ],
+      { wrapDdb: failNextEventPut(state) },
+    );
+    await w.seed("sw");
+
+    state.armed = true;
+    const first = await w.consumer.handleEvent(event(launchCmd("sw"), "m-1"));
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: "m-1" }]);
+    const running = await w.repo.getSession("sw");
+    expect(running?.status).toBe("running");
+    expect(running?.activeTurnId).toEqual(expect.any(String));
+
+    const second = await w.consumer.handleEvent(event(launchCmd("sw"), "m-2"));
+    expect(second.batchItemFailures).toEqual([]);
+    expect(w.logLines.some((l) => l.includes("launch_idempotent_skip"))).toBe(true);
+    const leftover = w.scheduler.scheduled[0]?.msg;
+    expect(leftover).toEqual({
+      kind: "catchUp",
+      sessionId: "sw",
+      kiroSessionId: CLOUD_ID,
+      turnId: running?.activeTurnId,
+      afterSeq: 0,
+      attempt: 1,
+      detachedAt: expect.any(Number),
+    });
+    if (!leftover) {
+      throw new Error("no leftover catch-up");
+    }
+
+    // The leftover catch-up (no ordinal, whole log) settles the turn.
+    await w.consumer.handleEvent(event(leftover, "m-catch-up"));
+    const events = (await w.repo.queryEvents("sw", 0, { limit: 100 })).filter(
+      (e) => e.turnId === leftover.turnId,
+    );
+    expect(events.filter((e) => e.type === "message.chunk").map(textOf)).toEqual([
+      "Here is the answer.",
+    ]);
+    expect((await w.repo.getSession("sw"))?.status).toBe("idle");
     expect(w.metrics.sum("CatchUpCompleted")).toBe(1);
   });
 

@@ -51,6 +51,7 @@ import { SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   type Command,
+  type EventItem,
   type NormalizedEvent,
   normalizeUpdate,
   Repository,
@@ -63,6 +64,7 @@ import {
   CATCH_UP_MAX_AGE_MS,
   type CatchUpMessage,
   type CatchUpScheduler,
+  countTurnStarts,
   isCatchUpMessage,
   planCatchUp,
   SqsCatchUpScheduler,
@@ -81,8 +83,26 @@ import { loggerMetricSink, type MetricSink, Metrics } from "./metrics.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
 import type { SpawnFn, SpawnSpec } from "./transport.ts";
 
-/** Detach from a running turn when less than this much invocation time is left. */
+/**
+ * Detach from a running turn when less than this much invocation time is left.
+ * The `DETACH_MARGIN_MS` env var overrides it (e.g. `890000` on a 15-minute
+ * function detaches ~10 s into a turn, to exercise the catch-up live).
+ */
 export const DETACH_MARGIN_MS = 90_000;
+
+/** Parse the `DETACH_MARGIN_MS` env override: a non-negative integer, else null. */
+function detachMarginFromEnv(env: NodeJS.ProcessEnv, logger: Logger): number | null {
+  const raw = env.DETACH_MARGIN_MS;
+  if (raw === undefined || raw === "") {
+    return null;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    logger.warn("detach_margin_invalid", { value: raw, defaultMs: DETACH_MARGIN_MS });
+    return null;
+  }
+  return value;
+}
 
 /* ----------------------------- SQS event types ---------------------------- */
 /**
@@ -154,7 +174,7 @@ export interface ConsumerDeps {
   sqs?: SQSClient;
   spawnFn?: SpawnFn;
   catchUpScheduler?: CatchUpScheduler;
-  /** Detach margin (default {@link DETACH_MARGIN_MS}). */
+  /** Detach margin (default: env `DETACH_MARGIN_MS`, else {@link DETACH_MARGIN_MS}). */
   detachMarginMs?: number;
   logger?: Logger;
   metricSink?: MetricSink;
@@ -303,7 +323,7 @@ export class LambdaConsumer {
       scheduler,
       engineSpec,
       ...(deps.spawnFn ? { spawnFn: deps.spawnFn } : {}),
-      detachMarginMs: deps.detachMarginMs ?? DETACH_MARGIN_MS,
+      detachMarginMs: deps.detachMarginMs ?? detachMarginFromEnv(env, logger) ?? DETACH_MARGIN_MS,
       config: deps.config,
       kiroToLocal,
       now,
@@ -577,7 +597,8 @@ export class LambdaConsumer {
       this.metrics.count("LaunchPath", 1, { path: "engine" });
       this.logger.info("session_launched", { sessionId: id, path: "engine", kiroSessionId });
 
-      await this.runTurn(rt, engine, turnId, args.prompt, afterSeq, opts);
+      // The launch turn is the session's first turn.
+      await this.runTurn(rt, engine, turnId, args.prompt, { afterSeq, turnOrdinal: 1 }, opts);
     });
   }
 
@@ -630,15 +651,25 @@ export class LambdaConsumer {
       return;
     }
     await this.withEngine(async (engine) => {
+      // The load replay is history the log already holds: not recorded. Its
+      // turn count places the new turn for a later catch-up.
+      const replay: unknown[] = [];
+      const unsubscribe = engine.onUpdate((sessionId, update) => {
+        if (sessionId === cloudId) {
+          replay.push(update);
+        }
+      });
       try {
         await engine.initialize();
-        // The load replay is history the log already holds: not recorded.
         await engine.loadRemote(cloudId, this.workspaceRoot);
       } catch (err) {
         await this.failTurn(rt, err);
         return;
+      } finally {
+        unsubscribe();
       }
-      await this.runTurn(rt, engine, tid, prompt, afterSeq, opts);
+      const turnOrdinal = countTurnStarts(replay) + 1;
+      await this.runTurn(rt, engine, tid, prompt, { afterSeq, turnOrdinal }, opts);
     });
   }
 
@@ -661,7 +692,7 @@ export class LambdaConsumer {
     engine: KasEngine,
     turnId: string,
     text: string,
-    afterSeq: number,
+    place: { afterSeq: number; turnOrdinal: number },
     opts: HandleOptions,
   ): Promise<void> {
     const cloudId = rt.kiroSessionId;
@@ -754,9 +785,10 @@ export class LambdaConsumer {
             sessionId: rt.id,
             kiroSessionId: cloudId,
             turnId,
-            afterSeq,
+            afterSeq: place.afterSeq,
             attempt: 1,
             detachedAt: this.now(),
+            turnOrdinal: place.turnOrdinal,
           },
           CATCH_UP_DELAY_SECONDS,
         );
@@ -798,7 +830,9 @@ export class LambdaConsumer {
 
   /**
    * Schedule a catch-up for a turn a redelivered command finds still running
-   * (its first delivery died before it could detach).
+   * (its first delivery died before it could detach). The turn's ordinal is
+   * not known here, so the catch-up falls back to the replay's last turn and
+   * writes nothing when that turn's text diverges from the log.
    */
   private async catchUpLeftover(item: SessionMetaItem | null): Promise<void> {
     if (item?.status !== "running" || !item.activeTurnId || !item.kiroSessionId) {
@@ -865,7 +899,7 @@ export class LambdaConsumer {
       return;
     }
 
-    const recorded = (await this.repo.queryEvents(id, msg.afterSeq))
+    const recorded = (await this.allEventsAfter(id, msg.afterSeq))
       .filter((e) => e.turnId === msg.turnId)
       .map((e) => e.payload as NormalizedEvent);
     const plan = planCatchUp({
@@ -873,8 +907,12 @@ export class LambdaConsumer {
       turnId: msg.turnId,
       updates,
       recorded,
+      ...(msg.turnOrdinal !== undefined ? { turnOrdinal: msg.turnOrdinal } : {}),
       onUnmapped: () => this.metrics.count("RawEventsUnmapped"),
     });
+    if (plan.mismatch) {
+      this.logger.warn("catch_up_segment_mismatch", fields);
+    }
     for (const ev of plan.events) {
       await this.cloud.writeEvent(rt, ev, this.now());
     }
@@ -897,6 +935,24 @@ export class LambdaConsumer {
     await this.cloud.persistSessionStatus(rt);
     this.metrics.count("CatchUpCompleted");
     this.logger.info("catch_up_completed", { ...fields, eventsWritten: plan.events.length });
+  }
+
+  /**
+   * Every event with seq > afterSeq. One Query returns at most 1 MB, so page
+   * on the last seq until a page comes back empty.
+   */
+  private async allEventsAfter(id: string, afterSeq: number): Promise<EventItem[]> {
+    const all: EventItem[] = [];
+    let after = afterSeq;
+    for (;;) {
+      const page = await this.repo.queryEvents(id, after);
+      const last = page[page.length - 1];
+      if (!last) {
+        return all;
+      }
+      all.push(...page);
+      after = last.seq;
+    }
   }
 
   private async scheduleNext(msg: CatchUpMessage): Promise<void> {
@@ -971,10 +1027,13 @@ function getConsumer(): Promise<LambdaConsumer> {
   return consumerPromise;
 }
 
-export const handler: SQSHandler = async (event, context) => {
-  const consumer = await getConsumer();
-  return consumer.handleEvent(
-    event,
-    context ? { remainingTimeMs: () => context.getRemainingTimeInMillis() } : {},
-  );
-};
+/** Build an SQS handler that hands the Lambda context's remaining time to the consumer. */
+export function createHandler(consumer: () => Promise<LambdaConsumer>): SQSHandler {
+  return async (event, context) =>
+    (await consumer()).handleEvent(
+      event,
+      context ? { remainingTimeMs: () => context.getRemainingTimeInMillis() } : {},
+    );
+}
+
+export const handler: SQSHandler = createHandler(getConsumer);

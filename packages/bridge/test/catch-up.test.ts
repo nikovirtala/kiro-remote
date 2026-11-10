@@ -6,7 +6,13 @@
 import type { SQSClient } from "@aws-sdk/client-sqs";
 import { type NormalizedEvent, normalizeUpdate } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
-import { type CatchUpMessage, planCatchUp, SqsCatchUpScheduler } from "../src/catch-up.ts";
+import {
+  type CatchUpMessage,
+  countTurnStarts,
+  isCatchUpMessage,
+  planCatchUp,
+  SqsCatchUpScheduler,
+} from "../src/catch-up.ts";
 
 const SID = "s-1";
 const TURN = "turn-b";
@@ -148,6 +154,68 @@ describe("planCatchUp", () => {
     });
     expect(second.events).toEqual([]);
     expect(second.ended).toBe(true);
+  });
+});
+
+describe("planCatchUp with a turn ordinal", () => {
+  const recorded = recordedOf([info("turn_start"), chunk("Hello wo")]);
+
+  test("takes the ordinal's segment, up to the next turn_start", () => {
+    const plan = planCatchUp({
+      sessionId: SID,
+      turnId: TURN,
+      updates: [...olderTurn, ...detachedTurnDone, info("turn_start"), chunk("later")],
+      recorded,
+      turnOrdinal: 2,
+    });
+    expect(plan.turnFound).toBe(true);
+    expect(plan.ended).toBe(true);
+    expect(texts(plan.events)).toEqual(["rld"]);
+    expect(plan.events.map((e) => e.type)).toEqual([
+      "message.chunk",
+      "tool.call",
+      "tool.update",
+      "turn.completed",
+      "session.info",
+    ]);
+  });
+
+  test("a replay that lacks the running turn is not found and writes nothing", () => {
+    // The detached follow-up is turn 2; the replay only holds the finished turn 1.
+    const plan = planCatchUp({
+      sessionId: SID,
+      turnId: TURN,
+      updates: olderTurn,
+      recorded,
+      turnOrdinal: 2,
+    });
+    expect(plan).toEqual({ turnFound: false, ended: false, events: [] });
+  });
+
+  test("without an ordinal, a last turn whose text diverges is a mismatch", () => {
+    const plan = planCatchUp({ sessionId: SID, turnId: TURN, updates: olderTurn, recorded });
+    expect(plan).toEqual({ turnFound: false, ended: false, mismatch: true, events: [] });
+  });
+
+  test("countTurnStarts counts the replay's turns", () => {
+    expect(countTurnStarts([])).toBe(0);
+    expect(countTurnStarts([...olderTurn, ...detachedTurnRunning])).toBe(2);
+  });
+
+  test("isCatchUpMessage accepts an optional positive integer ordinal", () => {
+    const base = {
+      kind: "catchUp",
+      sessionId: SID,
+      kiroSessionId: "sess_cloud-1",
+      turnId: TURN,
+      afterSeq: 0,
+      attempt: 1,
+      detachedAt: 1,
+    };
+    expect(isCatchUpMessage(base)).toBe(true);
+    expect(isCatchUpMessage({ ...base, turnOrdinal: 2 })).toBe(true);
+    expect(isCatchUpMessage({ ...base, turnOrdinal: 0 })).toBe(false);
+    expect(isCatchUpMessage({ ...base, turnOrdinal: "2" })).toBe(false);
   });
 });
 
