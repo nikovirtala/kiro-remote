@@ -37,6 +37,7 @@ import {
   UserPool,
   type UserPoolClient,
   type UserPoolDomain,
+  type UserPoolEmail,
   type UserPoolResourceServer,
 } from "aws-cdk-lib/aws-cognito";
 import { Construct } from "constructs";
@@ -73,6 +74,14 @@ export interface KiroRemoteAuthProps {
    * fully-qualified custom domain when the pool is served from one.
    */
   passkeyRelyingPartyId?: string;
+
+  /**
+   * Email sender for the pool, e.g. `UserPoolEmail.withSES({ fromEmail, ... })`.
+   * Cognito does not deliver email OTP (the invitee's bootstrap sign-in) or
+   * MFA codes through its default sender, so SES is needed for the email-code
+   * bootstrap to work in a deployed pool. Defaults to Cognito's sender.
+   */
+  email?: UserPoolEmail;
 }
 
 /** The resource-server scopes exposed by the facade. */
@@ -145,13 +154,15 @@ export class KiroRemoteAuth extends Construct {
         emailBody: [
           `<p>You have been invited to kiro-remote ({username}).</p>`,
           `<p>There is no password to set. Sign in at ${base}/ (or connect your MCP client),`,
-          `choose the email code option, enter the code Cognito emails you,`,
-          `then register a passkey when prompted. From then on, sign in with the passkey.</p>`,
+          `choose the email code option and enter the code Cognito emails you.`,
+          `Cognito does not prompt for a passkey on its own: once signed in, add one at`,
+          `${base}/passkeys/add (or ask your admin for the link). From then on, sign in with the passkey.</p>`,
           `<p>Ignore the legacy temporary password {####}: it is disabled and cannot be used.</p>`,
         ].join(" "),
         smsMessage:
-          "kiro-remote invite for {username}. Sign in with an email code, then add a passkey. {####} is disabled.",
+          "kiro-remote invite for {username}. Sign in with an email code, then add a passkey (/passkeys/add). {####} is disabled.",
       },
+      email: props.email,
       signInCaseSensitive: false,
     });
 
@@ -191,7 +202,7 @@ export class KiroRemoteAuth extends Construct {
 
     this.facadeClient = this.userPool.addClient("FacadeClient", {
       generateSecret: false,
-      authFlows: { user: false, userSrp: false, adminUserPassword: false, custom: false },
+      authFlows: { user: true, userSrp: false, adminUserPassword: false, custom: false },
       oAuth: {
         flows: { authorizationCodeGrant: true, implicitCodeGrant: false },
         callbackUrls: [callbackUrl],
@@ -216,7 +227,7 @@ export class KiroRemoteAuth extends Construct {
     for (const client of props.preRegisteredClients ?? []) {
       this.preRegisteredClients[client.name] = this.userPool.addClient(`Client${client.name}`, {
         generateSecret: false,
-        authFlows: { user: false, userSrp: false, adminUserPassword: false, custom: false },
+        authFlows: { user: true, userSrp: false, adminUserPassword: false, custom: false },
         oAuth: {
           flows: { authorizationCodeGrant: true, implicitCodeGrant: false },
           callbackUrls: client.callbackUrls,

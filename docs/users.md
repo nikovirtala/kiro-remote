@@ -67,11 +67,16 @@ The script reads `AWS_PROFILE` / `AWS_REGION` from `deploy.env`, looks up the
 `UserPoolId` stack output, creates the user (`email_verified=true`, invitation
 email sent), and immediately sets a random permanent password that it discards.
 If discarding fails it deletes the user again, so a user is never left with the
-emailed temporary password. The pool uses Cognito's default email sender, which
-is fine for personal use but capped at about 50 emails per day; use SES for more.
+emailed temporary password. Until the discard step finishes (seconds) the emailed
+temporary password is valid; Ctrl-C or SIGTERM also triggers the delete. **Email
+codes need SES**: Cognito does not deliver email OTP through its default sender,
+so pass `email: UserPoolEmail.withSES(...)` to `KiroRemoteAuth` (verified SES
+identity) or the email-code bootstrap will not work. The app clients enable
+`ALLOW_USER_AUTH` (choice-based sign-in), which email code and passkey need.
 
 The invitation email says to ignore the legacy temporary password (Cognito
-requires that placeholder in the template; it is already invalid).
+requires that placeholder in the template; it is invalid once the script
+finishes).
 
 Do **not** create users with `aws cognito-idp admin-create-user` and
 `admin-set-user-password` by hand with a password you choose: that leaves a
@@ -83,8 +88,11 @@ known, usable password.
    opens in the browser.
 2. Enter your email, choose the **email code** option, and enter the code
    Cognito emails you.
-3. Managed login prompts you to register a passkey. Accept and complete the
-   biometric/PIN prompt.
+3. Cognito does **not** prompt admin-created users to register a passkey. After
+   signing in, open
+   `https://<cognitoDomainPrefix>.auth.<region>.amazoncognito.com/passkeys/add?client_id=<facade-client-id>&redirect_uri=<host>/oauth/callback`
+   (the invitation email points to the same page) while the session is active,
+   and complete the biometric/PIN prompt.
 4. From then on, choose the passkey option at sign-in.
 
 ## 4. Sign in
@@ -106,9 +114,12 @@ with the prefix you passed as `-c cognitoDomainPrefix=...` at deploy time.
 ### Lost passkey / new device
 
 Sign in with the email code and register another passkey. To remove a lost
-passkey, the user can delete it from their own session (`aws cognito-idp
-delete-web-authn-credential` with their access token); Cognito has no
-admin-side API for it. If the mailbox or account is compromised, delete the user
+passkey, `aws cognito-idp delete-web-authn-credential` needs an access token
+carrying `aws.cognito.signin.user.admin`, which `kiro-remote login` tokens do
+not have (they carry only `openid` and the MCP scopes), and Cognito has no
+admin-side API for it. This is untested; the dependable path is delete and
+re-invite (below). Removing `emailOtp` after enrolment (and redeploying) closes
+the mailbox bypass but removes the email-code recovery path. If the mailbox or account is compromised, delete the user
 (`aws cognito-idp admin-delete-user`) and re-run the invite script. Note that a
 re-created user gets a new `sub`, so sessions created by the old one are no
 longer visible to them.

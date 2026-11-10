@@ -45,7 +45,7 @@ describe("KiroRemoteAuth", () => {
         AllowAdminCreateUserOnly: true,
         InviteMessageTemplate: Match.objectLike({
           EmailSubject: Match.stringLikeRegexp("passkey"),
-          EmailMessage: Match.stringLikeRegexp("register a passkey"),
+          EmailMessage: Match.stringLikeRegexp("passkeys/add"),
         }),
       }),
       Policies: Match.objectLike({
@@ -58,6 +58,15 @@ describe("KiroRemoteAuth", () => {
         RecoveryMechanisms: [{ Name: "admin_only", Priority: 1 }],
       },
     });
+  });
+
+  test("enables choice-based sign-in (ALLOW_USER_AUTH) on every app client", () => {
+    const clients = Object.values(template.findResources("AWS::Cognito::UserPoolClient"));
+    expect(clients.length).toBeGreaterThan(0);
+    for (const c of clients) {
+      const flows = (c.Properties as { ExplicitAuthFlows?: string[] }).ExplicitAuthFlows ?? [];
+      expect(flows).toContain("ALLOW_USER_AUTH");
+    }
   });
 
   test("requires passkey user verification and defaults the RP id to the managed-login host", () => {
