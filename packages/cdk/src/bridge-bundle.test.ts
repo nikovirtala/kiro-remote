@@ -87,42 +87,31 @@ describe("bridge image bundle", () => {
     expect(resolvableInvocation).toBe(true);
   });
 
-  // This guards a THIRD failure class: BOTH runtime binaries -- `kiro-cli` and
-  // its `kiro-cli-chat` sibling (which `kiro-cli acp` internally exec's) --
-  // must land in a world-executable system path reachable by the non-root
-  // `bridge` user. The official install script drops binaries into HOME's
-  // `.local/bin` (/root/.local/bin, mode 0700) by default; our earlier approach
-  // then cherry-picked ONLY `kiro-cli` into /usr/local/bin, leaving
-  // `kiro-cli-chat` behind -- so `kiro-cli acp` crashed with `failed to launch
-  // kiro-cli-chat: No such file or directory (os error 2)`. The fix installs
-  // GLOBALLY (`Q_INSTALL_GLOBAL=1`, which makes the script's inner install.sh
-  // target /usr/local/bin directly) so both binaries land there together, then
-  // chmods both 0755 and asserts kiro-cli-chat is present. These cheap content
-  // assertions close that gap.
-  test("the Dockerfile installs kiro-cli GLOBALLY so both kiro-cli and kiro-cli-chat land in a world-executable path", () => {
+  // This guards a THIRD failure class: `kiro-cli` must land in a
+  // world-executable system path reachable by the non-root `bridge` user. The
+  // official install script drops binaries into HOME's `.local/bin`
+  // (/root/.local/bin, mode 0700) by default. The fix installs GLOBALLY
+  // (`Q_INSTALL_GLOBAL=1`, which makes the script's inner install.sh target
+  // /usr/local/bin directly), chmods kiro-cli 0755, and proves the bridge user
+  // can run it. kiro-cli 3.x ships one binary (`acp` and `chat` are
+  // subcommands), so nothing may reference the old `kiro-cli-chat` sibling.
+  test("the Dockerfile installs the single kiro-cli binary GLOBALLY into a world-executable path", () => {
     const dockerfile = readFileSync(DOCKERFILE, "utf8");
 
     // The install must run with Q_INSTALL_GLOBAL=1 so the script targets
-    // /usr/local/bin ($GLOBAL_INSTALL_DIR) directly for BOTH binaries.
+    // /usr/local/bin ($GLOBAL_INSTALL_DIR) directly.
     expect(dockerfile).toMatch(
       /Q_INSTALL_GLOBAL=1\s+bash\s+-s\s+--\s+--version\s+"?\$\{?KIRO_CLI_VERSION\}?"?/,
     );
 
-    // Both binaries must be made world-executable together.
-    expect(dockerfile).toMatch(
-      /chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli\s+\/usr\/local\/bin\/kiro-cli-chat/,
-    );
+    // The binary must be made world-executable.
+    expect(dockerfile).toMatch(/chmod\s+0755\s+\/usr\/local\/bin\/kiro-cli/);
 
-    // The build must ASSERT kiro-cli-chat is actually present+executable, so a
-    // standalone zip (which ships no kiro-cli-chat) fails the build loudly
-    // instead of deploying a broken image.
-    const assertsChatPresent =
-      /command\s+-v\s+kiro-cli-chat/.test(dockerfile) ||
-      /test\s+-x\s+\/usr\/local\/bin\/kiro-cli-chat/.test(dockerfile);
-    expect(assertsChatPresent).toBe(true);
+    // 3.x has no kiro-cli-chat; a leftover assert would fail the build.
+    expect(dockerfile).not.toMatch(/kiro-cli-chat/);
 
-    // The brittle single-binary cherry-pick must be GONE: the build must no
-    // longer relocate ONLY kiro-cli via `cp -L "$KIRO_BIN" /usr/local/bin/kiro-cli`.
+    // The brittle single-binary cherry-pick must be GONE: the build must not
+    // relocate kiro-cli via `cp -L "$KIRO_BIN" /usr/local/bin/kiro-cli`.
     expect(dockerfile).not.toMatch(/cp\s+-L\s+"?\$\{?KIRO_BIN\}?"?\s+\/usr\/local\/bin\/kiro-cli/);
 
     // It must NOT keep kiro-cli reachable only via /root: no symlink target
@@ -131,15 +120,8 @@ describe("bridge image bundle", () => {
     expect(dockerfile).not.toMatch(/ln\s+-sf\s+"?\$\(command\s+-v\s+kiro-cli/);
 
     // A build-time exec check must prove the non-root `bridge` user can run
-    // kiro-cli AND reach kiro-cli-chat, so a future regression fails the image
-    // build loudly. kiro-cli is a real binary (direct runuser exec), but the
-    // kiro-cli-chat reachability check must run via `runuser ... sh -c '...'`
-    // because `command -v` is a shell builtin -- `runuser -- command ...` would
-    // try to exec a program literally named `command` and fail.
+    // kiro-cli, so a future regression fails the image build loudly.
     expect(dockerfile).toMatch(/runuser\s+-u\s+bridge\s+--\s+kiro-cli\s+--version/);
-    expect(dockerfile).toMatch(
-      /runuser\s+-u\s+bridge\s+--\s+sh\s+-c\s+'[^']*command\s+-v\s+kiro-cli-chat/,
-    );
   });
 
   // This guards a FOURTH failure class: the kiro-cli install invocation itself.
@@ -202,5 +184,42 @@ describe("bridge image bundle", () => {
 
     expect(dockerfile).not.toMatch(/FROM\s+--platform=/);
     expect(dockerfile).not.toMatch(/TARGETPLATFORM/);
+  });
+});
+
+/** The Lambda bridge Dockerfile (packages/cdk/src -> packages/bridge/Dockerfile.lambda). */
+const LAMBDA_DOCKERFILE = join(here, "..", "..", "bridge", "Dockerfile.lambda");
+
+// The Lambda image runs the engine directly (kiro-cli 3.x cannot start it under
+// Lambda's sandbox), so a `kiro` stage unpacks it at build time and the runtime
+// stage ships only /opt/kiro.
+describe("Lambda bridge image", () => {
+  const dockerfile = readFileSync(LAMBDA_DOCKERFILE, "utf8");
+
+  test("unpacks the engine with kiro-cli acp --agent-engine=v3", () => {
+    expect(dockerfile).toMatch(/kiro-cli\s+acp\s+--agent-engine=v3/);
+  });
+
+  test("fails the build unless acp-server.js was unpacked", () => {
+    expect(dockerfile).toMatch(
+      /test\s+-f\s+\/opt\/kiro\/kas\/current\/node_modules\/@kiro\/agent\/dist\/server\/acp-server\.js/,
+    );
+  });
+
+  test("drops the kiro-cli lock files", () => {
+    expect(dockerfile).toMatch(/rm\s+-f\s+\/opt\/kiro\/kas\/\*\.lock/);
+  });
+
+  test("the runtime stage copies only the engine from the kiro stage", () => {
+    expect(dockerfile).toContain("COPY --from=kiro /opt/kiro /opt/kiro");
+  });
+
+  test("requires a KIRO_CLI_VERSION build arg", () => {
+    expect(dockerfile).toMatch(/test\s+-n\s+"?\$\{?KIRO_CLI_VERSION\}?"?/);
+  });
+
+  test("references no kiro-cli-chat binary and no per-FROM --platform", () => {
+    expect(dockerfile).not.toMatch(/kiro-cli-chat/);
+    expect(dockerfile).not.toMatch(/FROM\s+--platform=/);
   });
 });
