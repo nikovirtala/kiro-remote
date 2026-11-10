@@ -15,7 +15,7 @@ You deploy it once into your own AWS account. After that, you (and the MCP clien
 
 Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 
-Not production-hardened:
+How sign-in works:
 
 - The user pool is invite-only, and users sign in with a passkey.
 - MFA is off because a passkey sign-in is already multi-factor.
