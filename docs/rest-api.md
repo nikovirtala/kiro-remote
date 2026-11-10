@@ -144,7 +144,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   "$HOST/v1/sessions/<sessionId>/events?after=0&wait=20"
 ```
 
-Repeat step 3 with the `nextCursor` value to keep streaming. Check
+Repeat step 3 with the `nextCursor` value to keep long-polling. Check
 `turnStatus` in the response to know when the turn has completed. If the session
 reports a pending permission, list it with
 `GET /v1/sessions/<sessionId>/permissions?status=pending` and answer it with

@@ -53,7 +53,7 @@ For bugs, questions, and feature requests, open a [GitHub issue](https://github.
 
 ## Toolchain
 
-Node 26.13.0 and pnpm 12.18.0, pinned in [`.mise.toml`](./.mise.toml). TypeScript runs directly via Node's native type stripping (no compile step). The deployed Lambdas target the matching Node 26 runtime (`nodejs26.x`), which AWS still lists as **public preview** (not SLA/Support-covered; GA targeted ~Nov 2026). See [`docs/deploy.md`](./docs/deploy.md) for the exact setup commands and the full runtime/preview note.
+Node 26.13.0 and pnpm 12.18.0, pinned in [`.mise.toml`](./.mise.toml). TypeScript runs directly via Node's native type stripping (no compile step). The API and OAuth callback Lambdas target the matching Node 26 runtime (`nodejs26.x`; the bridge Lambdas are container images), which AWS still lists as **public preview** (not SLA/Support-covered; GA targeted ~Nov 2026). See [`docs/deploy.md`](./docs/deploy.md) for the exact setup commands and the full runtime/preview note.
 
 ## License
 
