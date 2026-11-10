@@ -13,6 +13,8 @@ single CDK stack (`KiroRemoteStack`) into your own AWS account. It exposes:
 both backed by an ECS Fargate **bridge** that runs `kiro-cli` to launch and drive
 Kiro cloud sessions, provisioned and driven via `kiro-cli chat --cloud` (see
 [deploy.md](./deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only)).
+The `lambda` bridge mode instead talks ACP directly to kiro-cli's bundled engine
+(see [deploy.md](./deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
 
 ## What to do next
 

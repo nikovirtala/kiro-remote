@@ -10,7 +10,7 @@ You deploy it once into your own AWS account. After that, you (and the MCP clien
 
 - **MCP server** (`packages/mcp`) exposed in two ways: a Streamable HTTP transport mounted at `<host>/mcp` and a stdio transport via the `kiro-remote` CLI.
 - **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`,with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at `/openapi.json`.
-- **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs `kiro-cli` to launch and drive Kiro Web sessions: it provisions each cloud session and runs every turn via `kiro-cli chat --cloud`, while negotiating capabilities over the Agent Client Protocol. See the [chat-only cloud path](./docs/deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only) for detail.
+- **Bridge** (`packages/bridge`) an ECS Fargate (Graviton/arm64) service that runs `kiro-cli` to launch and drive Kiro Web sessions: it provisions each cloud session and runs every turn via `kiro-cli chat --cloud`, while negotiating capabilities over the Agent Client Protocol. See the [chat-only cloud path](./docs/deploy.md#how-the-bridge-drives-cloud-sessions-chat-only--cloud-only) for detail. The `lambda` bridge mode instead talks ACP directly to kiro-cli's bundled engine (see the [direct-engine path](./docs/deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
 - **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS,Cognito, the Fargate bridge, and the API (with native stage throttling).
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a live end-to-end harness (`e2e`).
 

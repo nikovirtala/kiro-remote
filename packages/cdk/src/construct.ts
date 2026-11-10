@@ -367,6 +367,12 @@ export class KiroRemote extends Construct {
    * `lambda`/`both` modes.
    */
   readonly capsPublisherFn?: DockerImageFunction;
+  /**
+   * The standard (non-FIFO) SQS queue the Lambda consumer uses to finish a
+   * turn it detached from near its deadline (delayed `session/load` catch-up
+   * messages). Present only in `lambda`/`both` modes.
+   */
+  readonly catchUpQueue?: Queue;
   /** The HTTP API fronting the api Lambdas at base path /v1. */
   readonly httpApi: HttpApi;
   /**
@@ -814,11 +820,14 @@ export class KiroRemote extends Construct {
     /* ------------------------- Serverless (Lambda) bridge ---------------- */
 
     // Provisioned in `lambda` and `both` modes. The serverless cloud path is a
-    // container-image Lambda (arm64, kiro-cli on PATH) that CONSUMES the SAME
-    // SQS FIFO command queue the API Lambda produces to, plus a second function
-    // that publishes CONFIG#CAPS (the one-shot job the persistent ACP bridge
-    // did at boot). NOTHING here is created in `fargate`-only mode, so the
-    // default stack is byte-for-byte unchanged.
+    // container-image Lambda (arm64) that CONSUMES the SAME SQS FIFO command
+    // queue the API Lambda produces to, plus a second function that publishes
+    // CONFIG#CAPS (the one-shot job the persistent ACP bridge did at boot).
+    // Both start kiro-cli's bundled engine (KAS) directly from /opt/kiro; the
+    // runtime image carries no kiro-cli (its engine spawn calls
+    // prctl(PR_SET_PDEATHSIG), which Lambda rejects). A standard catch-up queue
+    // lets the consumer finish turns that outlive one invocation. NOTHING here
+    // is created in `fargate`-only mode, so the default stack is unchanged.
     if (wantLambda) {
       // One image carries BOTH handlers; each function selects its handler via
       // the image CMD. Gated behind the `-c kiroCliVersion` opt-in exactly like
@@ -847,11 +856,26 @@ export class KiroRemote extends Construct {
         BRIDGE_LOG_LEVEL: "debug",
       };
 
-      // The SQS FIFO command consumer. 15-minute timeout (the ceiling): one
-      // observed cloud TimeToFirstEvent was ~73s, well under it, and a turn is
-      // AWAITed synchronously so the invocation holds the FIFO MessageGroupId
-      // (= sessionId) for the turn's duration (lambda-consumer.ts). arm64 to
-      // match the Graviton image.
+      // Catch-up queue: a STANDARD (non-FIFO) queue, because a FIFO queue cannot
+      // delay a single message. When a turn is still running ~90 s before the
+      // consumer's deadline, the consumer detaches (the cloud turn keeps running
+      // in Kiro's sandbox, META stays `running`) and sends a catch-up message
+      // here with a 60 s delay. Each catch-up run starts a fresh engine, does
+      // one remote `session/load`, appends the events the log is missing, and
+      // either settles the turn on `turn_end` or re-schedules itself; after 6 h
+      // the turn is failed. Visibility must be >= the consumer's 15-minute
+      // timeout, as the event-source mapping requires.
+      this.catchUpQueue = new Queue(this, "CatchUpQueue", {
+        retentionPeriod: Duration.days(1),
+        visibilityTimeout: Duration.minutes(15),
+        enforceSSL: true,
+      });
+
+      // The SQS FIFO command consumer. 15-minute timeout (the ceiling): a turn
+      // is AWAITed in the invocation (holding the FIFO MessageGroupId =
+      // sessionId) until it ends or the invocation nears its deadline, at which
+      // point it detaches and hands off to the catch-up queue
+      // (lambda-consumer.ts). arm64 to match the Graviton image.
       //
       // CONCURRENCY: maxCloudSessions maps to the function's RESERVED
       // CONCURRENCY. Because the queue is FIFO and the producer sets
@@ -870,6 +894,8 @@ export class KiroRemote extends Construct {
           // only /tmp is writable, so the per-turn working directory lives
           // under it (durable state is in DynamoDB/S3, never on local disk).
           WORKSPACE_ROOT: "/tmp/workspace",
+          // Consumer only: the caps publisher never detaches a turn.
+          CATCH_UP_QUEUE_URL: this.catchUpQueue.queueUrl,
         },
       });
 
@@ -909,8 +935,18 @@ export class KiroRemote extends Construct {
         }),
       );
 
+      // Second mapping: the catch-up queue feeds the SAME handler (it tells a
+      // catch-up body apart by `kind: "catchUp"`). No filter in any mode:
+      // Fargate never polls this queue, so every message is the consumer's.
+      this.consumerFn.addEventSource(
+        new SqsEventSource(this.catchUpQueue, {
+          batchSize: 1,
+          reportBatchItemFailures: true,
+        }),
+      );
+
       // The caps-publisher runs the SAME image with a different handler CMD.
-      // It is short-lived: spin up the ACP child, `initialize`, write
+      // It is short-lived: start the bundled engine, `initialize`, write
       // CONFIG#CAPS, exit. A few minutes of timeout is ample.
       this.capsPublisherFn = new DockerImageFunction(this, "BridgeCapsPublisherFn", {
         code: buildLambdaImage(CAPS_CMD),
@@ -922,11 +958,14 @@ export class KiroRemote extends Construct {
 
       // SAME scoped IAM grants the Fargate task role gets, so the serverless
       // path is behaviorally identical: read/write the table + bucket, consume
-      // the command queue, read the secret. The publisher only needs table
-      // write + secret read (it writes CONFIG#CAPS and spawns an ACP child).
+      // the command queue, read the secret. The consumer also sends to and
+      // consumes the catch-up queue. The publisher only needs table write +
+      // secret read (it writes CONFIG#CAPS and starts the engine).
       this.table.grantReadWriteData(this.consumerFn);
       this.bucket.grantReadWrite(this.consumerFn);
       this.commandQueue.grantConsumeMessages(this.consumerFn);
+      this.catchUpQueue.grantSendMessages(this.consumerFn);
+      this.catchUpQueue.grantConsumeMessages(this.consumerFn);
       this.kiroApiKeySecret.grantRead(this.consumerFn);
 
       this.table.grantReadWriteData(this.capsPublisherFn);

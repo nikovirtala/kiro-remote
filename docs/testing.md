@@ -53,6 +53,47 @@ against the real asset constructs. It needs AWS credentials but not Docker (the
 image is built at deploy), and deploys nothing. See
 [Bootstrap and deploy](deploy.md#5-bootstrap-and-deploy).
 
+Without `deploy.env` or AWS credentials, synthesize the Lambda bridge mode
+directly from `packages/cdk` (output goes to `/tmp`, nothing is deployed):
+
+```bash
+cd packages/cdk
+mise exec -- pnpm exec cdk synth --quiet -o /tmp/kiro-remote-synth \
+  -c kiroCliVersion=3.1.0 -c bridgeMode=lambda \
+  -c publicBaseUrl=https://kiro-remote.nikovirtala.dev \
+  -c cognitoDomainPrefix=kiro-remote -c 'allowedRepos=*/*' \
+  -c kiroApiKeySecretArn=arn:aws:secretsmanager:eu-north-1:827333031966:secret:kiro-api-key-AbCdEf
+```
+
+`/tmp/kiro-remote-synth/KiroRemoteStack.template.json` then holds the
+`CatchUpQueue` and two `AWS::Lambda::EventSourceMapping` resources.
+
+## Building the bridge images and the engine smoke
+
+Build both bridge images from the repo root (Docker, `linux/arm64`):
+
+```bash
+docker build --platform linux/arm64 --build-arg KIRO_CLI_VERSION=3.1.0 \
+  -f packages/bridge/Dockerfile -t kiro-remote-bridge:3.1.0 .
+docker build --platform linux/arm64 --build-arg KIRO_CLI_VERSION=3.1.0 \
+  -f packages/bridge/Dockerfile.lambda -t kiro-remote-bridge-lambda:3.1.0 .
+```
+
+The Lambda image build fails if unpacking the engine did not produce
+`/opt/kiro/node` and `acp-server.js`. To check that the unpacked engine starts
+the way the Lambda handlers start it, run this smoke with a dummy key (never a
+real one):
+
+```bash
+docker run --rm --platform linux/arm64 --entrypoint /bin/sh kiro-remote-bridge-lambda:3.1.0 -c '(printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"/tmp\",\"mcpServers\":[],\"_meta\":{\"kiro\":{\"executionTarget\":{\"kind\":\"cloud-sandbox\"},\"sessionSource\":\"remote\",\"repositories\":[\"octo/repo\"]}}}}"; sleep 20) | HOME=/tmp KIRO_HOME=/tmp/.kiro KIRO_API_KEY=dummy CLOUD_CONFIG_ENDPOINT=https://app.kiro.dev KIRO_REMOTE_SESSIONS_ENDPOINT=https://app.kiro.dev NODE_USE_SYSTEM_CA=1 timeout 40 /opt/kiro/node --experimental-wasm-modules /opt/kiro/kas/current/node_modules/@kiro/agent/dist/server/acp-server.js --transport=stdio'
+```
+
+Expected: an `"id":1` `initialize` result, and an `"id":2` error on
+`session/new` containing `Identity provider is required` (the dummy key is
+rejected by Kiro, which proves the engine reached it). Add
+`--user 10001:10001` after `--rm` to check that a non-root user, like Lambda's
+sandbox user, can run `/opt/kiro`.
+
 ## The live end-to-end harness
 
 ```bash

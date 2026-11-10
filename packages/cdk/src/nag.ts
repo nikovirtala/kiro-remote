@@ -162,11 +162,12 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
       reason:
         "Server access logging is omitted; the bucket blocks ALL public access, uses SSE, and enforces SSL, and only the API/bridge roles can read/write it.",
     },
-    // SQS: no DLQ; idempotent commands are redelivered and expire via retention.
+    // SQS: no DLQ; idempotent commands are redelivered and expire via retention;
+    // catch-up messages are re-scheduled by the consumer.
     {
       id: "AwsSolutions-SQS3",
       reason:
-        "No DLQ: command messages are idempotent and left for visibility-timeout redelivery; they expire via the retention period rather than dead-lettering.",
+        "No DLQ: command messages are idempotent and left for visibility-timeout redelivery; catch-up messages are re-scheduled by the consumer until the turn settles or hits its 6 h limit; both expire via the retention period rather than dead-lettering.",
     },
     // ---------------------------------------------------------------------
     // Serverless (Lambda) bridge path -- provisioned only in the `lambda` and

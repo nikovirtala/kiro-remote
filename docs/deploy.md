@@ -122,7 +122,7 @@ context values, passed with `-c key=value`:
 >
 > ```bash
 > pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
->   -c kiroCliVersion=1.2.3 \
+>   -c kiroCliVersion=3.1.0 \
 >   -c publicBaseUrl=https://kiro-remote.nikovirtala.dev \
 >   -c customDomainName=kiro-remote.nikovirtala.dev \
 >   -c hostedZoneId=<HostedZoneId output>
@@ -220,17 +220,17 @@ The cloud command path can be driven by two different hosts, selected per deploy
 with `bridgeMode` (the `bridgeMode` context key, or the `KiroRemoteProps` prop).
 The default is `fargate`, so an existing deploy that passes nothing is unchanged.
 
-| Mode                | What is provisioned                                                                                                                                        | Notes                                                                                                                                                                                    |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fargate` (default) | The persistent ECS Fargate ACP bridge (VPC, cluster, task, service). No Lambda bridge.                                                                     | The ONLY host for the ACP `adopt`/session-load path, so it is retained deliberately. Backward compatible: omitting `bridgeMode` reproduces today's stack.                                |
-| `lambda`            | A container-image Lambda (arm64) that consumes the SQS FIFO command queue, plus a second function that publishes `CONFIG#CAPS`. No Fargate service or VPC. | The serverless cloud path. `adopt`/session-load is NOT supported in this mode (there is no live ACP child); use `fargate` or `both` if you need adopt.                                   |
-| `both`              | The Fargate service AND the Lambda consumer + caps-publisher.                                                                                              | Run both side by side (e.g. to migrate). `adopt` is routed to Fargate and the Lambda consumer handles the headless cloud turns (see [adopt routing](#adopt-routing-in-both-mode) below). |
+| Mode                | What is provisioned                                                                                                                                                                      | Notes                                                                                                                                                                                                                                                       |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fargate` (default) | The persistent ECS Fargate ACP bridge (VPC, cluster, task, service). No Lambda bridge.                                                                                                   | The ONLY host for the ACP `adopt`/session-load path, so it is retained deliberately. Backward compatible: omitting `bridgeMode` reproduces today's stack.                                                                                                   |
+| `lambda`            | A container-image Lambda (arm64) that consumes the SQS FIFO command queue and a standard catch-up queue, plus a second function that publishes `CONFIG#CAPS`. No Fargate service or VPC. | The serverless cloud path. Both functions talk ACP directly to kiro-cli's bundled engine (see [direct engine](#how-the-lambda-path-drives-cloud-sessions-direct-engine)). `adopt` is NOT supported in this mode; use `fargate` or `both` if you need adopt. |
+| `both`              | The Fargate service AND the Lambda consumer + caps-publisher.                                                                                                                            | Run both side by side (e.g. to migrate). `adopt` is routed to Fargate and the Lambda consumer handles the headless cloud turns (see [adopt routing](#adopt-routing-in-both-mode) below).                                                                    |
 
 Enable a mode on the command line, for example the serverless path:
 
 ```bash
 pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
-  -c kiroCliVersion=1.2.3 \
+  -c kiroCliVersion=3.1.0 \
   -c bridgeMode=lambda \
   -c publicBaseUrl=https://kiro-remote.nikovirtala.dev
 ```
@@ -239,9 +239,22 @@ A few operational details for the `lambda` and `both` modes:
 
 - **Image.** The serverless functions run the container image built from
   [`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)
-  (arm64, `kiro-cli` on PATH, both the consumer and caps-publisher handler
-  bundles). Like the Fargate image, it is built from the required
-  `-c kiroCliVersion=<ver>`, so deploy needs Docker.
+  (arm64, both the consumer and caps-publisher handler bundles). Like the
+  Fargate image, it is built from the required `-c kiroCliVersion=<ver>`, so
+  deploy needs Docker. A build stage installs that kiro-cli version and runs
+  `kiro-cli acp --agent-engine=v3` once to unpack its bundled engine: the
+  `node` binary goes to `/opt/kiro/node` and the engine release directory to
+  `/opt/kiro/kas/<ver>-<hash>`, with `/opt/kiro/kas/current` symlinked to it.
+  The build fails loudly when `node` or `acp-server.js` is missing. The runtime
+  stage copies only `/opt/kiro`; kiro-cli itself is not in the runtime image.
+- **Catch-up queue.** The Lambda path adds a standard (non-FIFO) SQS queue,
+  `CatchUpQueue` (1-day retention, 15-minute visibility timeout), consumed by
+  the same consumer function through a second event-source mapping that is
+  never filtered. The consumer uses it to finish turns that outlive one
+  invocation (see
+  [the catch-up](#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
+  Its URL reaches the consumer as `CATCH_UP_QUEUE_URL`; the caps publisher does
+  not get it. `fargate`-only mode does not create it.
 - **Concurrency.** `maxCloudSessions` maps to the consumer function's RESERVED
   CONCURRENCY. Because the queue is FIFO and the producer sets
   `MessageGroupId = sessionId`, SQS already serializes work per session; the
@@ -284,6 +297,73 @@ the consumer is deliberately NOT filtered: it still receives `adopt` and rejects
 it loudly with a client-visible rejection event, rather than letting the message
 sit unconsumed and silently expire. `lambda`-only still does not support
 `adopt`; it just fails it visibly instead of silently.
+
+### How the Lambda path drives cloud sessions (direct engine)
+
+The Lambda consumer and the caps publisher do not run kiro-cli. kiro-cli 3.1.0
+starts its engine (KAS, a Node program) with `prctl(PR_SET_PDEATHSIG)`, and
+Lambda rejects that call with `EPERM`, so `kiro-cli acp` cannot start there.
+Instead the handlers start the engine kiro-cli would have started, from the
+copy unpacked into the image:
+
+```text
+/opt/kiro/node --experimental-wasm-modules \
+  /opt/kiro/kas/current/node_modules/@kiro/agent/dist/server/acp-server.js \
+  --transport=stdio
+```
+
+with `KIRO_API_KEY` (resolved from Secrets Manager), `HOME=/tmp`,
+`KIRO_HOME=/tmp/.kiro`, `CLOUD_CONFIG_ENDPOINT` and
+`KIRO_REMOTE_SESSIONS_ENDPOINT` set to `https://app.kiro.dev`,
+`NODE_USE_SYSTEM_CA=1` and `KIRO_LOG_LEVEL` (default `debug`). `KAS_NODE` and
+`KAS_SERVER` override the two paths for local runs
+([`packages/bridge/src/kas-engine.ts`](../packages/bridge/src/kas-engine.ts)).
+
+The consumer talks ACP over the engine's stdio:
+
+- `initialize` on every engine start.
+- **Launch:** `session/new` with
+  `_meta.kiro = { executionTarget: { kind: "cloud-sandbox" }, sessionSource: "remote", repositories: [...] }`,
+  which creates the cloud session and returns its id, then `session/prompt`.
+- **Follow-up:** `session/load` with `_meta.kiro.sessionSource = "remote"` (the
+  replayed history is not recorded again), then `session/prompt`.
+- **Delete:** `session/delete` with `_meta.kiro.sessionSource = "remote"`
+  (best-effort), then the session row is marked deleted.
+
+Each command, and each catch-up run, starts its own engine process and stops
+it before the invocation returns, because Lambda freezes child processes
+between invocations. Streamed `session/update` notifications are normalized and
+written to the DynamoDB event log as they arrive. There are no permission
+requests on the cloud path.
+
+**Detach and catch-up.** The turn runs in Kiro's cloud sandbox, so the
+invocation does not have to wait for it. When the turn is still running with
+90 s left before the 15-minute deadline, the consumer flushes what it has,
+stops the engine (the cloud turn keeps running), logs `turn_detached`, emits
+the `TurnDetached` metric, and sends a catch-up message to `CatchUpQueue` with
+a 60 s delay. While detached, the session META stays `status: running` with
+`activeTurnId` set to the turn. Each catch-up run starts a fresh engine, makes
+one remote `session/load`, and compares the replay of the latest turn with the
+events already in the log for that `turnId`. Text chunks are matched by prefix,
+tool calls by `(toolCallId, status)`, other events by count, so only missing
+events are appended and a repeated catch-up writes nothing twice. When the
+replay contains `turn_end`, the turn settles (`prompt.response`, session back
+to `idle`, `CatchUpCompleted`); otherwise the run schedules the next message.
+A turn with no `turn_end` 6 h after it detached is failed like any failed turn
+(`turn.failed` with `rawType: "catch_up_expired"`, `CatchUpExpired` and
+`CloudTurnFailed` metrics, session back to `idle`). A catch-up message for a
+session that is gone, failed, or has moved to another turn is dropped
+(`catch_up_stale`).
+
+Because META stays `running`, a follow-up, steer, cancel or `whenBusy=queue`
+sent during a detached turn is rejected as mid-turn, exactly as it is during a
+live turn. `adopt` remains unsupported on the Lambda path.
+
+**Version pinning.** The engine's launch command, environment and `_meta`
+fields are an internal, unversioned kiro-cli interface. They were verified
+against kiro-cli 3.1.0; bumping `KIRO_CLI_VERSION` needs the engine smoke in
+[testing.md](testing.md#building-the-bridge-images-and-the-engine-smoke) to
+pass again.
 
 ## Pointing `publicBaseUrl` at the API
 
@@ -509,9 +589,12 @@ at runtime. The `kiro-cli` child process is spawned as a runtime PATH binary via
 
 ### How the bridge drives cloud sessions (chat-only == cloud-only)
 
-The bridge provisions **and** drives cloud sessions **entirely** through
-`kiro-cli chat --cloud` subprocesses. There is no ACP cloud-session path:
-chat-only is the only cloud path for now.
+This section describes the **Fargate** bridge. The Lambda path talks ACP
+directly to the bundled engine instead; see
+[How the Lambda path drives cloud sessions](#how-the-lambda-path-drives-cloud-sessions-direct-engine).
+
+The Fargate bridge provisions **and** drives cloud sessions **entirely** through
+`kiro-cli chat --cloud` subprocesses. It has no ACP cloud-session path.
 
 - **Launch (first turn).** `POST /v1/sessions` enqueues a `launch` command; the
   bridge runs
@@ -576,8 +659,11 @@ chat-only is the only cloud path for now.
   future enhancement.
 - **Delete.** `kiro-cli chat --delete-session <cloudSessionId>` (unchanged).
 
-**Why not ACP?** The ACP child (`kiro-cli acp --agent-engine=v3`) **cannot drive
-a cloud session**. Confirmed empirically: `initialize` + `session/load` +
+**Why not `kiro-cli acp`?** As the Fargate bridge uses it, the ACP child
+(`kiro-cli acp --agent-engine=v3`) **cannot drive a cloud session**. (The
+Lambda path drives cloud sessions over ACP by talking to the engine directly
+with `sessionSource: "remote"`; see the direct-engine section above.) Confirmed
+empirically: `initialize` + `session/load` +
 `session/prompt` against a real cloud id
 (`08047063-f7b4-4ce5-b79a-2aea9a7a1d29`) returns
 `{"error":{"code":-32000,"message":"Session '08047063-…' not found"}}` on
