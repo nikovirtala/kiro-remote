@@ -61,6 +61,12 @@ export interface HarnessState {
   /** The GitHub scenario's session, and the PR its agent opened. */
   ghSession?: SessionCursor;
   ghPr?: { repo: string; number: number; headRef: string | null; linkedBy: string };
+  /** The chain scenario's session (two dependent PRs) and the PRs it opened, in order. */
+  ghChain?: {
+    session: SessionCursor;
+    launchedAt: number;
+    prs: Array<{ repo: string; number: number; headRef: string }>;
+  };
   /** GitHub delivery ids of the wake turns the GitHub steps have seen so far. */
   ghWakeDeliveries?: string[];
   /** Session ids created and not yet confirmed deleted. */
@@ -1018,6 +1024,251 @@ const ghCleanup: Step<HarnessContext> = {
   },
 };
 
+/* -------------------------------------------------------------------------- */
+/* GitHub chain: two dependent PRs in one session                              */
+/* -------------------------------------------------------------------------- */
+
+/** The slice of a GitHub pull request the chain steps read. */
+interface GhPull {
+  number: number;
+  state: string;
+  created_at: string;
+  merged_at: string | null;
+  head: { ref: string; sha: string };
+  base: { ref: string };
+}
+
+async function ghPull(ctx: HarnessContext, repo: string, number: number): Promise<GhPull> {
+  return JSON.parse(await ghOf(ctx)(["api", `repos/${repo}/pulls/${number}`])) as GhPull;
+}
+
+/** PRs in `repo` created at or after `sinceMs` (newest first, last 30 only). */
+async function ghPullsSince(ctx: HarnessContext, repo: string, sinceMs: number) {
+  const all = JSON.parse(
+    await ghOf(ctx)([
+      "api",
+      `repos/${repo}/pulls?state=all&sort=created&direction=desc&per_page=30`,
+    ]),
+  ) as GhPull[];
+  return all.filter((p) => Date.parse(p.created_at) >= sinceMs);
+}
+
+/** `owner/repo#n` -> parts. */
+function prRef(pr: string): { repo: string; number: number } {
+  const hash = pr.lastIndexOf("#");
+  return { repo: pr.slice(0, hash), number: Number(pr.slice(hash + 1)) };
+}
+
+/** Squash-merge a PR as the trusted login; returns the merge commit sha. */
+async function ghMerge(ctx: HarnessContext, repo: string, number: number): Promise<string> {
+  const res = JSON.parse(
+    await ghOf(ctx)([
+      "api",
+      "--method",
+      "PUT",
+      `repos/${repo}/pulls/${number}/merge`,
+      "-f",
+      "merge_method=squash",
+    ]),
+  ) as { sha?: string; merged?: boolean };
+  if (res.merged !== true || !res.sha) {
+    throw new Error(`merging ${repo}#${number} did not report a merge commit`);
+  }
+  return res.sha;
+}
+
+function ghChainOf(ctx: HarnessContext): NonNullable<HarnessState["ghChain"]> {
+  if (!ctx.state.ghChain) {
+    throw new Error("no chain session from gh-chain-launch");
+  }
+  return ctx.state.ghChain;
+}
+
+/** Allowance for clock skew between this machine and GitHub when comparing creation times. */
+const GH_CLOCK_SKEW_MS = 5_000;
+
+const ghChainLaunch: Step<HarnessContext> = {
+  id: "gh-chain-launch",
+  name: "GitHub chain: launch a session that must deliver two PRs in order",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["login"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const file = `docs/kiro-remote-e2e-${ctx.deps.runId.toLowerCase()}-chain.md`;
+    const prompt = [
+      "This task needs two pull requests, delivered in order.",
+      `Part 1, now: on a new branch, add the file ${file} containing the single line "part 1",`,
+      "and open a pull request for it. Then reply with that pull request URL and nothing else.",
+      "Do not start part 2 in this turn.",
+      "Part 2, only after you are told that the first pull request was merged: update your local copy",
+      "of the default branch from the remote, create a new branch from it, append the line",
+      `"part 2" to ${file}, and open a second pull request. Part 2 depends on part 1 being merged,`,
+      "so it must be based on the updated default branch. Reply with the second pull request URL",
+      "and nothing else.",
+    ].join(" ");
+    const launchedAt = ctx.deps.now();
+    const launched = (await client.launchSession(REST_PRINCIPAL, {
+      prompt,
+      repos: [repoOf(ctx)],
+      title: titleFor(ctx.deps.runId, "rest"),
+    })) as unknown;
+    if (!isObj(launched)) {
+      throw new Error("POST /v1/sessions is not an object");
+    }
+    const id = str(launched, "sessionId", "POST /v1/sessions");
+    ctx.state.created.add(id);
+    ctx.state.ghChain = { session: { id, cursor: 0 }, launchedAt, prs: [] };
+    const s = ghChainOf(ctx).session;
+    const res = await waitForTurn({
+      after: 0,
+      read: restEventReader(ctx, id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = res.cursor;
+    return { sessionId: id, ...turnCaptured(res) };
+  },
+};
+
+const ghChainFirstPr: Step<HarnessContext> = {
+  id: "gh-chain-first-pr",
+  name: "GitHub chain: exactly one PR exists after the first turn, and it is linked",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-chain-launch"],
+  async run(ctx) {
+    const chain = ghChainOf(ctx);
+    const client = restOf(ctx);
+    const link = await pollUntil(ctx, "the first PR link", GH_LINK_TIMEOUT_MS, async () => {
+      const session = await client.getSession(REST_PRINCIPAL, chain.session.id);
+      return session.links && session.links.length > 0 ? session.links : null;
+    });
+    if (link.length !== 1) {
+      throw new Error(`expected 1 linked PR after the first turn, found ${link.length}`);
+    }
+    const { repo, number } = prRef(link[0].pr);
+    // The agent must not have opened the second PR ahead of the merge.
+    const opened = await ghPullsSince(ctx, repo, chain.launchedAt - GH_CLOCK_SKEW_MS);
+    if (opened.length !== 1 || opened[0].number !== number) {
+      throw new Error(
+        `expected only the linked PR #${number} to exist after the first turn, found: ${opened.map((p) => `#${p.number}`).join(", ") || "none"}`,
+      );
+    }
+    chain.prs.push({ repo, number, headRef: opened[0].head.ref });
+    return { firstPr: number, linkedBy: link[0].linkedBy };
+  },
+};
+
+const ghChainMergeFirst: Step<HarnessContext> = {
+  id: "gh-chain-merge-first",
+  name: "GitHub chain: merging the first PR wakes the session, which opens the second PR on top of it",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-chain-first-pr"],
+  async run(ctx) {
+    const chain = ghChainOf(ctx);
+    const s = chain.session;
+    const first = chain.prs[0];
+    const startedAt = ctx.deps.now();
+    const firstMergeSha = await ghMerge(ctx, first.repo, first.number);
+    const firstMergedAt = Date.parse((await ghPull(ctx, first.repo, first.number)).merged_at ?? "");
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+
+    // The second PR is linked once the wake turn that opened it settles.
+    const client = restOf(ctx);
+    const links = await pollUntil(ctx, "the second PR link", GH_LINK_TIMEOUT_MS, async () => {
+      const session = await client.getSession(REST_PRINCIPAL, s.id);
+      return session.links && session.links.length >= 2 ? session.links : null;
+    });
+    const second = links.find((l) => prRef(l.pr).number !== first.number);
+    if (links.length !== 2 || !second) {
+      throw new Error(`expected 2 linked PRs after the merge wake, found ${links.length}`);
+    }
+    const { repo, number } = prRef(second.pr);
+    const pull = await ghPull(ctx, repo, number);
+    // The order the task demands: the second PR was opened after the first was merged...
+    if (!(Date.parse(pull.created_at) >= firstMergedAt - GH_CLOCK_SKEW_MS)) {
+      throw new Error(
+        `PR #${number} was created at ${pull.created_at}, before PR #${first.number} was merged`,
+      );
+    }
+    // ...and its head contains the first PR's merge commit.
+    const cmp = JSON.parse(
+      await ghOf(ctx)(["api", `repos/${repo}/compare/${firstMergeSha}...${pull.head.sha}`]),
+    ) as { status?: string; behind_by?: number };
+    if (cmp.behind_by !== 0) {
+      throw new Error(
+        `PR #${number} is not based on PR #${first.number}'s merge commit (compare: ${cmp.status}, behind by ${cmp.behind_by})`,
+      );
+    }
+    chain.prs.push({ repo, number, headRef: pull.head.ref });
+    await expectNoWake(ctx, s, GH_QUIET_MS, "the first merge wake turn settled");
+    return {
+      firstPr: first.number,
+      secondPr: number,
+      secondLinkedBy: second.linkedBy,
+      wakeTurnId: wake.turnId,
+      mergeToWakeTurnStartMs: latencyMs,
+      quietAfterMs: GH_QUIET_MS,
+      ...turnCaptured(settled),
+    };
+  },
+};
+
+const ghChainMergeSecond: Step<HarnessContext> = {
+  id: "gh-chain-merge-second",
+  name: "GitHub chain: merging the second PR wakes the session",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-chain-merge-first"],
+  async run(ctx) {
+    const chain = ghChainOf(ctx);
+    const s = chain.session;
+    const second = chain.prs[1];
+    const startedAt = ctx.deps.now();
+    await ghMerge(ctx, second.repo, second.number);
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    await expectNoWake(ctx, s, GH_QUIET_MS, "the second merge wake turn settled");
+    return {
+      secondPr: second.number,
+      wakeTurnId: wake.turnId,
+      mergeToWakeTurnStartMs: latencyMs,
+      quietAfterMs: GH_QUIET_MS,
+      ...turnCaptured(settled),
+    };
+  },
+};
+
+const ghChainCleanup: Step<HarnessContext> = {
+  id: "gh-chain-cleanup",
+  name: "GitHub chain: close any open PR and delete the head branches",
+  requires: ["baseUrl", "repo", "github"],
+  needs: [],
+  async run(ctx) {
+    const prs = ctx.state.ghChain?.prs ?? [];
+    for (const pr of prs) {
+      try {
+        await ghOf(ctx)([
+          "api",
+          "--method",
+          "PATCH",
+          `repos/${pr.repo}/pulls/${pr.number}`,
+          "-f",
+          "state=closed",
+        ]);
+      } catch {
+        // Already merged or closed.
+      }
+      await ghOf(ctx)([
+        "api",
+        "--method",
+        "DELETE",
+        `repos/${pr.repo}/git/refs/heads/${pr.headRef}`,
+      ]);
+    }
+    return { branchesDeleted: prs.length };
+  },
+};
+
 /** The opt-in GitHub wake scenario; appended to {@link STEPS} when KIRO_API_E2E_GITHUB=1. */
 export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghLaunch,
@@ -1025,6 +1276,11 @@ export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghReviewWake,
   ghMergeWake,
   ghCleanup,
+  ghChainLaunch,
+  ghChainFirstPr,
+  ghChainMergeFirst,
+  ghChainMergeSecond,
+  ghChainCleanup,
 ];
 
 /** The steps, in run order. */

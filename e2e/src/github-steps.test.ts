@@ -71,6 +71,58 @@ describe("expectNoWake", () => {
   });
 });
 
+describe("gh-chain-first-pr", () => {
+  const step = GITHUB_STEPS.find((s) => s.id === "gh-chain-first-pr");
+  const pull = (number: number, created: string) => ({
+    number,
+    state: "open",
+    created_at: created,
+    merged_at: null,
+    head: { ref: `branch-${number}`, sha: "a".repeat(40) },
+    base: { ref: "main" },
+  });
+  function ctxWith(pulls: unknown[]) {
+    const launchedAt = Date.parse("2026-02-01T10:00:00Z");
+    const ghCalls: string[][] = [];
+    const ctx = {
+      deps: {
+        now: () => launchedAt,
+        sleep: async () => {},
+        gh: async (args: string[]) => {
+          ghCalls.push(args);
+          return JSON.stringify(pulls);
+        },
+      },
+      state: {
+        created: new Set<string>(),
+        ghChain: { session: { id: "S", cursor: 3 }, launchedAt, prs: [] as unknown[] },
+        rest: {
+          getSession: async () => ({
+            links: [{ pr: "o/r#5", repo: "o/r", linkedBy: "harvest", prState: "open" }],
+          }),
+        },
+      },
+    };
+    return { ctx, ghCalls };
+  }
+
+  it("passes when only the linked PR was opened since launch, and records it", async () => {
+    const { ctx } = ctxWith([
+      pull(5, "2026-02-01T10:00:30Z"),
+      pull(4, "2026-02-01T09:00:00Z"), // an older run's PR
+    ]);
+    await expect(step?.run(ctx as never)).resolves.toEqual({ firstPr: 5, linkedBy: "harvest" });
+    expect(ctx.state.ghChain.prs).toEqual([{ repo: "o/r", number: 5, headRef: "branch-5" }]);
+  });
+
+  it("fails when the agent opened the second PR before the first was merged", async () => {
+    const { ctx } = ctxWith([pull(6, "2026-02-01T10:01:00Z"), pull(5, "2026-02-01T10:00:30Z")]);
+    await expect(step?.run(ctx as never)).rejects.toThrow(
+      /expected only the linked PR #5 to exist after the first turn, found: #6, #5/,
+    );
+  });
+});
+
 describe("the GitHub scenario is opt-in", () => {
   it("is separate from the default steps and every step requires the github flag", () => {
     expect(STEPS.some((s) => GITHUB_STEPS.includes(s))).toBe(false);
@@ -80,6 +132,11 @@ describe("the GitHub scenario is opt-in", () => {
       "gh-review-wake",
       "gh-merge-wake",
       "gh-cleanup",
+      "gh-chain-launch",
+      "gh-chain-first-pr",
+      "gh-chain-merge-first",
+      "gh-chain-merge-second",
+      "gh-chain-cleanup",
     ]);
     expect(GITHUB_STEPS.every((s) => s.requires.includes("github"))).toBe(true);
   });
@@ -96,13 +153,7 @@ describe("the GitHub scenario is opt-in", () => {
       progress: () => {},
     });
     const out = report.build();
-    expect(out.steps.map((s) => s.status)).toEqual([
-      "skipped",
-      "skipped",
-      "skipped",
-      "skipped",
-      "skipped",
-    ]);
+    expect(out.steps.map((s) => s.status)).toEqual(GITHUB_STEPS.map(() => "skipped"));
     expect(out.steps[0].reason).toBe(REASON_NO_GITHUB);
   });
 });

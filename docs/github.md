@@ -311,6 +311,16 @@ next step could mistake it for its own. Each wake must also carry a delivery no
 earlier step saw. Set `GITHUB_AUTO_CLOSE_ON_MERGE=after_turn` on the stack for the
 auto-close check.
 
+Then a second session runs a **chain** of two dependent PRs:
+`gh-chain-launch` (the prompt asks for PR 1 now and PR 2 only after PR 1 is
+merged, with PR 2 appending to the file PR 1 adds), `gh-chain-first-pr` (exactly
+one PR was opened since the launch, and it is linked), `gh-chain-merge-first`
+(merges PR 1 and waits for the wake turn; PR 2 must then be linked to the same
+session, created after PR 1 was merged, and contain PR 1's merge commit),
+`gh-chain-merge-second` (merges PR 2 and waits for its wake turn), and
+`gh-chain-cleanup` (closes any open PR, deletes both branches). Both merge
+steps apply the same 45 s quiet check.
+
 ## Out of scope (next steps)
 
 Issue-driven launches ("label an issue `kiro` and a session starts"), GitLab,
