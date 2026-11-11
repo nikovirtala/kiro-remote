@@ -125,12 +125,16 @@ describe("gh-chain-first-pr", () => {
 
 describe("gh-checks-wake", () => {
   const step = GITHUB_STEPS.find((s) => s.id === "gh-checks-wake");
-  const suites = (...conclusions: Array<string | null>) =>
+  /** The GitHub Actions suite with this conclusion (null = still running), plus other apps' suites. */
+  const suites = (actions: string | null, others: Array<[string, string | null]> = []) =>
     JSON.stringify({
-      check_suites: conclusions.map((c) => ({
-        status: c === null ? "in_progress" : "completed",
-        conclusion: c,
-      })),
+      check_suites: [["github-actions", actions] as [string, string | null], ...others].map(
+        ([slug, c]) => ({
+          app: { slug },
+          status: c === null ? "queued" : "completed",
+          conclusion: c,
+        }),
+      ),
     });
   function ctxWith(ghResponses: string[]) {
     let clock = 0;
@@ -171,11 +175,27 @@ describe("gh-checks-wake", () => {
     );
   });
 
-  it("waits for a completed suite before looking for the wake", async () => {
+  it("waits for the Actions suite before looking for the wake", async () => {
     // Checks still running, then a failure: the step gets past the check gate
     // and then times out waiting for the wake turn (no events in this fake).
     await expect(step?.run(ctxWith([PULL, suites(null), suites("failure")]))).rejects.toThrow(
       /the GitHub wake turn did not happen within \d+ s/,
+    );
+  });
+
+  it("ignores other apps' suites, queued or successful (seen live: mergify, claude, kiro-agent)", async () => {
+    const others: Array<[string, string | null]> = [
+      ["mergify", null],
+      ["claude", "success"],
+      ["kiro-agent", null],
+    ];
+    // An unrelated success while Actions still runs is not a "passed without failing".
+    await expect(
+      step?.run(ctxWith([PULL, suites(null, others), suites("failure", others)])),
+    ).rejects.toThrow(/the GitHub wake turn did not happen within \d+ s/);
+    // And Actions passing is still caught, whatever the others do.
+    await expect(step?.run(ctxWith([PULL, suites("success", others)]))).rejects.toThrow(
+      /GitHub Actions checks completed without failing \(success\)/,
     );
   });
 });
