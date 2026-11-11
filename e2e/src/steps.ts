@@ -61,6 +61,8 @@ export interface HarnessState {
   /** The GitHub scenario's session, and the PR its agent opened. */
   ghSession?: SessionCursor;
   ghPr?: { repo: string; number: number; headRef: string | null; linkedBy: string };
+  /** GitHub delivery ids of the wake turns the GitHub steps have seen so far. */
+  ghWakeDeliveries?: string[];
   /** Session ids created and not yet confirmed deleted. */
   created: Set<string>;
 }
@@ -740,6 +742,12 @@ export function githubWakes(
 
 const GH_LINK_TIMEOUT_MS = 3 * 60_000;
 const GH_WAKE_TIMEOUT_MS = 5 * 60_000;
+/**
+ * How long a session must then stay without another GitHub wake. Webhook to
+ * wake turn took ~5 s live, so this is ample, and it is what makes each wake
+ * step attributable: only the harness's own action can wake the session.
+ */
+export const GH_QUIET_MS = 45_000;
 
 function ghOf(ctx: HarnessContext): (args: string[]) => Promise<string> {
   if (!ctx.deps.gh) {
@@ -772,6 +780,41 @@ async function pollUntil<T>(
   }
 }
 
+/**
+ * Fail if a GitHub wake turn starts on the session within `quietMs`. Called
+ * after a wake turn settles: nothing the harness did since can explain another
+ * wake, so one means the session woke itself (the agent's own PR comment did
+ * this once) or something else is waking it, and the next step could
+ * otherwise mistake that wake for its own.
+ */
+export async function expectNoWake(
+  ctx: HarnessContext,
+  s: SessionCursor,
+  quietMs: number,
+  after: string,
+): Promise<void> {
+  const client = restOf(ctx);
+  const start = ctx.deps.now();
+  for (;;) {
+    const page = await client.getEvents(REST_PRINCIPAL, s.id, {
+      after: s.cursor,
+      wait: 0,
+      types: ["session.info"],
+    });
+    const extra = githubWakes(page.events as unknown as EventLike[])[0];
+    if (extra) {
+      throw new Error(
+        `unexpected GitHub wake turn ${extra.turnId} (deliveries: ${extra.deliveryIds.join(", ") || "none"}) ` +
+          `within ${Math.round(quietMs / 1000)} s after ${after}; the harness did nothing that should wake the session`,
+      );
+    }
+    if (ctx.deps.now() - start >= quietMs) {
+      return;
+    }
+    await abortableSleep(ctx, 5_000);
+  }
+}
+
 async function waitForWake(ctx: HarnessContext, s: SessionCursor, startedAt: number) {
   const client = restOf(ctx);
   const wake = await pollUntil(ctx, "the GitHub wake turn", GH_WAKE_TIMEOUT_MS, async () => {
@@ -783,6 +826,16 @@ async function waitForWake(ctx: HarnessContext, s: SessionCursor, startedAt: num
     const found = githubWakes(page.events as unknown as EventLike[])[0];
     return found ?? null;
   });
+  // A wake that re-uses a delivery an earlier wake step already saw is not
+  // caused by this step's action.
+  const seen = new Set(ctx.state.ghWakeDeliveries ?? []);
+  const reused = wake.deliveryIds.filter((d) => seen.has(d));
+  if (wake.deliveryIds.length === 0 || reused.length > 0) {
+    throw new Error(
+      `wake turn ${wake.turnId} has no new GitHub delivery (deliveries: ${wake.deliveryIds.join(", ") || "none"})`,
+    );
+  }
+  ctx.state.ghWakeDeliveries = [...seen, ...wake.deliveryIds];
   const latencyMs = (wake.ts ? Date.parse(wake.ts) : ctx.deps.now()) - startedAt;
   const settled = await waitForTurn({
     after: s.cursor,
@@ -886,10 +939,14 @@ const ghReviewWake: Step<HarnessContext> = {
       `body=E2E ${ctx.deps.runId}: please reply with the word ACK.`,
     ]);
     const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    // The prompt asks for a reply, which the agent may post as a PR comment
+    // (it did in a live run). That comment must not wake the session again.
+    await expectNoWake(ctx, s, GH_QUIET_MS, "the review wake turn settled");
     return {
       wakeTurnId: wake.turnId,
       deliveries: wake.deliveryIds.length,
       reviewToWakeTurnStartMs: latencyMs,
+      quietAfterMs: GH_QUIET_MS,
       ...turnCaptured(settled),
     };
   },
@@ -926,6 +983,9 @@ const ghMergeWake: Step<HarnessContext> = {
       await waitUntilGone(ctx, s.id, () => restGone(restOf(ctx), s.id), { honorAbort: true });
       ctx.state.created.delete(s.id);
       out.autoClosed = true;
+    } else {
+      await expectNoWake(ctx, s, GH_QUIET_MS, "the merge wake turn settled");
+      out.quietAfterMs = GH_QUIET_MS;
     }
     return out;
   },
