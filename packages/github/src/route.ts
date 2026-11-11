@@ -11,7 +11,8 @@
  *   pull_request.closed (merged)        -> wake, optionally autoClose
  *   pull_request.closed (not merged)    -> wake
  *   pull_request_review.submitted       -> wake when changes_requested or commented
- *   issue_comment.created on a PR       -> wake, bots and the agent's own identity ignored
+ *   issue_comment.created on a PR       -> wake; bots, the agent's own identity and
+ *                                          comments posted through the agent's app ignored
  *   check_suite / workflow_run completed
  *     with failure or timed_out
  *     on the linked PR's head sha       -> wake (debounced; one wake for the batch)
@@ -103,6 +104,12 @@ function isAgent(login: string | null, config: RouteConfig): boolean {
   return login !== null && config.agentLogins.some((a) => a.toLowerCase() === login.toLowerCase());
 }
 
+/** True when the comment or review was posted through one of the agent's GitHub Apps. */
+function viaAgentApp(item: Json, config: RouteConfig): boolean {
+  const slug = str(obj(item.performed_via_github_app).slug)?.toLowerCase();
+  return slug !== undefined && config.agentApps.some((a) => a.toLowerCase() === slug);
+}
+
 function prStateOf(pr: Json): PrState {
   if (pr.merged === true) {
     return "merged";
@@ -158,7 +165,12 @@ function wouldWake(event: GithubEvent, config: RouteConfig): boolean {
       return action === "submitted" && (state === "changes_requested" || state === "commented");
     }
     case "issue_comment":
-      return action === "created" && !sender.isBot && !isAgent(sender.login, config);
+      return (
+        action === "created" &&
+        !sender.isBot &&
+        !isAgent(sender.login, config) &&
+        !viaAgentApp(obj(event.payload.comment), config)
+      );
     case "check_suite":
     case "workflow_run":
       return action === "completed" && failingConclusion(event) !== null;
@@ -253,7 +265,9 @@ function routeLinked(
         return [];
       }
       const reviewer = str(obj(review.user).login) ?? sender.login;
-      if (isAgent(reviewer, config)) {
+      // The REST review object has no performed_via_github_app (seen 2026-11);
+      // checked anyway in case the webhook payload carries it.
+      if (isAgent(reviewer, config) || viaAgentApp(review, config)) {
         return [];
       }
       const who = safeLogin(reviewer);
@@ -292,7 +306,8 @@ function routeLinked(
         sender.isBot ||
         commenterIsBot ||
         isAgent(commenter, config) ||
-        isAgent(sender.login, config)
+        isAgent(sender.login, config) ||
+        viaAgentApp(comment, config)
       ) {
         return [];
       }

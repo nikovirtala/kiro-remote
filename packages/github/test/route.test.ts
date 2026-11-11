@@ -158,6 +158,28 @@ describe("route(): every default action", () => {
       ]);
     });
 
+    it("ignores a comment the agent posted as the user through its app (no self-wake)", () => {
+      // Seen live: the agent's "ACK" reply arrived as the trusted owner, with
+      // performed_via_github_app.slug = "kiro-agent", and woke its own session.
+      const ev = event("issue_comment", "issue_comment.created.via_agent_app");
+      expect(route(ev, links, CONFIG)).toEqual([{ type: "ignore", reason: "no_action" }]);
+      // and it is not offered as an unmatched delivery either
+      expect(route(ev, [], CONFIG)).toEqual([{ type: "ignore", reason: "no_action" }]);
+      // the app slug compare is case-insensitive
+      expect(route(ev, links, { ...CONFIG, agentApps: ["Kiro-Agent"] })).toEqual([
+        { type: "ignore", reason: "no_action" },
+      ]);
+    });
+
+    it("still wakes for the same login commenting through any other app", () => {
+      const ev = event("issue_comment", "issue_comment.created.via_agent_app");
+      const comment = ev.payload.comment as Record<string, unknown>;
+      comment.performed_via_github_app = { slug: "github-mobile" };
+      const w = only(route(ev, links, CONFIG));
+      expect(w.prompt).toContain("@octocat commented on PR #7.");
+      expect(only(route(ev, links, { ...CONFIG, agentApps: [] })).kind).toBe("comment");
+    });
+
     it("a comment on a plain issue is not about a PR", () => {
       expect(eventPrNumbers(event("issue_comment", "issue_comment.created.on_issue"))).toEqual([]);
       expect(

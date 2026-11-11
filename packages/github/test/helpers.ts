@@ -44,6 +44,7 @@ export const LINK: RouteLink = {
 export const CONFIG: RouteConfig = {
   trustedLogins: ["octocat"],
   agentLogins: ["kiro-agent[bot]"],
+  agentApps: ["kiro-agent"],
   autoCloseOnMerge: "off",
   checksDebounceMs: 120_000,
 };
