@@ -469,6 +469,9 @@ describe("KiroRemote Lambda bridge", () => {
     const consumer = images.find((fn) => (fn.Properties.Timeout as number) === 900);
     expect(consumer).toBeDefined();
     expect(consumer?.Properties.ReservedConcurrentExecutions).toBe(10);
+    // The catch-up queue re-triggers the consumer once per check; Lambda's
+    // recursive loop detection would stop that after ~16 rounds.
+    expect(consumer?.Properties.RecursiveLoop).toBe("Allow");
 
     // Two native SQS event-source mappings (command queue + catch-up queue),
     // each with partial-batch failure reporting and a batch size of 1.

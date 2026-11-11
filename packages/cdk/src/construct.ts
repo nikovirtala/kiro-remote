@@ -56,6 +56,7 @@ import {
   DockerImageCode,
   DockerImageFunction,
   Function as LambdaFunction,
+  RecursiveLoop,
   Runtime,
   RuntimeFamily,
 } from "aws-cdk-lib/aws-lambda";
@@ -784,6 +785,13 @@ export class KiroRemote extends Construct {
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.minutes(15),
       reservedConcurrentExecutions: maxCloudSessions,
+      // The catch-up loop is intentional: each catch-up invocation that finds
+      // the turn still running re-sends itself to the catch-up queue, which
+      // triggers this same function. Lambda's recursive loop detection stops
+      // such a chain after ~16 invocations (about 30 min into a turn), which
+      // silently strands long turns. The loop is bounded by the 6 h catch-up
+      // expiry, so allow it. Stopgap until catch-up no longer re-enqueues itself.
+      recursiveLoop: RecursiveLoop.ALLOW,
       environment: {
         ...bridgeLambdaEnv,
         // On Lambda only /tmp is writable, so the per-turn working directory
