@@ -166,6 +166,12 @@ CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
 KIRO_API_KEY_SECRET_ARN="${KIRO_API_KEY_SECRET_ARN:-}"
 SES_FROM_EMAIL="${SES_FROM_EMAIL:-}"
 SES_VERIFIED_DOMAIN="${SES_VERIFIED_DOMAIN:-}"
+# Optional GitHub wake feature (docs/github.md). Blank GITHUB_APP_SECRET_ARN = off.
+GITHUB_APP_SECRET_ARN="${GITHUB_APP_SECRET_ARN:-}"
+GITHUB_TRUSTED_LOGINS="${GITHUB_TRUSTED_LOGINS:-}"
+GITHUB_AGENT_LOGINS="${GITHUB_AGENT_LOGINS:-}"
+GITHUB_PR_TRAILER="${GITHUB_PR_TRAILER:-}"
+GITHUB_AUTO_CLOSE_ON_MERGE="${GITHUB_AUTO_CLOSE_ON_MERGE:-}"
 
 if [ -n "${BRIDGE_MODE:-}" ]; then
   printf 'WARNING: BRIDGE_MODE in %s is obsolete and ignored (the Lambda bridge is the only bridge); remove the line.\n' "$CONFIG_FILE" >&2
@@ -206,6 +212,11 @@ add_opt certificateArn       "$CERTIFICATE_ARN"
 add_opt kiroApiKeySecretArn  "$KIRO_API_KEY_SECRET_ARN"
 add_opt sesFromEmail         "$SES_FROM_EMAIL"
 add_opt sesVerifiedDomain    "$SES_VERIFIED_DOMAIN"
+add_opt githubAppSecretArn   "$GITHUB_APP_SECRET_ARN"
+add_opt githubTrustedLogins  "$GITHUB_TRUSTED_LOGINS"
+add_opt githubAgentLogins    "$GITHUB_AGENT_LOGINS"
+add_opt githubPrTrailer      "$GITHUB_PR_TRAILER"
+add_opt githubAutoCloseOnMerge "$GITHUB_AUTO_CLOSE_ON_MERGE"
 
 # synth and diff cover every stack by default (synth rejects --all); deploy
 # needs --all.

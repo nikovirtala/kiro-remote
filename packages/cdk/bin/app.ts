@@ -17,6 +17,7 @@ import { DockerImageCode } from "aws-cdk-lib/aws-lambda";
 import { buildApiLambdaCode } from "../src/api-asset.ts";
 import { BRIDGE_IMAGE_EXCLUDES, selectAppAssets } from "../src/app-assets.ts";
 import { KiroRemoteDnsStack } from "../src/dns-stack.ts";
+import { buildGithubLambdaCode } from "../src/github-asset.ts";
 import { applyAwsSolutionsChecks } from "../src/nag.ts";
 import { KiroRemoteStack } from "../src/stack.ts";
 
@@ -149,6 +150,31 @@ const customDomain = customDomainName
 const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefined;
 const sesVerifiedDomain = app.node.tryGetContext("sesVerifiedDomain") as string | undefined;
 
+// Optional GitHub feature: `-c githubAppSecretArn=<arn>` turns it on (docs/github.md).
+// Without it nothing GitHub-related is created.
+const githubAppSecretArn = app.node.tryGetContext("githubAppSecretArn") as string | undefined;
+const list = (key: string): string[] =>
+  String(app.node.tryGetContext(key) ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+const githubPrTrailer = app.node.tryGetContext("githubPrTrailer") as "on" | "off" | undefined;
+const githubAutoCloseOnMerge = app.node.tryGetContext("githubAutoCloseOnMerge") as
+  | "off"
+  | "after_turn"
+  | undefined;
+const github = githubAppSecretArn
+  ? {
+      githubAppSecretArn,
+      githubTrustedLogins: list("githubTrustedLogins"),
+      githubAgentLogins: list("githubAgentLogins"),
+      ...(githubPrTrailer ? { githubPrTrailer } : {}),
+      ...(githubAutoCloseOnMerge ? { githubAutoCloseOnMerge } : {}),
+      githubWebhookCode: buildGithubLambdaCode("webhook"),
+      githubConsumerCode: buildGithubLambdaCode("consumer"),
+    }
+  : {};
+
 new KiroRemoteStack(app, "KiroRemoteStack", {
   ...(env ? { env } : {}),
   kiroRemote: {
@@ -162,6 +188,7 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     ...(lambdaImage ? { lambdaImage } : {}),
     ...(apiLambdaCode ? { apiLambdaCode } : {}),
     ...(customDomain ? { customDomain } : {}),
+    ...github,
   },
 });
 

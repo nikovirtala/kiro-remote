@@ -48,6 +48,7 @@ export const BRIDGE_IMAGE_EXCLUDES: readonly string[] = [
   "**/node_modules",
   "**/cdk.out",
   "**/.api-bundle",
+  "**/.github-*-bundle",
   ".git",
   "**/.git",
 ];
