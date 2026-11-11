@@ -39,6 +39,11 @@ export interface HarnessDeps {
   turnTimeoutMs: number;
   deleteTimeoutMs: number;
   deletePollMs: number;
+  /**
+   * Run the GitHub CLI (`gh api ...`, REST only) as the TRUSTED login and return
+   * stdout. Only the opt-in GitHub scenario uses it.
+   */
+  gh?(args: string[]): Promise<string>;
 }
 
 export interface SessionCursor {
@@ -53,6 +58,9 @@ export interface HarnessState {
   rest?: KiroRemoteClient;
   mcpSession?: SessionCursor;
   restSession?: SessionCursor;
+  /** The GitHub scenario's session, and the PR its agent opened. */
+  ghSession?: SessionCursor;
+  ghPr?: { repo: string; number: number; headRef: string | null; linkedBy: string };
   /** Session ids created and not yet confirmed deleted. */
   created: Set<string>;
 }
@@ -196,7 +204,7 @@ function sessionOf(s: SessionCursor | undefined): SessionCursor {
   return s;
 }
 
-/** Assert the names are exactly the 14 registered tools. */
+/** Assert the names are exactly the 16 registered tools. */
 export function assertToolSet(names: string[], what: string): void {
   const expected = new Set<string>(TOOL_NAMES);
   const got = new Set(names);
@@ -699,6 +707,265 @@ const restDelete: Step<HarnessContext> = {
     return { sessionId: s.id, goneMs };
   },
 };
+
+/* -------------------------------------------------------------------------- */
+/* Opt-in GitHub wake scenario (KIRO_API_E2E_GITHUB=1)                         */
+/* -------------------------------------------------------------------------- */
+
+/** Wake turns in an events page: `turn_started` session.info events with a github trigger. */
+export function githubWakes(
+  events: readonly EventLike[],
+): Array<{ seq: number; turnId: string; deliveryIds: string[]; ts: string | null }> {
+  const out: Array<{ seq: number; turnId: string; deliveryIds: string[]; ts: string | null }> = [];
+  for (const e of events) {
+    const p = e.payload as {
+      payload?: { trigger?: { source?: unknown; deliveryIds?: unknown } };
+    } | null;
+    const trigger = p?.payload?.trigger;
+    if (e.type !== "session.info" || !e.turnId || trigger?.source !== "github") {
+      continue;
+    }
+    const ts = (e as { ts?: unknown }).ts;
+    out.push({
+      seq: e.seq,
+      turnId: e.turnId,
+      deliveryIds: Array.isArray(trigger.deliveryIds)
+        ? trigger.deliveryIds.filter((d): d is string => typeof d === "string")
+        : [],
+      ts: typeof ts === "string" ? ts : null,
+    });
+  }
+  return out;
+}
+
+const GH_LINK_TIMEOUT_MS = 3 * 60_000;
+const GH_WAKE_TIMEOUT_MS = 5 * 60_000;
+
+function ghOf(ctx: HarnessContext): (args: string[]) => Promise<string> {
+  if (!ctx.deps.gh) {
+    throw new Error("no gh runner configured");
+  }
+  return ctx.deps.gh;
+}
+
+function ghSessionOf(ctx: HarnessContext): SessionCursor {
+  return sessionOf(ctx.state.ghSession);
+}
+
+/** Poll until `pick` returns a value, or time out. */
+async function pollUntil<T>(
+  ctx: HarnessContext,
+  what: string,
+  timeoutMs: number,
+  pick: () => Promise<T | null>,
+): Promise<T> {
+  const start = ctx.deps.now();
+  for (;;) {
+    const got = await pick();
+    if (got !== null) {
+      return got;
+    }
+    if (ctx.deps.now() - start > timeoutMs) {
+      throw new Error(`${what} did not happen within ${Math.round(timeoutMs / 1000)} s`);
+    }
+    await abortableSleep(ctx, 5_000);
+  }
+}
+
+async function waitForWake(ctx: HarnessContext, s: SessionCursor, startedAt: number) {
+  const client = restOf(ctx);
+  const wake = await pollUntil(ctx, "the GitHub wake turn", GH_WAKE_TIMEOUT_MS, async () => {
+    const page = await client.getEvents(REST_PRINCIPAL, s.id, {
+      after: s.cursor,
+      wait: 0,
+      types: ["session.info"],
+    });
+    const found = githubWakes(page.events as unknown as EventLike[])[0];
+    return found ?? null;
+  });
+  const latencyMs = (wake.ts ? Date.parse(wake.ts) : ctx.deps.now()) - startedAt;
+  const settled = await waitForTurn({
+    after: s.cursor,
+    turnId: wake.turnId,
+    read: restEventReader(ctx, s.id),
+    now: ctx.deps.now,
+    sleep: ctx.deps.sleep,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+    timeoutMs: ctx.deps.turnTimeoutMs,
+  });
+  s.cursor = settled.cursor;
+  return { wake, settled, latencyMs };
+}
+
+const ghLaunch: Step<HarnessContext> = {
+  id: "gh-launch",
+  name: "GitHub: launch a session whose agent opens a docs-only PR",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["login"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const prompt = [
+      "Make a docs-only change: add one new file docs/kiro-remote-e2e-" +
+        ctx.deps.runId.toLowerCase() +
+        ".md with one line,",
+      "on a new branch, and open a pull request for it. Reply with the pull request URL and nothing else.",
+    ].join(" ");
+    const launched = (await client.launchSession(REST_PRINCIPAL, {
+      prompt,
+      repos: [repoOf(ctx)],
+      title: titleFor(ctx.deps.runId, "rest"),
+    })) as unknown;
+    if (!isObj(launched)) {
+      throw new Error("POST /v1/sessions is not an object");
+    }
+    const id = str(launched, "sessionId", "POST /v1/sessions");
+    ctx.state.created.add(id);
+    ctx.state.ghSession = { id, cursor: 0 };
+    const s = ghSessionOf(ctx);
+    const res = await waitForTurn({
+      after: 0,
+      read: restEventReader(ctx, id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = res.cursor;
+    return { sessionId: id, ...turnCaptured(res) };
+  },
+};
+
+const ghLink: Step<HarnessContext> = {
+  id: "gh-link",
+  name: "GitHub: the PR is linked to the session (GET /v1/sessions/{id} links[])",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-launch"],
+  async run(ctx) {
+    const s = ghSessionOf(ctx);
+    const client = restOf(ctx);
+    const link = await pollUntil(ctx, "the PR link", GH_LINK_TIMEOUT_MS, async () => {
+      const session = await client.getSession(REST_PRINCIPAL, s.id);
+      return session.links && session.links.length > 0 ? session.links[0] : null;
+    });
+    const [owner, name, num] = link.pr.replace("#", "/").split("/");
+    const number = Number(num);
+    const pull = JSON.parse(await ghOf(ctx)(["api", `repos/${owner}/${name}/pulls/${number}`])) as {
+      head?: { ref?: string };
+    };
+    ctx.state.ghPr = {
+      repo: link.repo,
+      number,
+      headRef: pull.head?.ref ?? null,
+      linkedBy: link.linkedBy,
+    };
+    // "linkedBy" says which method worked in this run: harvest, trailer or manual.
+    return { linkedBy: link.linkedBy, prState: link.prState };
+  },
+};
+
+const ghReviewWake: Step<HarnessContext> = {
+  id: "gh-review-wake",
+  name: "GitHub: a trusted review comment wakes the session",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-link"],
+  async run(ctx) {
+    const s = ghSessionOf(ctx);
+    const pr = ctx.state.ghPr;
+    if (!pr) {
+      throw new Error("no PR from gh-link");
+    }
+    const startedAt = ctx.deps.now();
+    await ghOf(ctx)([
+      "api",
+      "--method",
+      "POST",
+      `repos/${pr.repo}/pulls/${pr.number}/reviews`,
+      "-f",
+      "event=COMMENT",
+      "-f",
+      `body=E2E ${ctx.deps.runId}: please reply with the word ACK.`,
+    ]);
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    return {
+      wakeTurnId: wake.turnId,
+      deliveries: wake.deliveryIds.length,
+      reviewToWakeTurnStartMs: latencyMs,
+      ...turnCaptured(settled),
+    };
+  },
+};
+
+const ghMergeWake: Step<HarnessContext> = {
+  id: "gh-merge-wake",
+  name: "GitHub: merging the PR wakes the session (and closes it with autoCloseOnMerge)",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-review-wake"],
+  async run(ctx) {
+    const s = ghSessionOf(ctx);
+    const pr = ctx.state.ghPr;
+    if (!pr) {
+      throw new Error("no PR from gh-link");
+    }
+    const startedAt = ctx.deps.now();
+    await ghOf(ctx)([
+      "api",
+      "--method",
+      "PUT",
+      `repos/${pr.repo}/pulls/${pr.number}/merge`,
+      "-f",
+      "merge_method=squash",
+    ]);
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    const out: Obj = {
+      wakeTurnId: wake.turnId,
+      mergeToWakeTurnStartMs: latencyMs,
+      ...turnCaptured(settled),
+    };
+    // With GITHUB_AUTO_CLOSE_ON_MERGE=after_turn the session is deleted once this turn completes.
+    if (process.env.KIRO_API_E2E_GITHUB_AUTOCLOSE === "1") {
+      await waitUntilGone(ctx, s.id, () => restGone(restOf(ctx), s.id), { honorAbort: true });
+      ctx.state.created.delete(s.id);
+      out.autoClosed = true;
+    }
+    return out;
+  },
+};
+
+const ghCleanup: Step<HarnessContext> = {
+  id: "gh-cleanup",
+  name: "GitHub: delete the PR's head branch",
+  requires: ["baseUrl", "repo", "github"],
+  needs: [],
+  async run(ctx) {
+    const pr = ctx.state.ghPr;
+    if (!pr?.headRef) {
+      return { branchDeleted: false };
+    }
+    try {
+      await ghOf(ctx)([
+        "api",
+        "--method",
+        "PATCH",
+        `repos/${pr.repo}/pulls/${pr.number}`,
+        "-f",
+        "state=closed",
+      ]);
+    } catch {
+      // Already merged or closed.
+    }
+    await ghOf(ctx)(["api", "--method", "DELETE", `repos/${pr.repo}/git/refs/heads/${pr.headRef}`]);
+    return { branchDeleted: true };
+  },
+};
+
+/** The opt-in GitHub wake scenario; appended to {@link STEPS} when KIRO_API_E2E_GITHUB=1. */
+export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
+  ghLaunch,
+  ghLink,
+  ghReviewWake,
+  ghMergeWake,
+  ghCleanup,
+];
 
 /** The steps, in run order. */
 export const STEPS: readonly Step<HarnessContext>[] = [

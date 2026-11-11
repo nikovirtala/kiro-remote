@@ -9,7 +9,7 @@
 import type { Report } from "./report.ts";
 
 /** An environment prerequisite of a step. */
-export type Requirement = "baseUrl" | "repo";
+export type Requirement = "baseUrl" | "repo" | "github";
 
 export interface Step<C> {
   id: string;
@@ -24,6 +24,8 @@ export interface Step<C> {
 export interface RunStepsOptions {
   hasBaseUrl: boolean;
   hasRepo: boolean;
+  /** The opt-in GitHub scenario is enabled (KIRO_API_E2E_GITHUB=1). */
+  hasGithub?: boolean;
   signal?: AbortSignal;
   now(): number;
   progress(line: string): void;
@@ -32,6 +34,8 @@ export interface RunStepsOptions {
 export const REASON_NO_URL = "KIRO_REMOTE_URL is unset: there is no deployed stack to test.";
 export const REASON_NO_REPO =
   "KIRO_API_E2E_REPO is unset: there is no repo to launch a session on.";
+export const REASON_NO_GITHUB =
+  "KIRO_API_E2E_GITHUB is unset: the GitHub wake scenario needs the GitHub App installed on the repo.";
 export const REASON_INTERRUPTED = "run interrupted.";
 
 function skipReason<C>(step: Step<C>, report: Report, opts: RunStepsOptions): string | null {
@@ -43,6 +47,9 @@ function skipReason<C>(step: Step<C>, report: Report, opts: RunStepsOptions): st
   }
   if (step.requires.includes("repo") && !opts.hasRepo) {
     return REASON_NO_REPO;
+  }
+  if (step.requires.includes("github") && !opts.hasGithub) {
+    return REASON_NO_GITHUB;
   }
   const unmet = step.needs.find((id) => report.statusOf(id) !== "passed");
   return unmet ? `skipped because ${unmet} did not pass.` : null;

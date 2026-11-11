@@ -13,6 +13,7 @@
  *   2  nothing failed, but at least one step was skipped (for example
  *      KIRO_REMOTE_URL is unset), so the live e2e did not fully run.
  */
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { FileKeychain, HttpClient } from "@nikovirtala/kiro-remote-mcp";
 import { defaultLogin, nodeFetch, obtainToken } from "./auth.ts";
@@ -25,6 +26,7 @@ import {
   cleanupSessions,
   DELETE_POLL_MS,
   DELETE_TIMEOUT_MS,
+  GITHUB_STEPS,
   type HarnessContext,
   type HarnessDeps,
   STEPS,
@@ -58,7 +60,21 @@ function realDeps(progress: (line: string) => void): HarnessDeps {
     turnTimeoutMs: TURN_TIMEOUT_MS,
     deleteTimeoutMs: DELETE_TIMEOUT_MS,
     deletePollMs: DELETE_POLL_MS,
+    gh: (args) => ghCli(args),
   };
+}
+
+/** Run `gh <args>` (REST only) and return stdout. Auth comes from the ambient gh login, which must be a trusted login. */
+function ghCli(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("gh", args, { maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(`gh ${args.slice(0, 3).join(" ")} failed: ${stderr.slice(0, 200)}`));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
 }
 
 /** Run the harness with injectable env and dependencies; returns the scrubbed report. */
@@ -85,9 +101,11 @@ export async function runHarness(
     ...(opts.signal ? { signal: opts.signal } : {}),
   };
   try {
-    await runSteps(STEPS, ctx, report, {
+    const githubEnabled = (opts.env ?? process.env).KIRO_API_E2E_GITHUB === "1";
+    await runSteps(githubEnabled ? [...STEPS, ...GITHUB_STEPS] : STEPS, ctx, report, {
       hasBaseUrl: config.baseUrl !== null,
       hasRepo: config.hasRepo,
+      hasGithub: githubEnabled,
       ...(opts.signal ? { signal: opts.signal } : {}),
       now: deps.now,
       progress: deps.progress,
