@@ -751,6 +751,14 @@ export function githubWakes(
   return out;
 }
 
+/**
+ * The stack runs with GITHUB_AUTO_CLOSE_ON_MERGE=after_turn. The harness cannot
+ * read the stack's setting, so KIRO_API_E2E_GITHUB_AUTOCLOSE=1 says so.
+ */
+function autoCloseExpected(): boolean {
+  return process.env.KIRO_API_E2E_GITHUB_AUTOCLOSE === "1";
+}
+
 const GH_LINK_TIMEOUT_MS = 3 * 60_000;
 const GH_WAKE_TIMEOUT_MS = 5 * 60_000;
 /**
@@ -1000,7 +1008,7 @@ const ghMergeWake: Step<HarnessContext> = {
       ...turnCaptured(settled),
     };
     // With GITHUB_AUTO_CLOSE_ON_MERGE=after_turn the session is deleted once this turn completes.
-    if (process.env.KIRO_API_E2E_GITHUB_AUTOCLOSE === "1") {
+    if (autoCloseExpected()) {
       await waitUntilGone(ctx, s.id, () => restGone(restOf(ctx), s.id), { honorAbort: true });
       ctx.state.created.delete(s.id);
       out.autoClosed = true;
@@ -1217,11 +1225,23 @@ const ghChainMergeFirst: Step<HarnessContext> = {
       );
     }
     chain.prs.push({ repo, number, headRef: pull.head.ref });
+    // With autoCloseOnMerge on, this post-merge turn must NOT close the session:
+    // PR 2 is open. The quiet check below reads its events, so it also fails if
+    // the session is gone; this makes the reason explicit.
     await expectNoWake(ctx, s, GH_QUIET_MS, "the first merge wake turn settled");
+    if (autoCloseExpected()) {
+      const gone = await restGone(client, s.id);
+      if (gone === true) {
+        throw new Error(
+          `auto-close deleted the session after PR #${first.number} merged although PR #${number} is still open`,
+        );
+      }
+    }
     return {
       firstPr: first.number,
       secondPr: number,
       secondLinkedBy: second.linkedBy,
+      ...(autoCloseExpected() ? { keptWithOpenPr: true } : {}),
       wakeTurnId: wake.turnId,
       mergeToWakeTurnStartMs: latencyMs,
       quietAfterMs: GH_QUIET_MS,
@@ -1242,14 +1262,22 @@ const ghChainMergeSecond: Step<HarnessContext> = {
     const startedAt = ctx.deps.now();
     await ghMerge(ctx, second.repo, second.number);
     const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
-    await expectNoWake(ctx, s, GH_QUIET_MS, "the second merge wake turn settled");
-    return {
+    const out: Obj = {
       secondPr: second.number,
       wakeTurnId: wake.turnId,
       mergeToWakeTurnStartMs: latencyMs,
-      quietAfterMs: GH_QUIET_MS,
       ...turnCaptured(settled),
     };
+    if (autoCloseExpected()) {
+      // Every linked PR is merged now, so this post-merge turn closes the session.
+      await waitUntilGone(ctx, s.id, () => restGone(restOf(ctx), s.id), { honorAbort: true });
+      ctx.state.created.delete(s.id);
+      out.autoClosed = true;
+    } else {
+      await expectNoWake(ctx, s, GH_QUIET_MS, "the second merge wake turn settled");
+      out.quietAfterMs = GH_QUIET_MS;
+    }
+    return out;
   },
 };
 
