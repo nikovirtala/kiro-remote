@@ -21,22 +21,25 @@ delete needs `sessions:delete`. A session is visible only to its creator's sub.
 
 ## Authenticated routes (under `/v1`)
 
-| Method | Path                                        | Notes                                                                                                                                     |
-| ------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/v1/capabilities`                          | Advertised capabilities, `kiro-cli` version (`kiroCliVersion`, `null` until the caps publisher has run; see below), active session count. |
-| GET    | `/v1/models`                                | Model ids the agent advertises.                                                                                                           |
-| GET    | `/v1/sessions`                              | List your sessions. Query: `status`, `limit` (default 20, max 100), `cursor`.                                                             |
-| POST   | `/v1/sessions`                              | Launch a session. Returns **202** `{ sessionId, turnId }`.                                                                                |
-| POST   | `/v1/sessions/adopt`                        | Adopt an existing Kiro session. Body `{ kiroSessionId }`.                                                                                 |
-| GET    | `/v1/sessions/{id}`                         | Fetch one session.                                                                                                                        |
-| DELETE | `/v1/sessions/{id}`                         | Delete a session (needs `sessions:delete`).                                                                                               |
-| POST   | `/v1/sessions/{id}/turns`                   | Send a prompt. Returns **202**.                                                                                                           |
-| GET    | `/v1/sessions/{id}/turns/{turnId}`          | Fetch a turn.                                                                                                                             |
-| GET    | `/v1/sessions/{id}/events`                  | Long-poll the event log. Query: `after=<seq>`, `wait=<0..20s>`, `types`. Returns `{ events, nextCursor, turnStatus }`.                    |
-| POST   | `/v1/sessions/{id}/cancel`                  | Cancel the active turn.                                                                                                                   |
-| GET    | `/v1/sessions/{id}/permissions`             | List permission requests. Query: `status=pending`.                                                                                        |
-| POST   | `/v1/sessions/{id}/permissions/{requestId}` | Answer a permission. Body `{ optionId, consent? }`. 422 if `optionId` was not offered.                                                    |
-| PATCH  | `/v1/sessions/{id}/config`                  | Change `model` / `effort` / `mode`.                                                                                                       |
+| Method | Path                                         | Notes                                                                                                                                                                                                                |
+| ------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/capabilities`                           | Advertised capabilities, `kiro-cli` version (`kiroCliVersion`, `null` until the caps publisher has run; see below), active session count.                                                                            |
+| GET    | `/v1/models`                                 | Model ids the agent advertises.                                                                                                                                                                                      |
+| GET    | `/v1/sessions`                               | List your sessions. Query: `status`, `limit` (default 20, max 100), `cursor`.                                                                                                                                        |
+| POST   | `/v1/sessions`                               | Launch a session. Returns **202** `{ sessionId, turnId }`.                                                                                                                                                           |
+| POST   | `/v1/sessions/adopt`                         | Adopt an existing Kiro session. Body `{ kiroSessionId }`.                                                                                                                                                            |
+| GET    | `/v1/sessions/{id}`                          | Fetch one session.                                                                                                                                                                                                   |
+| DELETE | `/v1/sessions/{id}`                          | Delete a session (needs `sessions:delete`).                                                                                                                                                                          |
+| POST   | `/v1/sessions/{id}/turns`                    | Send a prompt. Returns **202**.                                                                                                                                                                                      |
+| GET    | `/v1/sessions/{id}/turns/{turnId}`           | Fetch a turn.                                                                                                                                                                                                        |
+| GET    | `/v1/sessions/{id}/events`                   | Long-poll the event log. Query: `after=<seq>`, `wait=<0..20s>`, `types`. Returns `{ events, nextCursor, turnStatus }`.                                                                                               |
+| POST   | `/v1/sessions/{id}/cancel`                   | Cancel the active turn.                                                                                                                                                                                              |
+| GET    | `/v1/sessions/{id}/permissions`              | List permission requests. Query: `status=pending`.                                                                                                                                                                   |
+| POST   | `/v1/sessions/{id}/permissions/{requestId}`  | Answer a permission. Body `{ optionId, consent? }`. 422 if `optionId` was not offered.                                                                                                                               |
+| PATCH  | `/v1/sessions/{id}/config`                   | Change `model` / `effort` / `mode`.                                                                                                                                                                                  |
+| POST   | `/v1/sessions/{id}/links`                    | Link a pull request by hand. Body `{ pr: "owner/repo#n" \| "<PR URL>" }`. **201** new, **200** already linked to this session, **409** linked to another session, **403** repo not in the session. `sessions:write`. |
+| DELETE | `/v1/sessions/{id}/links/{owner}/{repo}/{n}` | Remove a PR link (**204**). `sessions:write`.                                                                                                                                                                        |
+| GET    | `/v1/github/unmatched`                       | Recent GitHub deliveries for allowed repos that matched no session link. Query: `limit` (default 20, max 100). `sessions:read`.                                                                                      |
 
 **On cloud sessions.** Every session the bridge launches is a Kiro cloud
 session, and some routes have no effect there:
@@ -64,6 +67,12 @@ result has no `agentInfo`, so the caps publisher records the kiro-cli version
 the image was built from (its `KIRO_CLI_VERSION` build arg) instead. It is
 `null` — never a guessed value — until the caps publisher has run at least once,
 or if neither the agent nor the image reports a version.
+
+`GET /v1/sessions/{id}` also returns `links[]` (the PRs linked to the session,
+each with `linkedBy`: `harvest`, `trailer` or `manual`), and
+`GET /v1/sessions/{id}/turns/{turnId}` returns `trigger`
+(`{ source: "user" | "github", deliveryIds }`). The links and the GitHub-woken
+turns exist only when the optional [GitHub wake](./github.md) is deployed.
 
 ### Request-body shapes
 

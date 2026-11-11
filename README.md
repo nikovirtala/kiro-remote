@@ -9,9 +9,11 @@ The part I'm most excited about: the MCP server lets a chat client such as Claud
 - launch a repo-scoped Kiro Web session with an initial prompt (`kiro_launch_session`),
 - send follow-up prompts and long-poll progress (`kiro_send_prompt`, `kiro_wait_for_events`),
 - read back each turn's final answer (`kiro_get_transcript`),
-- and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-14-tools).
+- and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-16-tools).
 
-You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can do all of the above either over the REST API or through the 14 MCP tools. Both MCP transports expose the same tools.
+Optionally, GitHub activity on a pull request the agent opened (merged, closed, changes requested, a comment from you, failing checks) can wake the session with a new turn: see [GitHub wake](./docs/github.md).
+
+You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can do all of the above either over the REST API or through the 16 MCP tools. Both MCP transports expose the same tools.
 
 Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 
@@ -34,6 +36,7 @@ The API and OAuth callback Lambdas run on the Node 26 runtime, which AWS lists a
 - **REST API** (`packages/api`) served by API Gateway + Lambda at base path `/v1`, with an OAuth 2.1 facade in front of Cognito and an OpenAPI 3.1 contract at `/openapi.json`.
 - **Bridge** (`packages/bridge`) two container-image Lambda functions (arm64) built from one image: an SQS consumer that launches and drives Kiro Web sessions over the Agent Client Protocol (ACP) against kiro-cli's bundled engine, and a publisher that records the engine's capabilities. See the [direct-engine path](./docs/deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine) for detail.
 - **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS, Cognito, the Lambda bridge, and the API (with native stage throttling).
+- **GitHub wake** (`packages/github`, optional) a read-only GitHub App's webhook ingress, the event router and the PR-link logic. Off unless you set `GITHUB_APP_SECRET_ARN`.
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a live end-to-end harness (`e2e`).
 
 ## Documentation
@@ -46,6 +49,7 @@ Operator and user guides live under [`docs/`](./docs/):
 - [Registering a user](./docs/users.md)
 - [Trying the REST API](./docs/rest-api.md)
 - [Using the MCP server](./docs/mcp.md)
+- [GitHub wake (optional)](./docs/github.md)
 
 ## Getting help
 
