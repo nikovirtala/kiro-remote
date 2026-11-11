@@ -1,0 +1,57 @@
+{
+  "action": "completed",
+  "check_suite": {
+    "id": 777,
+    "head_branch": "kiro/fix-typo",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "status": "completed",
+    "conclusion": "success",
+    "app": {
+      "id": 15368,
+      "slug": "github-actions",
+      "name": "GitHub Actions"
+    },
+    "pull_requests": [
+      {
+        "url": "https://api.github.com/repos/octo/repo/pulls/7",
+        "id": 99,
+        "number": 7,
+        "head": {
+          "ref": "kiro/fix-typo",
+          "sha": "1111111111111111111111111111111111111111",
+          "repo": {
+            "id": 1001,
+            "url": "https://api.github.com/repos/octo/repo",
+            "name": "repo"
+          }
+        },
+        "base": {
+          "ref": "main",
+          "sha": "0000",
+          "repo": {
+            "id": 1001,
+            "url": "https://api.github.com/repos/octo/repo",
+            "name": "repo"
+          }
+        }
+      }
+    ]
+  },
+  "repository": {
+    "id": 1001,
+    "full_name": "octo/repo",
+    "name": "repo",
+    "owner": {
+      "login": "octo",
+      "type": "User"
+    },
+    "html_url": "https://github.com/octo/repo"
+  },
+  "sender": {
+    "login": "github-actions[bot]",
+    "type": "Bot"
+  },
+  "installation": {
+    "id": 424242
+  }
+}
