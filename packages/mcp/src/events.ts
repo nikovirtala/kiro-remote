@@ -59,6 +59,21 @@ function contentText(payload: unknown): string {
   return "";
 }
 
+/** The trigger carried by a `turn_started` session.info event (written for wake turns). */
+function triggerOf(
+  payload: unknown,
+): { source: "user" | "github"; deliveryIds: string[] } | undefined {
+  const inner = (payload as { payload?: { trigger?: unknown } } | null)?.payload;
+  const t = inner?.trigger as { source?: unknown; deliveryIds?: unknown } | undefined;
+  if (!t || (t.source !== "user" && t.source !== "github")) {
+    return undefined;
+  }
+  const ids = Array.isArray(t.deliveryIds)
+    ? t.deliveryIds.filter((d) => typeof d === "string")
+    : [];
+  return { source: t.source, deliveryIds: ids as string[] };
+}
+
 /** The shape kiro_wait_for_events returns. */
 export interface WaitForEventsResult {
   events: ClientEvent[];
@@ -138,6 +153,11 @@ export async function collectEvents(
 export interface TranscriptTurn {
   turnId: string | null;
   text: string;
+  /**
+   * Why the turn started. A GitHub wake carries the webhook delivery ids; a
+   * person-started turn is `{ source: "user", deliveryIds: [] }`.
+   */
+  trigger: { source: "user" | "github"; deliveryIds: string[] };
 }
 
 /** The shape kiro_get_transcript returns. */
@@ -157,6 +177,7 @@ export async function finalTranscript(
   sessionId: string,
 ): Promise<TranscriptResult> {
   const byTurn = new Map<string | null, string>();
+  const triggers = new Map<string | null, { source: "user" | "github"; deliveryIds: string[] }>();
   const order: Array<string | null> = [];
 
   // Page through the WHOLE log from the start. A single getEvents read is
@@ -175,6 +196,18 @@ export async function finalTranscript(
         continue;
       }
       maxSeq = Math.max(maxSeq, ev.seq);
+      if (ev.type === "session.info" && ev.rawType === "turn_started") {
+        const trigger = triggerOf(ev.payload);
+        if (trigger) {
+          triggers.set(ev.turnId, trigger);
+          if (!byTurn.has(ev.turnId)) {
+            // A wake turn is listed even if the agent has said nothing yet.
+            byTurn.set(ev.turnId, "");
+            order.push(ev.turnId);
+          }
+        }
+        continue;
+      }
       if (!ASSISTANT_TEXT_TYPES.has(ev.type)) {
         continue;
       }
@@ -200,6 +233,10 @@ export async function finalTranscript(
 
   return {
     sessionId,
-    turns: order.map((turnId) => ({ turnId, text: byTurn.get(turnId) ?? "" })),
+    turns: order.map((turnId) => ({
+      turnId,
+      text: byTurn.get(turnId) ?? "",
+      trigger: triggers.get(turnId) ?? { source: "user", deliveryIds: [] },
+    })),
   };
 }

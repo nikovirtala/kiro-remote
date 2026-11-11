@@ -149,8 +149,41 @@ describe("kiro_get_transcript", () => {
     const res = await finalTranscript(client, P, "s1");
     expect(res.sessionId).toBe("s1");
     expect(res.turns).toEqual([
-      { turnId: "t1", text: "Hello world" },
-      { turnId: "t2", text: "Second turn" },
+      { turnId: "t1", text: "Hello world", trigger: { source: "user", deliveryIds: [] } },
+      { turnId: "t2", text: "Second turn", trigger: { source: "user", deliveryIds: [] } },
+    ]);
+  });
+
+  it("shows why a turn started: a GitHub wake carries its delivery ids", async () => {
+    const wake = {
+      seq: 3,
+      sessionId: "s1",
+      turnId: "t2",
+      type: "session.info",
+      rawType: "turn_started",
+      replay: false,
+      ts: "2026-01-01T00:00:00Z",
+      payload: {
+        type: "session.info",
+        kind: "turn_started",
+        payload: { trigger: { source: "github", deliveryIds: ["d-1", "d-2"] } },
+      },
+    };
+    const client = stubClient({
+      events: {
+        events: [textEvent(1, "Opened PR", "t1"), wake, textEvent(4, "Merged, done", "t2")],
+        nextCursor: 4,
+        turnStatus: "idle",
+      },
+    });
+    const res = await finalTranscript(client, P, "s1");
+    expect(res.turns).toEqual([
+      { turnId: "t1", text: "Opened PR", trigger: { source: "user", deliveryIds: [] } },
+      {
+        turnId: "t2",
+        text: "Merged, done",
+        trigger: { source: "github", deliveryIds: ["d-1", "d-2"] },
+      },
     ]);
   });
 
@@ -183,8 +216,8 @@ describe("kiro_get_transcript", () => {
     const res = await finalTranscript(client, P, "s1");
     // Later turns (page 2) are NOT omitted.
     expect(res.turns).toEqual([
-      { turnId: "t1", text: "turn one done" },
-      { turnId: "t2", text: "turn two done" },
+      { turnId: "t1", text: "turn one done", trigger: { source: "user", deliveryIds: [] } },
+      { turnId: "t2", text: "turn two done", trigger: { source: "user", deliveryIds: [] } },
     ]);
     // It read page-by-page (0 -> 2 -> 4) and stopped on the empty page.
     expect(reads).toEqual([0, 2, 4]);

@@ -18,6 +18,7 @@
 import type {
   ClientCapabilities,
   ClientEventsPage,
+  ClientLink,
   ClientPermission,
   ClientSession,
   ClientTurn,
@@ -35,9 +36,11 @@ import {
   deleteSession as svcDelete,
   getSession as svcGetSession,
   launchSession as svcLaunch,
+  linkPullRequest as svcLink,
   listSessions as svcListSessions,
   sendPrompt as svcSendPrompt,
   setConfig as svcSetConfig,
+  unlinkPullRequest as svcUnlink,
 } from "@nikovirtala/kiro-remote-core";
 
 /** The single client interface the tools depend on (canonical in @nikovirtala/kiro-remote-api). */
@@ -211,5 +214,21 @@ export class InProcessClient implements KiroRemoteClient {
     args: { model?: string; effort?: string; mode?: string },
   ): Promise<void> {
     await svcSetConfig(this.service, principal, sessionId, args);
+  }
+
+  async linkPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+  ): Promise<ClientLink> {
+    return (await svcLink(this.service, principal, sessionId, args.pr)).link;
+  }
+
+  async unlinkPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+  ): Promise<void> {
+    await svcUnlink(this.service, principal, sessionId, args.pr);
   }
 }

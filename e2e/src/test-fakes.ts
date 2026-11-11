@@ -320,6 +320,8 @@ export class FakeKiro {
       cancelTurn: unsupported,
       answerPermission: unsupported,
       setConfig: unsupported,
+      linkPullRequest: unsupported,
+      unlinkPullRequest: unsupported,
     };
   }
 }

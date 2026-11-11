@@ -39,11 +39,13 @@ import {
   NotFoundError,
 } from "./problem.ts";
 import {
+  deleteLink,
   deleteSessionRoute,
   getCapabilities,
   getEvents,
   getSession,
   getTurn,
+  getUnmatched,
   listModels,
   listPermissions,
   listSessions,
@@ -52,6 +54,7 @@ import {
   postAnswerPermission,
   postCancel,
   postLaunchSession,
+  postLink,
   postTurn,
 } from "./routes.ts";
 
@@ -89,6 +92,9 @@ const ROUTES: RouteDef[] = [
     handler: postAnswerPermission,
   },
   { method: "PATCH", template: "/sessions/{id}/config", handler: patchConfig },
+  { method: "POST", template: "/sessions/{id}/links", handler: postLink },
+  { method: "DELETE", template: "/sessions/{id}/links/{owner}/{repo}/{n}", handler: deleteLink },
+  { method: "GET", template: "/github/unmatched", handler: getUnmatched },
 ];
 
 /** Match a concrete path against a template, capturing `{param}` segments. */

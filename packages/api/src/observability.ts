@@ -39,7 +39,7 @@ function prepareAttributes(attributes: Record<string, unknown>): Record<string, 
 }
 
 /** The metrics the API layer owns. */
-export type ApiMetricName = "SessionsLaunched" | "AuthFailures" | "CimdFetches";
+export type ApiMetricName = "SessionsLaunched" | "AuthFailures" | "CimdFetches" | "LinksCreated";
 
 /** Outcome dimension values for {@link ApiMetricName} CimdFetches. */
 export type CimdOutcome = "success" | "error" | "cached";
@@ -72,6 +72,8 @@ export interface Observability {
   cimdFetch(outcome: CimdOutcome): void;
   /** Record a successful session launch, dimensioned by launch path. */
   sessionLaunched(path: LaunchPath): void;
+  /** Record a PR link created through the API, dimensioned by method (always "manual" here). */
+  linkCreated(method: "manual"): void;
   /** Flush buffered metrics (call once per invocation). */
   flush(): void;
 }
@@ -119,6 +121,12 @@ export class PowertoolsObservability implements Observability {
     this.metrics.clearDimensions();
   }
 
+  linkCreated(method: "manual"): void {
+    this.metrics.addDimension("method", method);
+    this.metrics.addMetric("LinksCreated", MetricUnit.Count, 1);
+    this.metrics.clearDimensions();
+  }
+
   flush(): void {
     this.metrics.publishStoredMetrics();
   }
@@ -132,5 +140,6 @@ export class NoopObservability implements Observability {
   authFailure(): void {}
   cimdFetch(): void {}
   sessionLaunched(): void {}
+  linkCreated(): void {}
   flush(): void {}
 }

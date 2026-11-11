@@ -26,14 +26,19 @@ import {
   EventsQuerySchema,
   hasExtensionMethod,
   LaunchSessionSchema,
+  LinkPullRequestSchema,
   ListSessionsQuerySchema,
   launchSession,
+  linkPullRequest,
+  listUnmatchedDeliveries,
   type Principal,
   readEvents,
   sendPrompt,
   setConfig,
   getSession as svcGetSession,
   listSessions as svcListSessions,
+  UnmatchedQuerySchema,
+  unlinkPullRequest,
 } from "@nikovirtala/kiro-remote-core";
 import type { ApiContext } from "./context.ts";
 import {
@@ -148,6 +153,9 @@ export async function getTurn(
     startedAt: turn.startedAt,
     endedAt: turn.endedAt,
     metering: turn.metering,
+    trigger: turn.trigger
+      ? { source: turn.trigger.source, deliveryIds: turn.trigger.deliveryIds }
+      : { source: "user", deliveryIds: [] },
   });
 }
 
@@ -297,6 +305,44 @@ export async function patchConfig(
   }
   await setConfig(ctx.service, principal, req.params.id, body);
   return acceptedResponse({ sessionId: req.params.id, status: "configuring" });
+}
+
+/** POST /v1/sessions/{id}/links */
+export async function postLink(
+  ctx: ApiContext,
+  req: HttpRequest,
+  principal: Principal,
+): Promise<HttpResponse> {
+  const key = requireIdempotencyKey(req);
+  const body = LinkPullRequestSchema.parse(parseJsonBody(req));
+  return withIdempotency(ctx.repo, principal.sub, key, async () => {
+    const { link, created } = await linkPullRequest(ctx.service, principal, req.params.id, body.pr);
+    if (created) {
+      ctx.obs.linkCreated("manual");
+    }
+    return jsonResponse(created ? 201 : 200, link);
+  });
+}
+
+/** DELETE /v1/sessions/{id}/links/{owner}/{repo}/{n} */
+export async function deleteLink(
+  ctx: ApiContext,
+  req: HttpRequest,
+  principal: Principal,
+): Promise<HttpResponse> {
+  const { owner, repo, n } = req.params;
+  await unlinkPullRequest(ctx.service, principal, req.params.id, `${owner}/${repo}#${n}`);
+  return noContentResponse();
+}
+
+/** GET /v1/github/unmatched */
+export async function getUnmatched(
+  ctx: ApiContext,
+  req: HttpRequest,
+  principal: Principal,
+): Promise<HttpResponse> {
+  const query = UnmatchedQuerySchema.parse(req.query);
+  return jsonResponse(200, await listUnmatchedDeliveries(ctx.service, principal, query));
 }
 
 export { noContentResponse };
