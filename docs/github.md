@@ -88,11 +88,12 @@ A delivery for an unlinked PR is stored as **unmatched**. `GET
 /v1/github/unmatched?limit=20` (`sessions:read`) lists the recent ones for repos
 matching `ALLOWED_REPOS`, so you can link them by hand.
 
-> **Audit status.** Which method is primary depends on whether the PR URL shows
-> up in the event log. That audit could **not** be completed: see
-> [the audit](#the-link-method-audit). Until it is, both methods are on and the
-> trailer is **on by default** (`GITHUB_PR_TRAILER=on`). To turn the trailer off
-> set `GITHUB_PR_TRAILER=off`; the launch prompt then gets no extra line.
+> **Which method links in practice.** In the live run, the PR URL was in the
+> event log and `harvest` linked the PR about 5 s after it was opened; the agent
+> also wrote the trailer. See [the audit](#the-link-method-audit). Both methods
+> stay on, and the trailer is **on by default** (`GITHUB_PR_TRAILER=on`). To
+> turn it off set `GITHUB_PR_TRAILER=off`; the launch prompt then gets no extra
+> line.
 
 ## What wakes a session
 
@@ -103,14 +104,14 @@ transcript know why the turn started:
 [GitHub webhook] This turn was started by GitHub, not by the user: <event> on <owner>/<repo>#<n> (delivery <id>).
 ```
 
-| Event                                                                                              | Wake                                                                                                                  |
-| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `pull_request.closed`, merged                                                                      | "PR #n was merged into `<base>` at `<sha>`. Finish any remaining work and summarise what's left, or say you're done." |
-| `pull_request.closed`, not merged                                                                  | "PR #n was closed without merging."                                                                                   |
-| `pull_request_review.submitted`: `changes_requested` or `commented`                                | Who and which state. A trusted reviewer's review body and inline comments are also quoted.                            |
-| `issue_comment.created` on a linked PR                                                             | Who commented. A trusted commenter's text is quoted. Bots and the Kiro agent's own identity are ignored.              |
-| `check_suite.completed` / `workflow_run.completed`, `failure` or `timed_out`, on the PR's head sha | The failing check names and URLs. **Debounced 2 minutes per PR**: one wake for the whole batch.                       |
-| everything else                                                                                    | No wake. The delivery is kept (7 days), and `pull_request.*` refreshes the link's `prState` and `headSha`.            |
+| Event                                                                                              | Wake                                                                                                                                                                        |
+| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pull_request.closed`, merged                                                                      | "PR #n was merged into `<base>` at `<sha>`. Finish any remaining work and summarise what's left, or say you're done."                                                       |
+| `pull_request.closed`, not merged                                                                  | "PR #n was closed without merging."                                                                                                                                         |
+| `pull_request_review.submitted`: `changes_requested` or `commented`                                | Who and which state. A trusted reviewer's review body and inline comments are also quoted.                                                                                  |
+| `issue_comment.created` on a linked PR                                                             | Who commented. A trusted commenter's text is quoted. Bots, the agent's logins and comments posted through the agent's app are ignored ([why](#the-agents-github-identity)). |
+| `check_suite.completed` / `workflow_run.completed`, `failure` or `timed_out`, on the PR's head sha | The failing check names and URLs. **Debounced 2 minutes per PR**: one wake for the whole batch.                                                                             |
+| everything else                                                                                    | No wake. The delivery is kept (7 days), and `pull_request.*` refreshes the link's `prState` and `headSha`.                                                                  |
 
 **Untrusted text is never forwarded.** For anyone outside `GITHUB_TRUSTED_LOGINS`
 (default: the owner of the repo the event is about, which is the App's
@@ -123,6 +124,24 @@ whoever can push.
 `autoCloseOnMerge` (`GITHUB_AUTO_CLOSE_ON_MERGE`, `off` or `after_turn`,
 default `off`): after the post-merge turn **completes**, the session is deleted
 to free a slot. Never on closed-unmerged, and not if that turn failed.
+
+### The agent's GitHub identity
+
+Seen in the live run: Kiro's agent opens PRs as **`kiro-agent[bot]`**, but
+posts PR comments **as you**, through the `kiro-agent` GitHub App. Such a
+comment arrives with your login, so by login alone it looks like a trusted
+comment from you; the only mark is `performed_via_github_app.slug:
+"kiro-agent"`. Before this was handled, the agent's own reply comment woke its
+session again, and an agent that comments in every turn would keep waking
+itself.
+
+So a comment posted through the `kiro-agent` app never wakes a session, whoever
+it is attributed to. The same check is applied to reviews, though GitHub's REST
+review objects do not carry the field, so an agent review posted as you would
+still wake the session (the agent has not been seen reviewing). Set
+`GITHUB_AGENT_LOGINS=kiro-agent[bot]` so the trailer link also requires the PR
+to be authored by the agent. Do **not** put your own login there: that would
+ignore your comments.
 
 ## Registering the GitHub App
 
@@ -188,7 +207,7 @@ Then set the full ARN in `deploy.env` and redeploy:
 GITHUB_APP_SECRET_ARN=arn:aws:secretsmanager:<region>:<account>:secret:kiro-remote/github-app-AbCdEf
 # optional:
 GITHUB_TRUSTED_LOGINS=your-login          # default: the repo owner
-GITHUB_AGENT_LOGINS=                      # the Kiro agent's GitHub login(s), if you know them
+GITHUB_AGENT_LOGINS=kiro-agent[bot]       # the login Kiro's agent opens PRs as
 GITHUB_PR_TRAILER=on                      # on (default) | off
 GITHUB_AUTO_CLOSE_ON_MERGE=off            # off (default) | after_turn
 ```
@@ -234,19 +253,23 @@ settles turns.
 
 ## The link-method audit
 
-The plan was to run one real cloud turn on `KIRO_API_E2E_REPO` that opens a
-throwaway PR, and count where the PR URL appears in the event log. That decides
-which link method is primary.
+The question was where the PR URL appears in the event log, which decides
+which link method is primary. The first two attempts, from another account,
+could not create a PR (that session's GitHub connection could not see the
+repo). The live e2e run on 2026-11-11 against a throwaway repo
+(`nikovirtala/kiro-remote-e2e`, PR #1) answered it:
 
-**It was attempted twice and could not complete.** The cloud session's GitHub
-connection could not see the e2e repo (`git clone` answered "repository not
-found", `gh api` answered 404, and the account's repository list did not contain
-it). No PR was created, so there is no measurement of the PR URL's location, of
-whether the agent writes the requested trailer, or of the head branch name and
-author login. Both sessions were deleted. Nothing was guessed, and no other repo
-was used.
+| Question                                  | Result                                                                                       |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
+| PR URL in the event log                   | Yes. `harvest` created the link 5 s after the PR was opened (`LinksCreated method=harvest`). |
+| Agent writes the trailer                  | Yes: `Kiro-Remote-Session: <sessionId>` in the PR body.                                      |
+| PR author                                 | `kiro-agent[bot]` (type `Bot`)                                                               |
+| PR head branch                            | `docs/kiro-remote-e2e-<run id>`, as the prompt asked                                         |
+| Author of the agent's PR comments         | **You**, through the `kiro-agent` app ([see above](#the-agents-github-identity))             |
+| Review submitted to wake command enqueued | ~5 s                                                                                         |
+| Merge to wake command enqueued            | ~10 s (the session was busy with another turn, so the item waited for it to settle)          |
 
-What the two real turns did show, and what the code relies on:
+The event shapes the extractor relies on, from the first recorded turns:
 
 | Event type      | Field that carries command/URL text                                     |
 | --------------- | ----------------------------------------------------------------------- |
@@ -261,14 +284,12 @@ recorded shape is in
 A fixture with a PR URL in each field is **synthetic**
 (`pr-url-events.synthetic.json`) and is labelled as such.
 
-**To finish the audit**, point `KIRO_API_E2E_REPO` at an `owner/name` repo the
-Kiro GitHub connection can write to, and run the opt-in scenario below: its
-`gh-link` step reports `linkedBy`, which is the method that worked.
-
 ## Live end-to-end scenario (opt-in)
 
 Needs a deployed stack with the App installed on the e2e repo, `kiro-remote
-login`, and the GitHub CLI logged in as a **trusted** login.
+login`, and the GitHub CLI logged in as a **trusted** login. Use a **throwaway
+repo** that Kiro's GitHub connection can write to: the scenario squash-merges
+the agent's PR, so every run adds a commit to its default branch.
 
 ```bash
 KIRO_REMOTE_URL=https://<host> KIRO_API_E2E_REPO=<owner>/<name> \
@@ -282,7 +303,12 @@ comment as the trusted login and waits for the wake turn; reports review-to-turn
 latency), `gh-merge-wake` (merges the PR and waits for the post-merge wake turn;
 with `KIRO_API_E2E_GITHUB_AUTOCLOSE=1`, also that the session is deleted), and
 `gh-cleanup` (closes the PR, deletes its branch; the session is deleted by the
-harness cleanup). Set `GITHUB_AUTO_CLOSE_ON_MERGE=after_turn` on the stack for the
+harness cleanup). After each wake turn settles, the step fails if **any**
+other GitHub wake starts within 45 s: the harness did nothing that should cause
+one, so it would be a self-wake (the review prompt asks for a reply, which the
+agent may post as a PR comment) or something else waking the session, and the
+next step could mistake it for its own. Each wake must also carry a delivery no
+earlier step saw. Set `GITHUB_AUTO_CLOSE_ON_MERGE=after_turn` on the stack for the
 auto-close check.
 
 ## Out of scope (next steps)
