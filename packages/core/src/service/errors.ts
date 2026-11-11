@@ -43,3 +43,15 @@ export class InvalidStateError extends Error {
     this.name = "InvalidStateError";
   }
 }
+
+/** The PR is already linked to a different session; a link is never overwritten -> 409. */
+export class LinkConflictError extends InvalidStateError {
+  readonly pr: string;
+  readonly existingSessionId: string;
+  constructor(pr: string, existingSessionId: string) {
+    super(`pull request ${pr} is already linked to another session`);
+    this.name = "LinkConflictError";
+    this.pr = pr;
+    this.existingSessionId = existingSessionId;
+  }
+}

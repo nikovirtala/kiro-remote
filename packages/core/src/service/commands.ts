@@ -4,6 +4,8 @@
  * (MessageGroupId) so a session's commands are processed in order.
  */
 
+import type { TurnTrigger } from "../repo/types.ts";
+
 export interface CommandBase {
   /** Cognito sub of the caller who issued the command. */
   sub: string;
@@ -28,6 +30,12 @@ export interface PromptCommand extends CommandBase {
   turnId: string;
   prompt: string;
   whenBusy: "steer" | "queue" | "reject";
+  /**
+   * Why this turn starts. Absent means a user prompt. A wake turn carries the
+   * webhook deliveries (and inbox items) that caused it; the bridge records it
+   * on the TURN# row and releases the inbox items if the turn cannot start.
+   */
+  trigger?: TurnTrigger;
 }
 
 export interface SteerCommand extends CommandBase {

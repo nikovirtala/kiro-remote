@@ -15,10 +15,12 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   EVENT_TTL_DAYS,
+  GITHUB_DELIVERY_TTL_MS,
   IDEMPOTENCY_TTL_MS,
   INLINE_PAYLOAD_MAX_BYTES,
   INLINE_PROMPT_MAX_BYTES,
@@ -33,6 +35,11 @@ import {
   clientPk,
   EVENT_SK_MAX,
   eventSk,
+  GH_LINK_SK,
+  GH_UNMATCHED_PK,
+  ghDeliveryPk,
+  ghPrPk,
+  INBOX_PREFIX,
   idempotencyPk,
   META_SK,
   MODELS_SK,
@@ -40,7 +47,9 @@ import {
   oauthCodePk,
   oauthTxPk,
   permSk,
+  SESSION_LINK_PREFIX,
   SINGLETON_SK,
+  sessionLinkSk,
   sessionPk,
   ttlFromNow,
   turnSk,
@@ -48,17 +57,25 @@ import {
 } from "./keys.ts";
 import type {
   CapsItem,
+  DeliveryItem,
+  DeliveryStatus,
   EventItem,
   IdempotencyItem,
+  InboxItem,
+  LinkMethod,
   ModelsItem,
   OAuthCimdItem,
   OAuthCodeItem,
   OAuthTxItem,
   PermItem,
+  PrLinkItem,
+  PrState,
   RegisteredClientItem,
   S3Pointer,
+  SessionLinkItem,
   SessionMetaItem,
   TurnItem,
+  UnmatchedItem,
 } from "./types.ts";
 
 const EVENT_TTL_MS = EVENT_TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -200,6 +217,33 @@ export class Repository {
       }
       throw err;
     }
+  }
+
+  /**
+   * Read-modify-write a session META, retrying when another writer bumps the
+   * version in between (a manual prompt or a wake drain touches it too).
+   * Returns the item that was read, or null when the session does not exist.
+   */
+  async patchSession(
+    id: string,
+    patch: Partial<Omit<SessionMetaItem, "PK" | "SK" | "id" | "version">>,
+    attempts = 5,
+  ): Promise<SessionMetaItem | null> {
+    for (let i = 0; i < attempts; i++) {
+      const item = await this.getSession(id);
+      if (!item) {
+        return null;
+      }
+      try {
+        await this.updateSession(id, item.version, patch);
+        return item;
+      } catch (err) {
+        if (!(err instanceof ConcurrentModificationError)) {
+          throw err;
+        }
+      }
+    }
+    throw new ConcurrentModificationError(`session ${id} kept changing while patching`);
   }
 
   /** List a user's sessions via GSI1, newest first. */
@@ -520,6 +564,445 @@ export class Repository {
       new GetCommand({ TableName: this.table, Key: { PK: clientPk(clientId), SK: SINGLETON_SK } }),
     );
     return (res.Item as RegisteredClientItem | undefined) ?? null;
+  }
+
+  /* ------------------------------ Turn state ----------------------------- */
+
+  /** Settle a turn row: status, stop reason and end time. A no-op when the row is absent. */
+  async finishTurn(
+    sessionId: string,
+    turnId: string,
+    patch: { status: TurnItem["status"]; stopReason: string | null },
+  ): Promise<void> {
+    try {
+      await this.ddb.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { PK: sessionPk(sessionId), SK: turnSk(turnId) },
+          UpdateExpression: "SET #status = :status, stopReason = :stopReason, endedAt = :endedAt",
+          ConditionExpression: "attribute_exists(PK)",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: {
+            ":status": patch.status,
+            ":stopReason": patch.stopReason,
+            ":endedAt": this.nowIso(),
+          },
+        }),
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
+        throw err;
+      }
+    }
+  }
+
+  /* ------------------------------ PR links ------------------------------- */
+
+  async getPrLink(key: string): Promise<PrLinkItem | null> {
+    const res = await this.ddb.send(
+      new GetCommand({ TableName: this.table, Key: { PK: ghPrPk(key), SK: GH_LINK_SK } }),
+    );
+    return (res.Item as PrLinkItem | undefined) ?? null;
+  }
+
+  /**
+   * Link a PR to a session. A PR links to at most one session: the PR row is
+   * written with `attribute_not_exists(PK)`, together with the reverse row, in
+   * one transaction. When the PR is already linked nothing is written and the
+   * existing link is returned (never overwritten).
+   */
+  async createLink(args: {
+    repo: string;
+    number: number;
+    sessionId: string;
+    linkedBy: LinkMethod;
+    prState: PrState;
+    headSha: string | null;
+  }): Promise<{ created: true; link: PrLinkItem } | { created: false; existing: PrLinkItem }> {
+    const pr = `${args.repo}#${args.number}`;
+    const linkedAt = this.nowIso();
+    const link: PrLinkItem = {
+      PK: ghPrPk(pr),
+      SK: GH_LINK_SK,
+      pr,
+      repo: args.repo,
+      number: args.number,
+      sessionId: args.sessionId,
+      linkedBy: args.linkedBy,
+      linkedAt,
+      prState: args.prState,
+      headSha: args.headSha,
+    };
+    const reverse: SessionLinkItem = {
+      PK: sessionPk(args.sessionId),
+      SK: sessionLinkSk(pr),
+      pr,
+      repo: args.repo,
+      number: args.number,
+      sessionId: args.sessionId,
+      linkedBy: args.linkedBy,
+      linkedAt,
+    };
+    try {
+      await this.ddb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.table,
+                Item: link,
+                ConditionExpression: "attribute_not_exists(PK)",
+              },
+            },
+            { Put: { TableName: this.table, Item: reverse } },
+          ],
+        }),
+      );
+      return { created: true, link };
+    } catch (err) {
+      if ((err as { name?: string }).name !== "TransactionCanceledException") {
+        throw err;
+      }
+      const existing = await this.getPrLink(pr);
+      if (!existing) {
+        throw err;
+      }
+      return { created: false, existing };
+    }
+  }
+
+  /** A session's linked PRs, with the PR-side state, oldest first. */
+  async queryLinks(sessionId: string): Promise<PrLinkItem[]> {
+    const res = await this.ddb.send(
+      new QueryCommand({
+        TableName: this.table,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
+        ExpressionAttributeValues: { ":pk": sessionPk(sessionId), ":p": SESSION_LINK_PREFIX },
+      }),
+    );
+    const reverse = (res.Items as SessionLinkItem[] | undefined) ?? [];
+    const links = await Promise.all(reverse.map((r) => this.getPrLink(r.pr)));
+    return links.filter((l): l is PrLinkItem => l !== null && l.sessionId === sessionId);
+  }
+
+  /** Remove a link. Only the owning session can remove it. Returns false when there was none. */
+  async deleteLink(key: string, sessionId: string): Promise<boolean> {
+    try {
+      await this.ddb.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Delete: {
+                TableName: this.table,
+                Key: { PK: ghPrPk(key), SK: GH_LINK_SK },
+                ConditionExpression: "sessionId = :sessionId",
+                ExpressionAttributeValues: { ":sessionId": sessionId },
+              },
+            },
+            {
+              Delete: {
+                TableName: this.table,
+                Key: { PK: sessionPk(sessionId), SK: sessionLinkSk(key) },
+              },
+            },
+          ],
+        }),
+      );
+      return true;
+    } catch (err) {
+      if ((err as { name?: string }).name === "TransactionCanceledException") {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /** Refresh the PR-side state of an existing link (from webhook payloads). */
+  async updateLinkState(
+    key: string,
+    patch: { prState?: PrState; headSha?: string | null },
+  ): Promise<void> {
+    const sets: string[] = [];
+    const values: Record<string, unknown> = {};
+    if (patch.prState !== undefined) {
+      sets.push("prState = :prState");
+      values[":prState"] = patch.prState;
+    }
+    if (patch.headSha !== undefined) {
+      sets.push("headSha = :headSha");
+      values[":headSha"] = patch.headSha;
+    }
+    if (sets.length === 0) {
+      return;
+    }
+    try {
+      await this.ddb.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { PK: ghPrPk(key), SK: GH_LINK_SK },
+          UpdateExpression: `SET ${sets.join(", ")}`,
+          ConditionExpression: "attribute_exists(PK)",
+          ExpressionAttributeValues: values,
+        }),
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
+        throw err;
+      }
+    }
+  }
+
+  /* ----------------------------- GitHub deliveries ----------------------- */
+
+  /**
+   * Store a verified delivery and claim its id in one conditional put. Returns
+   * false when the id was already seen (a duplicate or a redelivery). Bodies
+   * over the inline threshold are written to S3 under a key derived from the
+   * delivery id, so a duplicate rewrites the same object instead of leaking.
+   */
+  async putDelivery(args: {
+    deliveryId: string;
+    event: string;
+    action: string | null;
+    repo: string | null;
+    rawBody: string;
+  }): Promise<boolean> {
+    let body: string | S3Pointer = args.rawBody;
+    const bytes = byteLength(args.rawBody);
+    if (bytes > INLINE_PAYLOAD_MAX_BYTES) {
+      const key = `github/deliveries/${args.deliveryId}.json`;
+      await this.s3.send(
+        new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: args.rawBody }),
+      );
+      body = { s3: true, bucket: this.bucket, key, bytes };
+    }
+    const item: DeliveryItem = {
+      PK: ghDeliveryPk(args.deliveryId),
+      SK: "A",
+      deliveryId: args.deliveryId,
+      event: args.event,
+      action: args.action,
+      repo: args.repo,
+      receivedAt: this.nowIso(),
+      status: "received",
+      body,
+      ttl: ttlFromNow(GITHUB_DELIVERY_TTL_MS, this.now()),
+    };
+    try {
+      await this.ddb.send(
+        new PutCommand({
+          TableName: this.table,
+          Item: item,
+          ConditionExpression: "attribute_not_exists(PK)",
+        }),
+      );
+      return true;
+    } catch (err) {
+      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /** Forget a delivery id, so GitHub's redelivery of it is accepted again (used when it could not be enqueued). */
+  async deleteDelivery(deliveryId: string): Promise<void> {
+    await this.ddb.send(
+      new DeleteCommand({
+        TableName: this.table,
+        Key: { PK: ghDeliveryPk(deliveryId), SK: "A" },
+      }),
+    );
+  }
+
+  /** Read a delivery; `rawBody` is the original request body (resolved from S3 when spilled). */
+  async getDelivery(deliveryId: string): Promise<(DeliveryItem & { rawBody: string }) | null> {
+    const res = await this.ddb.send(
+      new GetCommand({
+        TableName: this.table,
+        Key: { PK: ghDeliveryPk(deliveryId), SK: "A" },
+      }),
+    );
+    const item = res.Item as DeliveryItem | undefined;
+    if (!item) {
+      return null;
+    }
+    if (typeof item.body === "string") {
+      return { ...item, rawBody: item.body };
+    }
+    const obj = await this.s3.send(
+      new GetObjectCommand({ Bucket: item.body.bucket, Key: item.body.key }),
+    );
+    return { ...item, rawBody: (await obj.Body?.transformToString()) ?? "" };
+  }
+
+  async setDeliveryStatus(deliveryId: string, status: DeliveryStatus): Promise<void> {
+    await this.ddb.send(
+      new UpdateCommand({
+        TableName: this.table,
+        Key: { PK: ghDeliveryPk(deliveryId), SK: "A" },
+        UpdateExpression: "SET #status = :status",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":status": status },
+      }),
+    );
+  }
+
+  /* -------------------------------- Inbox -------------------------------- */
+
+  async putInboxItem(item: InboxItem): Promise<void> {
+    await this.ddb.send(
+      new PutCommand({
+        TableName: this.table,
+        Item: item,
+        ConditionExpression: "attribute_not_exists(PK)",
+      }),
+    );
+  }
+
+  /** A session's inbox items, oldest first, optionally only one status. */
+  async queryInbox(
+    sessionId: string,
+    opts: { status?: InboxItem["status"] } = {},
+  ): Promise<InboxItem[]> {
+    const res = await this.ddb.send(
+      new QueryCommand({
+        TableName: this.table,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
+        ExpressionAttributeValues: { ":pk": sessionPk(sessionId), ":p": INBOX_PREFIX },
+        ScanIndexForward: true,
+      }),
+    );
+    let items = (res.Items as InboxItem[] | undefined) ?? [];
+    if (opts.status) {
+      items = items.filter((i) => i.status === opts.status);
+    }
+    return items;
+  }
+
+  private async inboxTransition(
+    sessionId: string,
+    id: string,
+    from: InboxItem["status"],
+    set: Record<string, unknown>,
+    extraCondition?: { name: string; value: unknown },
+  ): Promise<boolean> {
+    const sets: string[] = [];
+    const names: Record<string, string> = { "#status": "status" };
+    const values: Record<string, unknown> = { ":from": from };
+    for (const [k, v] of Object.entries(set)) {
+      names[`#${k}`] = k;
+      values[`:${k}`] = v;
+      sets.push(`#${k} = :${k}`);
+    }
+    let condition = "#status = :from";
+    if (extraCondition) {
+      names[`#${extraCondition.name}`] = extraCondition.name;
+      values[`:c_${extraCondition.name}`] = extraCondition.value;
+      condition += ` AND #${extraCondition.name} = :c_${extraCondition.name}`;
+    }
+    try {
+      await this.ddb.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { PK: sessionPk(sessionId), SK: `${INBOX_PREFIX}${id}` },
+          UpdateExpression: `SET ${sets.join(", ")}`,
+          ConditionExpression: condition,
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+        }),
+      );
+      return true;
+    } catch (err) {
+      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /** Mark pending items delivered by `turnId`. Returns the ids actually claimed. */
+  async claimInbox(sessionId: string, ids: string[], turnId: string): Promise<string[]> {
+    const claimed: string[] = [];
+    for (const id of ids) {
+      if (
+        await this.inboxTransition(sessionId, id, "pending", {
+          status: "delivered",
+          deliveredTurnId: turnId,
+        })
+      ) {
+        claimed.push(id);
+      }
+    }
+    return claimed;
+  }
+
+  /** Undo a claim (the wake turn never started): delivered by `turnId` -> pending again. */
+  async releaseInbox(sessionId: string, ids: string[], turnId: string): Promise<void> {
+    for (const id of ids) {
+      await this.inboxTransition(
+        sessionId,
+        id,
+        "delivered",
+        { status: "pending", deliveredTurnId: null },
+        { name: "deliveredTurnId", value: turnId },
+      );
+    }
+  }
+
+  /** Drop pending items with a recorded reason. Returns how many were dropped. */
+  async dropInbox(sessionId: string, ids: string[], reason: string): Promise<number> {
+    let dropped = 0;
+    for (const id of ids) {
+      if (
+        await this.inboxTransition(sessionId, id, "pending", {
+          status: "dropped",
+          dropReason: reason,
+        })
+      ) {
+        dropped++;
+      }
+    }
+    return dropped;
+  }
+
+  /** Merge into a still-pending item (debounce). False when it was drained meanwhile. */
+  async mergeInboxItem(
+    sessionId: string,
+    id: string,
+    patch: { deliveryIds: string[]; prompt: string; data: Record<string, unknown> | null },
+  ): Promise<boolean> {
+    return this.inboxTransition(sessionId, id, "pending", {
+      deliveryIds: patch.deliveryIds,
+      prompt: patch.prompt,
+      data: patch.data,
+    });
+  }
+
+  /* ------------------------- Unmatched GitHub deliveries ----------------- */
+
+  async putUnmatched(item: Omit<UnmatchedItem, "PK" | "SK" | "ttl">): Promise<void> {
+    const full: UnmatchedItem = {
+      ...item,
+      PK: GH_UNMATCHED_PK,
+      SK: `${item.receivedAt}#${item.deliveryId}`,
+      ttl: ttlFromNow(EVENT_TTL_MS, this.now()),
+    };
+    await this.ddb.send(new PutCommand({ TableName: this.table, Item: full }));
+  }
+
+  /** Newest unmatched deliveries first. */
+  async listUnmatched(limit: number): Promise<UnmatchedItem[]> {
+    const res = await this.ddb.send(
+      new QueryCommand({
+        TableName: this.table,
+        KeyConditionExpression: "PK = :pk",
+        ExpressionAttributeValues: { ":pk": GH_UNMATCHED_PK },
+        ScanIndexForward: false,
+        Limit: limit,
+      }),
+    );
+    return (res.Items as UnmatchedItem[] | undefined) ?? [];
   }
 
   /* ----------------------------- Idempotency ----------------------------- */

@@ -4,6 +4,7 @@ import {
   type Command,
   type CommandQueue,
   ConcurrencyLimitError,
+  ConcurrentModificationError,
   cancelTurn,
   deleteSession,
   InvalidStateError,
@@ -39,6 +40,16 @@ class FakeRepo {
       .filter((s) => s.createdBy === sub)
       .slice(0, opts.limit);
     return { items };
+  }
+  async updateSession(id: string, expectedVersion: number): Promise<void> {
+    const s = this.sessions.get(id);
+    if (!s || s.version !== expectedVersion) {
+      throw new ConcurrentModificationError();
+    }
+    s.version += 1;
+  }
+  async queryLinks(): Promise<never[]> {
+    return [];
   }
   async getPermission(_sessionId: string, requestId: string) {
     return this.perms.get(requestId) ?? null;
@@ -99,6 +110,26 @@ function seed(repo: FakeRepo, id: string, patch: Partial<SessionMetaItem> = {}):
   repo.sessions.set(id, item);
   return item;
 }
+
+describe("launchSession: the PR trailer", () => {
+  it("with prTrailer on, the launch prompt asks the agent to put the session trailer in the PR body", async () => {
+    const { d, queue } = deps({ prTrailer: "on" });
+    const view = await launchSession(d, principal, { prompt: "fix the typo", repos: ["acme/web"] });
+    const cmd = queue.commands[0] as { prompt: string };
+    expect(cmd.prompt.startsWith("fix the typo\n\n")).toBe(true);
+    expect(cmd.prompt).toContain(`Kiro-Remote-Session: ${view.id}`);
+    // The line is appended once, after the user's own prompt.
+    expect(cmd.prompt.match(/Kiro-Remote-Session:/g)).toHaveLength(1);
+  });
+
+  it("with prTrailer off or absent, the prompt is passed through untouched", async () => {
+    for (const over of [{ prTrailer: "off" as const }, {}]) {
+      const { d, queue } = deps(over);
+      await launchSession(d, principal, { prompt: "fix the typo", repos: ["acme/web"] });
+      expect((queue.commands[0] as { prompt: string }).prompt).toBe("fix the typo");
+    }
+  });
+});
 
 describe("launchSession", () => {
   it("creates a provisioning session and enqueues a launch command", async () => {

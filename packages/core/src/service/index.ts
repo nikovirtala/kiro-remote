@@ -16,8 +16,9 @@ import { ulid } from "ulid";
 import type { Principal } from "../auth/authenticate.ts";
 import { authorize } from "../auth/authorize.ts";
 import { EVENTS_MAX_WAIT_SECONDS, EVENTS_POLL_INTERVAL_MS, MAX_CLOUD_SESSIONS } from "../config.ts";
+import { trailerInstruction } from "../github/pr-ref.ts";
 import { sessionPk } from "../repo/keys.ts";
-import type { Repository } from "../repo/repository.ts";
+import { ConcurrentModificationError, type Repository } from "../repo/repository.ts";
 import type { SessionMetaItem } from "../repo/types.ts";
 import type { EventView, SessionView, TurnView } from "../schemas/index.ts";
 import { matchesAllowList } from "./allowlist.ts";
@@ -40,6 +41,12 @@ export interface ServiceDeps {
   newId?: () => string;
   /** Injectable sleep used by the events long-poll, so tests need not wait. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Ask the agent to put a `Kiro-Remote-Session: <id>` trailer in any PR body
+   * it writes (the launch prompt gains one line). Absent means off; the
+   * construct only sets it when the GitHub feature is deployed.
+   */
+  prTrailer?: "on" | "off";
 }
 
 const ACTIVE_STATUSES = new Set(["provisioning", "running", "idle", "awaiting_permission"]);
@@ -70,7 +77,7 @@ function toSessionView(item: SessionMetaItem): SessionView {
 }
 
 /** Load a session and assert the principal owns it, else 404 (hide existence). */
-async function loadOwned(
+export async function loadOwned(
   deps: ServiceDeps,
   principal: Principal,
   id: string,
@@ -141,7 +148,7 @@ export async function launchSession(
     sub: principal.sub,
     sessionId: id,
     commandId: genId(deps),
-    prompt: args.prompt,
+    prompt: deps.prTrailer === "on" ? `${args.prompt}\n\n${trailerInstruction(id)}` : args.prompt,
     repos: args.repos,
     ...(args.title ? { title: args.title } : {}),
     ...(args.mode ? { mode: args.mode } : {}),
@@ -217,6 +224,18 @@ export async function sendPrompt(
   const busy = session.status === "running" || session.status === "awaiting_permission";
   if (busy && args.whenBusy === "reject") {
     throw new InvalidStateError("session is busy and whenBusy=reject");
+  }
+
+  // A manual prompt wins over a GitHub wake: bumping META's version makes a
+  // drainInbox that read the session before this point lose its optimistic
+  // lock (it then retries after this turn settles). Losing this CAS to another
+  // writer is fine, since that writer bumped the version too.
+  try {
+    await deps.repo.updateSession(sessionId, session.version, {});
+  } catch (err) {
+    if (!(err instanceof ConcurrentModificationError)) {
+      throw err;
+    }
   }
 
   const turnId = genId(deps);
@@ -352,7 +371,19 @@ export async function getSession(
 ): Promise<SessionView> {
   authorize(principal, "read");
   const session = await loadOwned(deps, principal, sessionId);
-  return toSessionView(session);
+  const links = await deps.repo.queryLinks(sessionId);
+  return {
+    ...toSessionView(session),
+    links: links.map((l) => ({
+      pr: l.pr,
+      repo: l.repo,
+      number: l.number,
+      linkedBy: l.linkedBy,
+      linkedAt: l.linkedAt,
+      prState: l.prState,
+      headSha: l.headSha,
+    })),
+  };
 }
 
 export async function listSessions(

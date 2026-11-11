@@ -40,6 +40,13 @@ const SENSITIVE_KEYS = new Set(
     "x-api-key",
     "password",
     "secret",
+    "privatekey",
+    "private_key",
+    "webhooksecret",
+    "webhook_secret",
+    "token",
+    "x-hub-signature-256",
+    "x-hub-signature",
   ].map((k) => k.toLowerCase()),
 );
 
@@ -58,6 +65,14 @@ const STRING_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   ],
   // Kiro API keys.
   [/ksk_[A-Za-z0-9._-]+/g, REDACTED],
+  // PEM private keys (a GitHub App key), whole block.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REDACTED],
+  // A PEM key whose END line was cut off or lost: redact from BEGIN to the end of the string.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*/g, REDACTED],
+  // GitHub tokens: installation (ghs_), user (ghu_), OAuth (gho_), refresh (ghr_), PAT (ghp_, github_pat_).
+  [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, REDACTED],
+  // Webhook signatures.
+  [/sha256=[0-9a-fA-F]{64}/g, `sha256=${REDACTED}`],
   // Authorization: Bearer <token>
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED}`],
   // Bare JWT-looking triples (header.payload.signature).

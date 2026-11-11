@@ -21,6 +21,7 @@ export type Action =
   | "cancel"
   | "config"
   | "answerPermission"
+  | "link"
   | "delete";
 
 /** The resource an action is performed against (a session the caller owns). */
@@ -37,6 +38,7 @@ const SCOPE_FOR_ACTION: Record<Action, string> = {
   cancel: "sessions:write",
   config: "sessions:write",
   answerPermission: "sessions:write",
+  link: "sessions:write",
   delete: "sessions:delete",
 };
 
