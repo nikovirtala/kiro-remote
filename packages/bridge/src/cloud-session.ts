@@ -35,7 +35,10 @@ import {
   type Repository,
   type SessionInputs,
   type SessionMetaItem,
+  sessionPk,
+  type TurnTrigger,
   transition,
+  turnSk,
 } from "@nikovirtala/kiro-remote-core";
 import type { Logger } from "./logger.ts";
 import type { Metrics } from "./metrics.ts";
@@ -186,15 +189,58 @@ export class CloudSession {
 
   /** Persist the runtime's current session status to the durable row. */
   async persistSessionStatus(rt: SessionRuntime): Promise<void> {
-    const item = await this.repo.getSession(rt.id);
-    if (!item) {
-      return;
-    }
-    await this.repo.updateSession(rt.id, item.version, {
+    // Retries on a version conflict: a manual prompt or a wake drain bumps META
+    // without changing the status, and losing this write would leave the
+    // session looking busy (or idle) when it is not.
+    await this.repo.patchSession(rt.id, {
       status: rt.machine.session,
       activeTurnId: rt.activeTurnId,
       ...(rt.kiroSessionId ? { kiroSessionId: rt.kiroSessionId } : {}),
     });
+  }
+
+  /* ------------------------------ turn records ----------------------------- */
+
+  /**
+   * Write the TURN# row for a turn that is starting, with why it started. A
+   * turn started by a GitHub wake also gets a `session.info` event
+   * (`rawType: "turn_started"`), so a client reading the event log sees the
+   * trigger in place; user turns write the row only.
+   */
+  async recordTurnStart(
+    rt: SessionRuntime,
+    turnId: string,
+    prompt: string,
+    trigger: TurnTrigger,
+  ): Promise<void> {
+    await this.repo.putTurn({
+      PK: sessionPk(rt.id),
+      SK: turnSk(turnId),
+      id: turnId,
+      sessionId: rt.id,
+      prompt,
+      status: "running",
+      stopReason: null,
+      startedAt: new Date(this.now()).toISOString(),
+      endedAt: null,
+      metering: null,
+      trigger,
+    });
+    if (trigger.source !== "user") {
+      await this.writeEvent(
+        rt,
+        {
+          type: "session.info",
+          sessionId: rt.id,
+          turnId,
+          replay: false,
+          rawType: "turn_started",
+          kind: "turn_started",
+          payload: { trigger: { source: trigger.source, deliveryIds: trigger.deliveryIds } },
+        },
+        this.now(),
+      );
+    }
   }
 
   /* -------------------------- follow-up turn (resume) ---------------------- */

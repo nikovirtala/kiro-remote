@@ -34,6 +34,14 @@
  * stays `running`, a mid-turn steer, cancel or `whenBusy=queue` is rejected
  * exactly as before.
  *
+ * WAKE TURNS (GitHub, and any later producer)
+ * A prompt command may carry a `trigger` (see TurnTrigger): a wake turn that
+ * `drainInbox` enqueued for pending inbox items. It always has
+ * `whenBusy=reject`; if the session turns out not to be idle, the items are
+ * released back to pending instead of being lost. Every point where a turn
+ * settles goes through ONE helper (TurnSettler.settled in settle.ts), which
+ * closes the TURN# row, harvests PR links, and drains the inbox.
+ *
  * OUTCOME HANDLING
  *  - An {@link UnsupportedCloudOperationError} is PERMANENT: log a warning,
  *    persist a client-visible rejection event, and ack the record (`adopt` is
@@ -51,12 +59,17 @@ import { SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   type Command,
+  type CommandQueue,
   type EventItem,
+  type GithubQueue,
   type NormalizedEvent,
   normalizeUpdate,
   Repository,
   type SessionInputs,
   type SessionMetaItem,
+  SqsCommandQueue,
+  SqsGithubQueue,
+  type TurnTrigger,
 } from "@nikovirtala/kiro-remote-core";
 import { ulid } from "ulid";
 import {
@@ -81,6 +94,7 @@ import { KasEngine, kasSpawnSpec } from "./kas-engine.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { loggerMetricSink, type MetricSink, Metrics } from "./metrics.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
+import { TurnSettler } from "./settle.ts";
 import type { SpawnFn, SpawnSpec } from "./transport.ts";
 
 /**
@@ -159,6 +173,12 @@ export interface ConsumerConfig {
   workspaceRoot: string;
   /** The standard queue catch-up messages are scheduled on. */
   catchUpQueueUrl: string;
+  /**
+   * The FIFO command queue and the GitHub queue. Both set means the GitHub
+   * feature is on: settles then drain the inbox and request PR harvests.
+   */
+  commandQueueUrl?: string;
+  githubQueueUrl?: string;
   additionalDirectories?: string[];
   mcpServers?: unknown[];
   region?: string;
@@ -173,6 +193,9 @@ export interface ConsumerDeps {
   sqs?: SQSClient;
   spawnFn?: SpawnFn;
   catchUpScheduler?: CatchUpScheduler;
+  /** Wake plumbing; defaults are built from the queue URLs in the config. */
+  commandQueue?: CommandQueue;
+  githubQueue?: GithubQueue;
   /** Detach margin (default: env `DETACH_MARGIN_MS`, else {@link DETACH_MARGIN_MS}). */
   detachMarginMs?: number;
   logger?: Logger;
@@ -196,12 +219,17 @@ export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Con
     bucketName: requireEnv(env, "BUCKET_NAME"),
     workspaceRoot: env.WORKSPACE_ROOT ?? "/workspace",
     catchUpQueueUrl: requireEnv(env, "CATCH_UP_QUEUE_URL"),
+    ...(env.COMMAND_QUEUE_URL ? { commandQueueUrl: env.COMMAND_QUEUE_URL } : {}),
+    ...(env.GITHUB_QUEUE_URL ? { githubQueueUrl: env.GITHUB_QUEUE_URL } : {}),
     ...(env.ADDITIONAL_DIRECTORIES
       ? { additionalDirectories: env.ADDITIONAL_DIRECTORIES.split(",").filter(Boolean) }
       : {}),
     ...(env.AWS_REGION ? { region: env.AWS_REGION } : {}),
   };
 }
+
+/** The trigger recorded on turns a person started. */
+const USER_TRIGGER: TurnTrigger = { source: "user", deliveryIds: [] };
 
 /** How a turn's `session/prompt` race ended. */
 type TurnOutcome =
@@ -224,6 +252,7 @@ export class LambdaConsumer {
   private readonly metrics: Metrics;
   private readonly cloud: CloudSession;
   private readonly scheduler: CatchUpScheduler;
+  private readonly settler: TurnSettler;
   private readonly engineSpec: SpawnSpec;
   private readonly spawnFn?: SpawnFn;
   private readonly detachMarginMs: number;
@@ -242,6 +271,7 @@ export class LambdaConsumer {
     metrics: Metrics;
     cloud: CloudSession;
     scheduler: CatchUpScheduler;
+    settler: TurnSettler;
     engineSpec: SpawnSpec;
     spawnFn?: SpawnFn;
     detachMarginMs: number;
@@ -254,6 +284,7 @@ export class LambdaConsumer {
     this.metrics = args.metrics;
     this.cloud = args.cloud;
     this.scheduler = args.scheduler;
+    this.settler = args.settler;
     this.engineSpec = args.engineSpec;
     if (args.spawnFn) {
       this.spawnFn = args.spawnFn;
@@ -294,12 +325,23 @@ export class LambdaConsumer {
     const apiKey = await resolveKiroApiKey({ secretsManager, logger, env });
     const engineSpec = kasSpawnSpec({ env, apiKey });
 
+    const sqs = deps.sqs ?? new SQSClient({ region });
     const scheduler =
       deps.catchUpScheduler ??
-      new SqsCatchUpScheduler({
-        sqs: deps.sqs ?? new SQSClient({ region }),
-        queueUrl: deps.config.catchUpQueueUrl,
-      });
+      new SqsCatchUpScheduler({ sqs, queueUrl: deps.config.catchUpQueueUrl });
+
+    // The GitHub feature is on only when BOTH queues are known.
+    const githubQueue =
+      deps.githubQueue ??
+      (deps.config.githubQueueUrl
+        ? new SqsGithubQueue({ sqs, queueUrl: deps.config.githubQueueUrl })
+        : undefined);
+    const commandQueue =
+      deps.commandQueue ??
+      (deps.config.commandQueueUrl
+        ? new SqsCommandQueue({ sqs, queueUrl: deps.config.commandQueueUrl })
+        : undefined);
+    const wakeEnabled = githubQueue !== undefined && commandQueue !== undefined;
 
     // The engine's session cwd; Lambda only allows writes under /tmp.
     try {
@@ -313,6 +355,13 @@ export class LambdaConsumer {
 
     const kiroToLocal = new Map<string, string>();
     const cloud = new CloudSession({ repo, logger, metrics, now });
+    const settler = new TurnSettler({
+      repo,
+      logger,
+      metrics,
+      now,
+      ...(wakeEnabled ? { queue: commandQueue, githubQueue } : {}),
+    });
 
     return new LambdaConsumer({
       repo,
@@ -320,6 +369,7 @@ export class LambdaConsumer {
       metrics,
       cloud,
       scheduler,
+      settler,
       engineSpec,
       ...(deps.spawnFn ? { spawnFn: deps.spawnFn } : {}),
       detachMarginMs: deps.detachMarginMs ?? detachMarginFromEnv(env, logger) ?? DETACH_MARGIN_MS,
@@ -483,7 +533,14 @@ export class LambdaConsumer {
         );
         return;
       case "prompt":
-        await this.steer(command.sessionId, command.prompt, command.whenBusy, command.turnId, opts);
+        await this.steer(
+          command.sessionId,
+          command.prompt,
+          command.whenBusy,
+          command.turnId,
+          opts,
+          command.trigger,
+        );
         return;
       case "steer":
         await this.steer(command.sessionId, command.content, "steer", undefined, opts);
@@ -566,13 +623,9 @@ export class LambdaConsumer {
         this.logger.error("cloud_launch_failed", { sessionId: id, error: String(err) });
         rt.activeTurnId = null;
         rt.turnStartedAt = null;
-        const failed = await this.repo.getSession(id);
-        if (failed) {
-          await this.repo.updateSession(id, failed.version, {
-            status: rt.machine.session,
-            activeTurnId: null,
-          });
-        }
+        await this.repo.patchSession(id, { status: rt.machine.session, activeTurnId: null });
+        // The session is failed: any pending wake items are dropped.
+        await this.settler.settled({ sessionId: id, turnId: null, outcome: "session_failed" });
         return;
       }
 
@@ -583,7 +636,7 @@ export class LambdaConsumer {
       rt.activeTurnId = turnId;
       const current = await this.repo.getSession(id);
       if (current) {
-        await this.repo.updateSession(id, current.version, {
+        await this.repo.patchSession(id, {
           status: rt.machine.session,
           activeTurnId: turnId,
           kiroSessionId,
@@ -597,6 +650,7 @@ export class LambdaConsumer {
       this.logger.info("session_launched", { sessionId: id, path: "engine", kiroSessionId });
 
       // The launch turn is the session's first turn.
+      await this.cloud.recordTurnStart(rt, turnId, args.prompt, USER_TRIGGER);
       await this.runTurn(rt, engine, turnId, args.prompt, { afterSeq, turnOrdinal: 1 }, opts);
     });
   }
@@ -616,6 +670,7 @@ export class LambdaConsumer {
     whenBusy: "steer" | "queue" | "reject",
     turnId: string | undefined,
     opts: HandleOptions,
+    trigger?: TurnTrigger,
   ): Promise<void> {
     const { rt, item } = await this.refresh(id);
     if (turnId !== undefined && item?.activeTurnId === turnId) {
@@ -623,11 +678,31 @@ export class LambdaConsumer {
       await this.catchUpLeftover(item);
       return;
     }
+    // A wake turn only ever starts an idle session. If a manual prompt (or
+    // anything else) got there first, put the items back: the settle of the
+    // turn that is running drains them again.
+    if (trigger && turnId !== undefined && item?.status !== "idle") {
+      this.logger.info("wake_turn_not_started", { sessionId: id, turnId, status: item?.status });
+      await this.releaseWake(id, turnId, trigger);
+      return;
+    }
     const decision = this.cloud.classifySteer(rt, id, whenBusy, turnId);
     if (decision === "prompt") {
-      await this.prompt(rt, id, content, turnId, item?.eventSeq ?? 0, opts);
+      await this.prompt(rt, id, content, turnId, item?.eventSeq ?? 0, opts, trigger);
+    } else if (decision === "reject" && trigger && turnId !== undefined) {
+      await this.releaseWake(id, turnId, trigger);
     }
     // "idempotent" and "reject" are logged no-ops inside classifySteer.
+  }
+
+  /** Return a wake turn's inbox items to pending, or drop them when the session can no longer run. */
+  private async releaseWake(id: string, turnId: string, trigger: TurnTrigger): Promise<void> {
+    const ids = trigger.inboxIds ?? [];
+    if (ids.length === 0) {
+      return;
+    }
+    await this.repo.releaseInbox(id, ids, turnId);
+    await this.settler.drainSoon(id);
   }
 
   /** Run a follow-up turn: load the remote session, then prompt it. */
@@ -638,15 +713,17 @@ export class LambdaConsumer {
     turnId: string | undefined,
     afterSeq: number,
     opts: HandleOptions,
+    trigger?: TurnTrigger,
   ): Promise<void> {
     const tid = turnId ?? ulid();
     const begun = await this.cloud.beginResume(rt, id, turnId, tid);
     if (!begun) {
       return;
     }
+    await this.cloud.recordTurnStart(rt, tid, prompt, trigger ?? USER_TRIGGER);
     const cloudId = rt.kiroSessionId;
     if (!cloudId) {
-      await this.failTurn(rt, new Error("no cloud session id to resume"));
+      await this.failTurn(rt, new Error("no cloud session id to resume"), "turn_failed", afterSeq);
       return;
     }
     await this.withEngine(async (engine) => {
@@ -662,7 +739,7 @@ export class LambdaConsumer {
         await engine.initialize();
         await engine.loadRemote(cloudId, this.workspaceRoot);
       } catch (err) {
-        await this.failTurn(rt, err);
+        await this.failTurn(rt, err, "turn_failed", afterSeq);
         return;
       } finally {
         unsubscribe();
@@ -771,9 +848,16 @@ export class LambdaConsumer {
         rt.activeTurnId = null;
         rt.turnStartedAt = null;
         await this.cloud.persistSessionStatus(rt);
+        await this.settler.settled({
+          sessionId: rt.id,
+          turnId,
+          outcome: "completed",
+          stopReason: outcome.stopReason ?? "end_turn",
+          afterSeq: place.afterSeq,
+        });
         return;
       case "error":
-        await this.failTurn(rt, outcome.error);
+        await this.failTurn(rt, outcome.error, "turn_failed", place.afterSeq);
         return;
       case "detach": {
         this.logger.info("turn_detached", { sessionId: rt.id, turnId, kiroSessionId: cloudId });
@@ -800,7 +884,13 @@ export class LambdaConsumer {
    * LOUD turn failure: a CloudTurnFailed metric, an error log, a client-visible
    * turn.failed event, and the session back to idle.
    */
-  private async failTurn(rt: SessionRuntime, err: unknown, rawType = "turn_failed"): Promise<void> {
+  private async failTurn(
+    rt: SessionRuntime,
+    err: unknown,
+    rawType = "turn_failed",
+    afterSeq = 0,
+  ): Promise<void> {
+    const failedTurnId = rt.activeTurnId;
     this.metrics.count("CloudTurnFailed");
     this.logger.error("cloud_turn_failed", { sessionId: rt.id, rawType, error: String(err) });
     await this.cloud.writeEvent(
@@ -823,6 +913,12 @@ export class LambdaConsumer {
     rt.activeTurnId = null;
     rt.turnStartedAt = null;
     await this.cloud.persistSessionStatus(rt);
+    await this.settler.settled({
+      sessionId: rt.id,
+      turnId: failedTurnId,
+      outcome: "failed",
+      afterSeq,
+    });
   }
 
   /* -------------------------------- catch-up ------------------------------- */
@@ -876,6 +972,7 @@ export class LambdaConsumer {
         rt,
         new Error(`turn did not finish within ${CATCH_UP_MAX_AGE_MS} ms of detaching`),
         "catch_up_expired",
+        msg.afterSeq,
       );
       return;
     }
@@ -934,6 +1031,13 @@ export class LambdaConsumer {
     await this.cloud.persistSessionStatus(rt);
     this.metrics.count("CatchUpCompleted");
     this.logger.info("catch_up_completed", { ...fields, eventsWritten: plan.events.length });
+    await this.settler.settled({
+      sessionId: id,
+      turnId: msg.turnId,
+      outcome: "completed",
+      stopReason: plan.stopReason ?? "end_turn",
+      afterSeq: msg.afterSeq,
+    });
   }
 
   /**
@@ -982,6 +1086,7 @@ export class LambdaConsumer {
     if (kiroSessionId) {
       this.kiroToLocal.delete(kiroSessionId);
     }
+    await this.settler.dropPending(id, "session_deleted");
   }
 
   /* ------------------------- unsupported rejection ------------------------- */

@@ -22,6 +22,8 @@ export const METRIC_NAMES = [
   "TurnDetached",
   "CatchUpCompleted",
   "CatchUpExpired",
+  "WakesDelivered",
+  "WakesDropped",
 ] as const;
 
 export type MetricName = (typeof METRIC_NAMES)[number];
@@ -51,6 +53,8 @@ const UNIT_FOR: Record<MetricName, MetricUnit> = {
   TurnDetached: "Count",
   CatchUpCompleted: "Count",
   CatchUpExpired: "Count",
+  WakesDelivered: "Count",
+  WakesDropped: "Count",
 };
 
 /** Thin recorder over a {@link MetricSink} that fills in the canonical unit. */
