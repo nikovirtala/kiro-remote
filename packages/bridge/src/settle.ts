@@ -6,10 +6,12 @@
  * finishing, a launch that never provisioned). It
  *
  *  1. closes the TURN# row,
- *  2. deletes the session when the turn that just completed was a post-merge
- *     wake and autoCloseOnMerge is on,
- *  3. asks the GitHub consumer to harvest the turn's events for PR links,
- *  4. drains the session's inbox, so a wake that arrived while the turn ran
+ *  2. asks the GitHub consumer to harvest the turn's events for PR links;
+ *     when the turn that just completed was a post-merge wake and
+ *     autoCloseOnMerge is on, the harvest message carries `autoClose` and the
+ *     consumer deletes the session unless a linked PR is still open (and
+ *     drains the inbox itself), so step 3 is skipped here,
+ *  3. drains the session's inbox, so a wake that arrived while the turn ran
  *     becomes the next turn (or is dropped when the session failed).
  *
  * It never throws: the turn is already settled, and a hiccup here must not
@@ -75,6 +77,20 @@ export class TurnSettler {
     }
 
     try {
+      if (autoClose && turnId && this.d.githubQueue) {
+        // Whether to close is decided after the harvest: the agent may have
+        // opened a follow-up PR in this very turn, and the session must then
+        // stay. The consumer drains the inbox if it keeps the session.
+        await this.d.githubQueue.send({
+          kind: "harvest",
+          sessionId,
+          turnId,
+          afterSeq: args.afterSeq ?? 0,
+          autoClose: true,
+        });
+        logger.info("auto_close_requested", { sessionId, turnId });
+        return;
+      }
       if (autoClose) {
         await this.autoClose(sessionId);
         return;
@@ -128,7 +144,10 @@ export class TurnSettler {
     }
   }
 
-  /** autoCloseOnMerge: the post-merge turn is done, so free the session slot. */
+  /**
+   * autoCloseOnMerge without a GitHub queue to decide after the harvest (not a
+   * deployed configuration; the feature always has both queues): close now.
+   */
   private async autoClose(sessionId: string): Promise<void> {
     const { repo, queue, logger } = this.d;
     const session = await repo.getSession(sessionId);

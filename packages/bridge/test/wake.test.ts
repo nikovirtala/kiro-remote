@@ -376,23 +376,28 @@ describe("autoCloseOnMerge", () => {
     trigger: { source: "github", deliveryIds: ["d-m"], inboxIds: [], autoClose: true, ...extra },
   });
 
-  test("the session is deleted after the post-merge turn completes", async () => {
+  test("after the post-merge turn completes, the close is left to the GitHub consumer's harvest", async () => {
     const w = await wire([LAUNCH, WAKE_TURN]);
     await w.consumer.handleEvent(ev(launchCmd()));
     w.commands.commands.length = 0;
+    w.githubQueue.sent.length = 0;
     await w.addInbox("01Z", { kind: "review" });
 
     await w.consumer.handleEvent(ev(mergedWake(), "m-merge"));
-    const del = w.commands.commands.filter((c) => c.kind === "delete");
-    expect(del).toEqual([
-      { kind: "delete", sub: "user-sub-1", sessionId: SID, commandId: expect.any(String) },
+    // The harvest decides: the agent may have opened a follow-up PR in this turn.
+    expect(w.githubQueue.sent).toEqual([
+      {
+        kind: "harvest",
+        sessionId: SID,
+        turnId: "T-merge",
+        afterSeq: expect.any(Number),
+        autoClose: true,
+      },
     ]);
-    // Anything still pending is dropped, not turned into another wake.
+    // The bridge neither deletes nor drains; pending items wait for that decision.
+    expect(w.commands.commands.filter((c) => c.kind === "delete")).toEqual([]);
     expect(w.commands.prompts()).toEqual([]);
-    expect((await w.repo.queryInbox(SID))[0]).toMatchObject({
-      status: "dropped",
-      dropReason: "auto_closed",
-    });
+    expect((await w.repo.queryInbox(SID))[0]).toMatchObject({ status: "pending" });
   });
 
   test("not when the turn failed, and not without the flag", async () => {

@@ -24,7 +24,7 @@ import { harvestTurn } from "./harvest.ts";
 import type { Logger, Metrics } from "./log.ts";
 import { eventPrNumbers, eventRepo, route } from "./route.ts";
 import type { Action, GithubEvent, ReviewComment, RouteConfig, RouteLink } from "./types.ts";
-import { drainAndCount, enqueueWake, type WakeDeps } from "./wake.ts";
+import { autoCloseIfDone, drainAndCount, enqueueWake, type WakeDeps } from "./wake.ts";
 
 export interface ConsumerConfig {
   /** Explicit trusted logins. Empty means: the owner of the repo the event is about. */
@@ -280,6 +280,9 @@ export async function handleQueueMessage(
         },
         message,
       );
+      if (message.autoClose === true) {
+        await autoCloseIfDone(wakeDeps(deps), message.sessionId);
+      }
       return;
     case "drain":
       await drainAndCount(wakeDeps(deps), message.sessionId);

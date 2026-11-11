@@ -112,6 +112,49 @@ function unionChecks(a: readonly FailedCheck[], b: readonly FailedCheck[]): Fail
   return out;
 }
 
+/**
+ * autoCloseOnMerge, decided after the post-merge turn was harvested. The
+ * session is deleted only when none of its linked PRs is still open (or of
+ * unknown state, as a manual link starts), so a session that opened a
+ * follow-up PR keeps running. A kept session gets the inbox drain the bridge
+ * skipped.
+ */
+export async function autoCloseIfDone(
+  deps: WakeDeps,
+  sessionId: string,
+): Promise<"closed" | "kept" | "gone"> {
+  const session = await deps.repo.getSession(sessionId);
+  if (!session || session.status === "deleted") {
+    return "gone";
+  }
+  const links = await deps.repo.queryLinks(sessionId);
+  const open = links.filter((l) => l.prState === "open" || l.prState === "unknown");
+  if (open.length > 0) {
+    deps.logger.info("auto_close_skipped", { sessionId, openPrs: open.map((l) => l.pr) });
+    deps.metrics.count("AutoCloseSkipped", 1);
+    await drainAndCount(deps, sessionId);
+    return "kept";
+  }
+  const pending = await deps.repo.queryInbox(sessionId, { status: "pending" });
+  if (pending.length > 0) {
+    const dropped = await deps.repo.dropInbox(
+      sessionId,
+      pending.map((i) => i.id),
+      "auto_closed",
+    );
+    deps.metrics.count("WakesDropped", dropped, { reason: "auto_closed" });
+  }
+  await deps.queue.enqueue({
+    kind: "delete",
+    sub: session.createdBy,
+    sessionId,
+    commandId: deps.newId?.() ?? crypto.randomUUID(),
+  });
+  deps.metrics.count("AutoClosed", 1);
+  deps.logger.info("auto_close_on_merge", { sessionId });
+  return "closed";
+}
+
 /** Drain one session's inbox and count what happened. */
 export async function drainAndCount(deps: WakeDeps, sessionId: string) {
   const result = await drainInbox(
