@@ -1,0 +1,58 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "id": 889,
+    "name": "CI / e2e",
+    "head_branch": "kiro/fix-typo",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "status": "completed",
+    "conclusion": "timed_out",
+    "html_url": "https://github.com/octo/repo/actions/runs/889",
+    "pull_requests": [
+      {
+        "url": "https://api.github.com/repos/octo/repo/pulls/7",
+        "id": 99,
+        "number": 7,
+        "head": {
+          "ref": "kiro/fix-typo",
+          "sha": "1111111111111111111111111111111111111111",
+          "repo": {
+            "id": 1001,
+            "url": "https://api.github.com/repos/octo/repo",
+            "name": "repo"
+          }
+        },
+        "base": {
+          "ref": "main",
+          "sha": "0000",
+          "repo": {
+            "id": 1001,
+            "url": "https://api.github.com/repos/octo/repo",
+            "name": "repo"
+          }
+        }
+      }
+    ]
+  },
+  "workflow": {
+    "id": 1,
+    "name": "CI / e2e"
+  },
+  "repository": {
+    "id": 1001,
+    "full_name": "octo/repo",
+    "name": "repo",
+    "owner": {
+      "login": "octo",
+      "type": "User"
+    },
+    "html_url": "https://github.com/octo/repo"
+  },
+  "sender": {
+    "login": "github-actions[bot]",
+    "type": "Bot"
+  },
+  "installation": {
+    "id": 424242
+  }
+}
