@@ -1368,9 +1368,19 @@ const ghChecksWake: Step<HarnessContext> = {
       async () => {
         const suites = JSON.parse(
           await ghOf(ctx)(["api", `repos/${repo}/commits/${pull.head.sha}/check-suites`]),
-        ) as { check_suites?: Array<{ status: string; conclusion: string | null }> };
-        const done = (suites.check_suites ?? []).filter((c) => c.status === "completed");
-        if (done.length === 0) {
+        ) as {
+          check_suites?: Array<{
+            status: string;
+            conclusion: string | null;
+            app?: { slug?: string };
+          }>;
+        };
+        // Only the GitHub Actions suite runs the "e2e check" workflow. Other apps
+        // installed on the account get suites on the commit too; they may stay
+        // queued forever or succeed, and say nothing about the marker.
+        const actions = (suites.check_suites ?? []).filter((c) => c.app?.slug === "github-actions");
+        const done = actions.filter((c) => c.status === "completed");
+        if (done.length === 0 || done.length < actions.length) {
           return null;
         }
         const failed = done.filter(
@@ -1378,7 +1388,7 @@ const ghChecksWake: Step<HarnessContext> = {
         );
         if (failed.length === 0) {
           throw new Error(
-            `the PR's checks completed without failing (${done.map((c) => c.conclusion).join(", ")}); the repo's "e2e check" workflow must fail a PR carrying the marker`,
+            `the PR's GitHub Actions checks completed without failing (${done.map((c) => c.conclusion).join(", ")}); the repo's "e2e check" workflow must fail a PR carrying the marker`,
           );
         }
         return ctx.deps.now();
