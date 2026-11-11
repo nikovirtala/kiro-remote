@@ -271,6 +271,110 @@ describe("harvestTurn", () => {
     ).rejects.toThrow("503");
   });
 
+  describe("autoClose after the post-merge turn", () => {
+    async function mergedLink(w: World, number: number) {
+      await w.repo.createLink({
+        repo: "octo/repo",
+        number,
+        sessionId: SESSION,
+        linkedBy: "harvest",
+        prState: "merged",
+        headSha: null,
+      });
+    }
+    async function pendingItem(w: World) {
+      await w.repo.putInboxItem({
+        PK: `SESSION#${SESSION}`,
+        SK: "INBOX#01P",
+        id: "01P",
+        sessionId: SESSION,
+        source: "github",
+        deliveryId: "d-p",
+        deliveryIds: ["d-p"],
+        kind: "review",
+        key: "octo/repo#7",
+        prompt: "[GitHub webhook] This turn was started by GitHub, not by the user: pending",
+        data: null,
+        createdAt: new Date(0).toISOString(),
+        notBefore: new Date(0).toISOString(),
+        status: "pending",
+        dropReason: null,
+        deliveredTurnId: null,
+        autoClose: false,
+        ttl: 9_999_999_999,
+      });
+    }
+    const autoCloseMsg = {
+      kind: "harvest" as const,
+      sessionId: SESSION,
+      turnId: "T1",
+      afterSeq: 0,
+      autoClose: true,
+    };
+
+    it("keeps the session when that turn opened a follow-up PR, and drains its inbox", async () => {
+      const w = await setup();
+      await mergedLink(w, 3); // the PR whose merge woke the session
+      w.github.pulls.set("octo/repo#7", pull()); // opened in this turn (its URL is in the events)
+      await pendingItem(w);
+      const { handleQueueMessage } = await import("../src/consumer.ts");
+      await handleQueueMessage(w.deps, autoCloseMsg);
+
+      expect((await w.repo.getPrLink("octo/repo#7"))?.prState).toBe("open");
+      expect(w.commands.commands.filter((c) => c.kind === "delete")).toEqual([]);
+      expect(w.metrics.sum("AutoCloseSkipped")).toBe(1);
+      expect(
+        w.log.lines.some((l) => l.includes("auto_close_skipped") && l.includes("octo/repo#7")),
+      ).toBe(true);
+      // The drain the bridge skipped happens here.
+      expect(w.commands.commands.filter((c) => c.kind === "prompt")).toHaveLength(1);
+    });
+
+    it("deletes the session when no linked PR is still open, dropping what is pending", async () => {
+      const w = world();
+      w.seedSession(SESSION, { repos: ["octo/repo"] }); // no events: nothing new to harvest
+      await mergedLink(w, 3);
+      await pendingItem(w);
+      const { handleQueueMessage } = await import("../src/consumer.ts");
+      await handleQueueMessage(w.deps, autoCloseMsg);
+
+      expect(w.commands.commands).toEqual([
+        { kind: "delete", sub: "user-sub-1", sessionId: SESSION, commandId: expect.any(String) },
+      ]);
+      expect((await w.repo.queryInbox(SESSION))[0]).toMatchObject({
+        status: "dropped",
+        dropReason: "auto_closed",
+      });
+      expect(w.metrics.sum("AutoClosed")).toBe(1);
+    });
+
+    it("a link of unknown state (a manual link not yet seen by a webhook) also keeps the session", async () => {
+      const w = world();
+      w.seedSession(SESSION, { repos: ["octo/repo"] });
+      await mergedLink(w, 3);
+      await w.repo.createLink({
+        repo: "octo/repo",
+        number: 9,
+        sessionId: SESSION,
+        linkedBy: "manual",
+        prState: "unknown",
+        headSha: null,
+      });
+      const { handleQueueMessage } = await import("../src/consumer.ts");
+      await handleQueueMessage(w.deps, autoCloseMsg);
+      expect(w.commands.commands.filter((c) => c.kind === "delete")).toEqual([]);
+    });
+
+    it("without the flag, a harvest never closes", async () => {
+      const w = world();
+      w.seedSession(SESSION, { repos: ["octo/repo"] });
+      await mergedLink(w, 3);
+      const { handleQueueMessage } = await import("../src/consumer.ts");
+      await handleQueueMessage(w.deps, { ...autoCloseMsg, autoClose: undefined });
+      expect(w.commands.commands).toEqual([]);
+    });
+  });
+
   it("is invoked through the queue message", async () => {
     const w = await setup();
     w.github.pulls.set("octo/repo#7", pull());

@@ -22,6 +22,13 @@ export interface HarvestMessage {
   turnId: string;
   /** META eventSeq when the turn began; the turn's events have seq > afterSeq. */
   afterSeq: number;
+  /**
+   * The turn was a completed post-merge wake with autoCloseOnMerge on. After
+   * harvesting (so a PR opened in this very turn is linked), the consumer
+   * deletes the session unless one of its linked PRs is still open, and
+   * otherwise drains its inbox (the bridge skipped the drain).
+   */
+  autoClose?: boolean;
 }
 
 /** Drain a session's inbox (sent delayed, when a debounced item becomes due). */

@@ -30,6 +30,8 @@ export const METRIC_NAMES = [
   "WakesDelivered",
   "WakesDropped",
   "Redelivered",
+  "AutoClosed",
+  "AutoCloseSkipped",
 ] as const;
 export type MetricName = (typeof METRIC_NAMES)[number];
 
