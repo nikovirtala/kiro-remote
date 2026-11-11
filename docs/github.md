@@ -125,6 +125,13 @@ whoever can push.
 default `off`): after the post-merge turn **completes**, the session is deleted
 to free a slot. Never on closed-unmerged, and not if that turn failed.
 
+The decision waits for that turn's harvest, and the session is **kept** when any
+of its linked PRs is still open (or still `unknown`, as a manual link starts).
+A session that opens a follow-up PR in its post-merge turn therefore stays alive
+to see that PR through; without this it would be deleted and the second PR's
+merge could never reach it. A kept session is logged as `auto_close_skipped`
+with the open PRs.
+
 ### The agent's GitHub identity
 
 Seen in the live run: Kiro's agent opens PRs as **`kiro-agent[bot]`**, but
@@ -240,7 +247,7 @@ Namespace `KiroRemote/GitHub` (webhook, consumer): `WebhooksReceived`,
 `WebhooksRejectedSignature`, `WebhooksDuplicate`, `WebhooksDropped`
 (`reason=repo_not_allowed`), `WebhooksUnmatched`, `LinksCreated` (by `method`),
 `LinksRejected` (by `reason`), `WakesDelivered`, `WakesDropped` (by `reason`),
-`Redelivered`. The bridge also emits `WakesDelivered` and `WakesDropped` as it
+`Redelivered`, `AutoClosed`, `AutoCloseSkipped` (a linked PR was still open). The bridge also emits `WakesDelivered` and `WakesDropped` as it
 settles turns.
 
 ## Where it shows up
@@ -320,6 +327,36 @@ session, created after PR 1 was merged, and contain PR 1's merge commit),
 `gh-chain-merge-second` (merges PR 2 and waits for its wake turn), and
 `gh-chain-cleanup` (closes any open PR, deletes both branches). Both merge
 steps apply the same 45 s quiet check.
+
+A third session covers failing checks and a PR closed unmerged:
+`gh-checks-launch` (the agent opens a PR whose only line is the marker
+`KIRO_E2E_FAIL_CHECK`), `gh-checks-wake` (waits until the repo's check suite
+actually fails on that PR's head commit, then for the debounced wake),
+`gh-close-wake` (closes the PR unmerged and waits for that wake), and
+`gh-checks-cleanup`. This needs a workflow in the **e2e repo's default branch**
+that fails a pull request carrying the marker, for example:
+
+```yaml
+# .github/workflows/e2e-check.yml
+name: e2e check
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  marker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          marker="KIRO_E2E""_FAIL_CHECK"
+          if grep -rl --exclude-dir=.git --exclude-dir=.github "$marker" .; then
+            exit 1
+          fi
+```
+
+The launch prompt tells the agent not to fix the failure or push anything, so
+the PR's head commit stays put and only the harness's own actions wake the
+session.
 
 ## Out of scope (next steps)
 

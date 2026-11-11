@@ -123,6 +123,63 @@ describe("gh-chain-first-pr", () => {
   });
 });
 
+describe("gh-checks-wake", () => {
+  const step = GITHUB_STEPS.find((s) => s.id === "gh-checks-wake");
+  const suites = (...conclusions: Array<string | null>) =>
+    JSON.stringify({
+      check_suites: conclusions.map((c) => ({
+        status: c === null ? "in_progress" : "completed",
+        conclusion: c,
+      })),
+    });
+  function ctxWith(ghResponses: string[]) {
+    let clock = 0;
+    const ctx = {
+      deps: {
+        now: () => clock,
+        sleep: async (ms: number) => {
+          clock += ms;
+        },
+        gh: async () => ghResponses.shift() ?? ghResponses[ghResponses.length - 1] ?? "{}",
+      },
+      state: {
+        created: new Set<string>(),
+        ghChecks: { session: { id: "S", cursor: 0 } },
+        rest: {
+          getSession: async () => ({
+            links: [{ pr: "o/r#8", repo: "o/r", linkedBy: "harvest", prState: "open" }],
+          }),
+          getEvents: async () => ({ events: [] }),
+        },
+      },
+    };
+    return ctx as never;
+  }
+  const PULL = JSON.stringify({
+    number: 8,
+    state: "open",
+    created_at: "2026-02-01T10:00:00Z",
+    merged_at: null,
+    head: { ref: "b", sha: "c".repeat(40) },
+    base: { ref: "main" },
+  });
+
+  it("fails loudly when the PR's checks complete without failing", async () => {
+    // The repo's workflow did not fail the marker PR: a wake would prove nothing.
+    await expect(step?.run(ctxWith([PULL, suites("success")]))).rejects.toThrow(
+      /checks completed without failing \(success\); the repo's "e2e check" workflow must fail a PR carrying the marker/,
+    );
+  });
+
+  it("waits for a completed suite before looking for the wake", async () => {
+    // Checks still running, then a failure: the step gets past the check gate
+    // and then times out waiting for the wake turn (no events in this fake).
+    await expect(step?.run(ctxWith([PULL, suites(null), suites("failure")]))).rejects.toThrow(
+      /the GitHub wake turn did not happen within \d+ s/,
+    );
+  });
+});
+
 describe("the GitHub scenario is opt-in", () => {
   it("is separate from the default steps and every step requires the github flag", () => {
     expect(STEPS.some((s) => GITHUB_STEPS.includes(s))).toBe(false);
@@ -137,6 +194,10 @@ describe("the GitHub scenario is opt-in", () => {
       "gh-chain-merge-first",
       "gh-chain-merge-second",
       "gh-chain-cleanup",
+      "gh-checks-launch",
+      "gh-checks-wake",
+      "gh-close-wake",
+      "gh-checks-cleanup",
     ]);
     expect(GITHUB_STEPS.every((s) => s.requires.includes("github"))).toBe(true);
   });

@@ -67,6 +67,11 @@ export interface HarnessState {
     launchedAt: number;
     prs: Array<{ repo: string; number: number; headRef: string }>;
   };
+  /** The failing-check scenario's session and the PR whose checks fail. */
+  ghChecks?: {
+    session: SessionCursor;
+    pr?: { repo: string; number: number; headRef: string };
+  };
   /** GitHub delivery ids of the wake turns the GitHub steps have seen so far. */
   ghWakeDeliveries?: string[];
   /** Session ids created and not yet confirmed deleted. */
@@ -821,17 +826,27 @@ export async function expectNoWake(
   }
 }
 
-async function waitForWake(ctx: HarnessContext, s: SessionCursor, startedAt: number) {
+async function waitForWake(
+  ctx: HarnessContext,
+  s: SessionCursor,
+  startedAt: number,
+  opts: { timeoutMs?: number } = {},
+) {
   const client = restOf(ctx);
-  const wake = await pollUntil(ctx, "the GitHub wake turn", GH_WAKE_TIMEOUT_MS, async () => {
-    const page = await client.getEvents(REST_PRINCIPAL, s.id, {
-      after: s.cursor,
-      wait: 0,
-      types: ["session.info"],
-    });
-    const found = githubWakes(page.events as unknown as EventLike[])[0];
-    return found ?? null;
-  });
+  const wake = await pollUntil(
+    ctx,
+    "the GitHub wake turn",
+    opts.timeoutMs ?? GH_WAKE_TIMEOUT_MS,
+    async () => {
+      const page = await client.getEvents(REST_PRINCIPAL, s.id, {
+        after: s.cursor,
+        wait: 0,
+        types: ["session.info"],
+      });
+      const found = githubWakes(page.events as unknown as EventLike[])[0];
+      return found ?? null;
+    },
+  );
   // A wake that re-uses a delivery an earlier wake step already saw is not
   // caused by this step's action.
   const seen = new Set(ctx.state.ghWakeDeliveries ?? []);
@@ -1269,6 +1284,173 @@ const ghChainCleanup: Step<HarnessContext> = {
   },
 };
 
+/* -------------------------------------------------------------------------- */
+/* GitHub checks: a failing check wakes, then closing the PR unmerged wakes     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The marker the repo's `e2e check` workflow fails on. Split so this file does
+ * not match its own grep when the harness repo is the e2e repo.
+ */
+const FAIL_CHECK_MARKER = `KIRO_E2E${"_FAIL_CHECK"}`;
+/** Failing-check wakes are debounced (GITHUB_CHECKS_DEBOUNCE_MS = 2 min), plus slack. */
+const GH_CHECKS_WAKE_TIMEOUT_MS = 6 * 60_000;
+
+function ghChecksOf(ctx: HarnessContext): NonNullable<HarnessState["ghChecks"]> {
+  if (!ctx.state.ghChecks) {
+    throw new Error("no checks session from gh-checks-launch");
+  }
+  return ctx.state.ghChecks;
+}
+
+const ghChecksLaunch: Step<HarnessContext> = {
+  id: "gh-checks-launch",
+  name: "GitHub checks: launch a session whose PR fails the repo's check",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["login"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const file = `docs/kiro-remote-e2e-${ctx.deps.runId.toLowerCase()}-checks.md`;
+    const prompt = [
+      `On a new branch, add the file ${file} whose only line is the single word`,
+      `${FAIL_CHECK_MARKER}, and open a pull request for it. Reply with the pull request URL and`,
+      "nothing else. The repository's CI fails that pull request on purpose. If you are later told",
+      "that a check failed, or that the pull request was closed, do NOT change any file, do not push",
+      "and do not open another pull request: just reply with what you were told and nothing else.",
+    ].join(" ");
+    const launched = (await client.launchSession(REST_PRINCIPAL, {
+      prompt,
+      repos: [repoOf(ctx)],
+      title: titleFor(ctx.deps.runId, "rest"),
+    })) as unknown;
+    if (!isObj(launched)) {
+      throw new Error("POST /v1/sessions is not an object");
+    }
+    const id = str(launched, "sessionId", "POST /v1/sessions");
+    ctx.state.created.add(id);
+    ctx.state.ghChecks = { session: { id, cursor: 0 } };
+    const res = await waitForTurn({
+      after: 0,
+      read: restEventReader(ctx, id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    ghChecksOf(ctx).session.cursor = res.cursor;
+    return { sessionId: id, ...turnCaptured(res) };
+  },
+};
+
+const ghChecksWake: Step<HarnessContext> = {
+  id: "gh-checks-wake",
+  name: "GitHub checks: the failing check wakes the session (debounced)",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-checks-launch"],
+  async run(ctx) {
+    const checks = ghChecksOf(ctx);
+    const s = checks.session;
+    const client = restOf(ctx);
+    const link = await pollUntil(ctx, "the PR link", GH_LINK_TIMEOUT_MS, async () => {
+      const session = await client.getSession(REST_PRINCIPAL, s.id);
+      return session.links && session.links.length > 0 ? session.links[0] : null;
+    });
+    const { repo, number } = prRef(link.pr);
+    const pull = await ghPull(ctx, repo, number);
+    checks.pr = { repo, number, headRef: pull.head.ref };
+
+    // The repo's workflow must actually fail on this PR's head commit, else a
+    // wake would prove nothing.
+    const failedAt = await pollUntil(
+      ctx,
+      "the check to fail",
+      GH_CHECKS_WAKE_TIMEOUT_MS,
+      async () => {
+        const suites = JSON.parse(
+          await ghOf(ctx)(["api", `repos/${repo}/commits/${pull.head.sha}/check-suites`]),
+        ) as { check_suites?: Array<{ status: string; conclusion: string | null }> };
+        const done = (suites.check_suites ?? []).filter((c) => c.status === "completed");
+        if (done.length === 0) {
+          return null;
+        }
+        const failed = done.filter(
+          (c) => c.conclusion === "failure" || c.conclusion === "timed_out",
+        );
+        if (failed.length === 0) {
+          throw new Error(
+            `the PR's checks completed without failing (${done.map((c) => c.conclusion).join(", ")}); the repo's "e2e check" workflow must fail a PR carrying the marker`,
+          );
+        }
+        return ctx.deps.now();
+      },
+    );
+
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, failedAt, {
+      timeoutMs: GH_CHECKS_WAKE_TIMEOUT_MS,
+    });
+    await expectNoWake(ctx, s, GH_QUIET_MS, "the failing-check wake turn settled");
+    return {
+      pr: number,
+      wakeTurnId: wake.turnId,
+      deliveries: wake.deliveryIds.length,
+      checkFailureToWakeTurnStartMs: latencyMs,
+      quietAfterMs: GH_QUIET_MS,
+      ...turnCaptured(settled),
+    };
+  },
+};
+
+const ghCloseWake: Step<HarnessContext> = {
+  id: "gh-close-wake",
+  name: "GitHub checks: closing the PR without merging wakes the session",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-checks-wake"],
+  async run(ctx) {
+    const checks = ghChecksOf(ctx);
+    const pr = checks.pr;
+    if (!pr) {
+      throw new Error("no PR from gh-checks-wake");
+    }
+    const startedAt = ctx.deps.now();
+    await ghOf(ctx)([
+      "api",
+      "--method",
+      "PATCH",
+      `repos/${pr.repo}/pulls/${pr.number}`,
+      "-f",
+      "state=closed",
+    ]);
+    const after = await ghPull(ctx, pr.repo, pr.number);
+    if (after.merged_at !== null) {
+      throw new Error(`PR #${pr.number} is merged; this step needs a closed-unmerged PR`);
+    }
+    const { wake, settled, latencyMs } = await waitForWake(ctx, checks.session, startedAt);
+    await expectNoWake(ctx, checks.session, GH_QUIET_MS, "the closed-unmerged wake turn settled");
+    return {
+      pr: pr.number,
+      wakeTurnId: wake.turnId,
+      closeToWakeTurnStartMs: latencyMs,
+      quietAfterMs: GH_QUIET_MS,
+      ...turnCaptured(settled),
+    };
+  },
+};
+
+const ghChecksCleanup: Step<HarnessContext> = {
+  id: "gh-checks-cleanup",
+  name: "GitHub checks: delete the PR's head branch",
+  requires: ["baseUrl", "repo", "github"],
+  needs: [],
+  async run(ctx) {
+    const pr = ctx.state.ghChecks?.pr;
+    if (!pr) {
+      return { branchDeleted: false };
+    }
+    await ghOf(ctx)(["api", "--method", "DELETE", `repos/${pr.repo}/git/refs/heads/${pr.headRef}`]);
+    return { branchDeleted: true };
+  },
+};
+
 /** The opt-in GitHub wake scenario; appended to {@link STEPS} when KIRO_API_E2E_GITHUB=1. */
 export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghLaunch,
@@ -1281,6 +1463,10 @@ export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghChainMergeFirst,
   ghChainMergeSecond,
   ghChainCleanup,
+  ghChecksLaunch,
+  ghChecksWake,
+  ghCloseWake,
+  ghChecksCleanup,
 ];
 
 /** The steps, in run order. */
