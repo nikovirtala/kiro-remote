@@ -180,12 +180,12 @@ other than that token file.
   supports S256, and lists the authorization, token and registration endpoints.
 - `mcp-inspector`: The Inspector CLI
   (`--cli <url>/mcp --transport http --method tools/list`) completes
-  discovery, registration and the browser sign-in, and lists exactly the 14
+  discovery, registration and the browser sign-in, and lists exactly the 16
   registered tools.
 - `login`: A token with the three scopes, from the token file or a browser
   login. `captured.source` says which.
 - `mcp-tools`: The MCP SDK client connects over Streamable HTTP with that token.
-  `tools/list` returns the 14 tools, and `kiro_capabilities` and
+  `tools/list` returns the 16 tools, and `kiro_capabilities` and
   `kiro_list_models` return their result shapes.
 - `mcp-launch`: `kiro_launch_session` on the repo returns a session id.
   `kiro_get_session` returns it and `kiro_list_sessions` lists it.
@@ -218,6 +218,14 @@ commands, and to reply with one marker line such as
 `kiro-remote e2e <run id> (mcp|rest)`. A turn has 20 minutes to settle, which
 covers a catch-up continuation past the 15-minute consumer. Expect several
 minutes per launch.
+
+### The GitHub wake scenario (opt-in)
+
+With `KIRO_API_E2E_GITHUB=1` the harness appends five steps (`gh-launch`,
+`gh-link`, `gh-review-wake`, `gh-merge-wake`, `gh-cleanup`) that need the GitHub
+App installed on the repo and the GitHub CLI logged in as a trusted login. See
+[GitHub wake](./github.md#live-end-to-end-scenario-opt-in). Without the flag
+they are reported as skipped.
 
 ### Output and exit codes
 

@@ -39,6 +39,9 @@ work through the guides in this order:
    HTTP MCP client at `<host>/mcp`).
 5. **[Run the tests](./testing.md)** — unit/integration tests run offline; the
    live `e2e` harness needs a deployed stack.
+6. **[Optional: GitHub wake](./github.md)** — register a read-only GitHub App so
+   pull request activity (merged, review, comment, failing checks) wakes the
+   session that opened the PR.
 
 ## Two different credentials (don't mix them up)
 
@@ -83,6 +86,7 @@ packages/core     shared zod schemas, auth primitives, domain types
 packages/auth      Cognito OAuth 2.1 facade construct + handlers
 packages/bridge    Lambda bridge: SQS consumer + caps publisher (ACP to kiro-cli's engine)
 packages/api       REST API (/v1) + facade routing + /mcp + /openapi.json
+packages/github    optional GitHub App webhook ingress, event routing, PR links
 packages/mcp       the `kiro-remote` CLI and the MCP tools/transports
 packages/cdk       the CDK app and KiroRemoteStack
 e2e                a live end-to-end harness (needs a deployed stack)

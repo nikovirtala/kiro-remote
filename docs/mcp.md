@@ -8,7 +8,7 @@ the same `KiroRemoteClient` interface:
 - **Streamable HTTP** — mounted at `<host>/mcp`, a protected resource that
   requires the same Cognito bearer.
 
-Both surfaces expose the same **14 tools**.
+Both surfaces expose the same **16 tools**.
 
 ## The `kiro-remote` CLI
 
@@ -132,27 +132,29 @@ without one; see the Inspector's
 The live e2e harness uses the Inspector's CLI mode instead, with an in-memory
 store (see [`docs/testing.md`](testing.md#the-live-end-to-end-harness)).
 
-## The 14 tools
+## The 16 tools
 
 Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 `destructiveHint` (from [`packages/mcp/src/tools.ts`](../packages/mcp/src/tools.ts)):
 
-| #   | Tool                     | Annotation  | What it does                                                                                                      |
-| --- | ------------------------ | ----------- | ----------------------------------------------------------------------------------------------------------------- |
-| 1   | `kiro_capabilities`      | RO          | Advertised capabilities, `kiro-cli` version (`null` until the caps publisher has run), your active session count. |
-| 2   | `kiro_list_models`       | RO          | Model ids the agent advertises.                                                                                   |
-| 3   | `kiro_launch_session`    | —           | Launch a session against one or more repos with an initial prompt.                                                |
-| 4   | `kiro_list_sessions`     | RO          | List your sessions, newest first, with status filter + cursor.                                                    |
-| 5   | `kiro_adopt_session`     | —           | Adopt an existing Kiro cloud session.                                                                             |
-| 6   | `kiro_get_session`       | RO          | Fetch one session you own.                                                                                        |
-| 7   | `kiro_send_prompt`       | —           | Send a prompt; steer/queue/reject when busy.                                                                      |
-| 8   | `kiro_wait_for_events`   | RO          | Long-poll the event log (see limits below).                                                                       |
-| 9   | `kiro_get_transcript`    | RO          | The assistant's final text per completed turn.                                                                    |
-| 10  | `kiro_list_permissions`  | RO          | List permission requests (optionally by status).                                                                  |
-| 11  | `kiro_answer_permission` | —           | Answer a pending request with an offered `optionId` (+ optional consent).                                         |
-| 12  | `kiro_set_config`        | —           | Change a session's `model` / `effort` / `mode`.                                                                   |
-| 13  | `kiro_cancel_turn`       | DESTRUCTIVE | Cancel the active turn.                                                                                           |
-| 14  | `kiro_delete_session`    | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                               |
+| #   | Tool                       | Annotation  | What it does                                                                                                      |
+| --- | -------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
+| 1   | `kiro_capabilities`        | RO          | Advertised capabilities, `kiro-cli` version (`null` until the caps publisher has run), your active session count. |
+| 2   | `kiro_list_models`         | RO          | Model ids the agent advertises.                                                                                   |
+| 3   | `kiro_launch_session`      | —           | Launch a session against one or more repos with an initial prompt.                                                |
+| 4   | `kiro_list_sessions`       | RO          | List your sessions, newest first, with status filter + cursor.                                                    |
+| 5   | `kiro_adopt_session`       | —           | Adopt an existing Kiro cloud session.                                                                             |
+| 6   | `kiro_get_session`         | RO          | Fetch one session you own.                                                                                        |
+| 7   | `kiro_send_prompt`         | —           | Send a prompt; steer/queue/reject when busy.                                                                      |
+| 8   | `kiro_wait_for_events`     | RO          | Long-poll the event log (see limits below).                                                                       |
+| 9   | `kiro_get_transcript`      | RO          | The assistant's final text per completed turn.                                                                    |
+| 10  | `kiro_list_permissions`    | RO          | List permission requests (optionally by status).                                                                  |
+| 11  | `kiro_answer_permission`   | —           | Answer a pending request with an offered `optionId` (+ optional consent).                                         |
+| 12  | `kiro_set_config`          | —           | Change a session's `model` / `effort` / `mode`.                                                                   |
+| 13  | `kiro_link_pull_request`   | —           | Link a PR (`owner/repo#n` or URL) to a session so GitHub activity wakes it ([GitHub wake](./github.md)).          |
+| 14  | `kiro_unlink_pull_request` | —           | Remove a PR link from a session.                                                                                  |
+| 15  | `kiro_cancel_turn`         | DESTRUCTIVE | Cancel the active turn.                                                                                           |
+| 16  | `kiro_delete_session`      | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                               |
 
 **On cloud sessions.** Every session the bridge launches is a Kiro cloud
 session, and some tools have no effect there:
@@ -183,7 +185,10 @@ count.
 ### `kiro_get_transcript`
 
 Returns the assistant's **final** text for each completed turn (not the raw event
-stream), which is usually what you want to read back.
+stream), which is usually what you want to read back. Each turn has a `trigger`:
+`{ source: "user", deliveryIds: [] }` for a turn you started, or
+`{ source: "github", deliveryIds: [...] }` for a turn a GitHub event woke (see
+[GitHub wake](./github.md)).
 
 ## Scopes and secrets
 

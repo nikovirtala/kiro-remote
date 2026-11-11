@@ -163,20 +163,28 @@ root and deploy with [`scripts/deploy.sh`](../scripts/deploy.sh), which maps eac
 `deploy.env` key to its `-c` flag (see [Bootstrap and deploy](#5-bootstrap-and-deploy)).
 You can still pass `-c key=value` directly to the CDK CLI for one-off synths.
 
-| `deploy.env` key          | Context key           |
-| ------------------------- | --------------------- |
-| `KIRO_CLI_VERSION`        | `kiroCliVersion`      |
-| `PUBLIC_BASE_URL`         | `publicBaseUrl`       |
-| `COGNITO_DOMAIN_PREFIX`   | `cognitoDomainPrefix` |
-| `ALLOWED_REPOS`           | `allowedRepos`        |
-| `CUSTOM_DOMAIN_NAME`      | `customDomainName`    |
-| `DNS_ZONE_NAME`           | `dnsZoneName`         |
-| `HOSTED_ZONE_ID`          | `hostedZoneId`        |
-| `HOSTED_ZONE_NAME`        | `hostedZoneName`      |
-| `CERTIFICATE_ARN`         | `certificateArn`      |
-| `KIRO_API_KEY_SECRET_ARN` | `kiroApiKeySecretArn` |
-| `SES_FROM_EMAIL`          | `sesFromEmail`        |
-| `SES_VERIFIED_DOMAIN`     | `sesVerifiedDomain`   |
+| `deploy.env` key             | Context key              |
+| ---------------------------- | ------------------------ |
+| `KIRO_CLI_VERSION`           | `kiroCliVersion`         |
+| `PUBLIC_BASE_URL`            | `publicBaseUrl`          |
+| `COGNITO_DOMAIN_PREFIX`      | `cognitoDomainPrefix`    |
+| `ALLOWED_REPOS`              | `allowedRepos`           |
+| `CUSTOM_DOMAIN_NAME`         | `customDomainName`       |
+| `DNS_ZONE_NAME`              | `dnsZoneName`            |
+| `HOSTED_ZONE_ID`             | `hostedZoneId`           |
+| `HOSTED_ZONE_NAME`           | `hostedZoneName`         |
+| `CERTIFICATE_ARN`            | `certificateArn`         |
+| `KIRO_API_KEY_SECRET_ARN`    | `kiroApiKeySecretArn`    |
+| `SES_FROM_EMAIL`             | `sesFromEmail`           |
+| `SES_VERIFIED_DOMAIN`        | `sesVerifiedDomain`      |
+| `GITHUB_APP_SECRET_ARN`      | `githubAppSecretArn`     |
+| `GITHUB_TRUSTED_LOGINS`      | `githubTrustedLogins`    |
+| `GITHUB_AGENT_LOGINS`        | `githubAgentLogins`      |
+| `GITHUB_PR_TRAILER`          | `githubPrTrailer`        |
+| `GITHUB_AUTO_CLOSE_ON_MERGE` | `githubAutoCloseOnMerge` |
+
+The five `GITHUB_*` keys belong to the optional [GitHub wake](./github.md)
+feature. Leave `GITHUB_APP_SECRET_ARN` blank and nothing is deployed for it.
 
 > **Allow-list glob gotcha:** repos are matched as `owner/name`, where a single
 > `*` matches any run of characters **except** `/`, and `**` matches across `/`.
@@ -260,7 +268,7 @@ There is no VPC and no long-running task. Operational details:
 
 ### Operations cloud sessions do not support
 
-All 14 MCP tools and every REST route stay available, but some operations have
+All 16 MCP tools and every REST route stay available, but some operations have
 no meaning on a cloud session:
 
 - **cancel** is rejected while a turn is running and is a no-op when the
@@ -272,6 +280,10 @@ no meaning on a cloud session:
   rejected. An idle-session steer is just a new prompt turn.
 - **`kiro_list_models` / `GET /v1/models` returning no models is expected** for
   cloud and autonomous sessions.
+
+Because of the last rule, a GitHub wake never goes into a busy session: it is
+written to the session's inbox and `drainInbox` starts a turn from it only when
+the session is idle ([GitHub wake](./github.md)).
 
 Each rejection is persisted as a client-visible `turn.failed` event
 (`rawType: "operation_rejected"`, with the rejected `operation` and a `reason`
