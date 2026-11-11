@@ -47,7 +47,7 @@ import {
   TableEncryption,
 } from "aws-cdk-lib/aws-dynamodb";
 import { Repository as EcrRepository } from "aws-cdk-lib/aws-ecr";
-import { Rule, Schedule } from "aws-cdk-lib/aws-events";
+import { Rule, RuleTargetInput, Schedule } from "aws-cdk-lib/aws-events";
 import { LambdaFunction as LambdaFunctionTarget } from "aws-cdk-lib/aws-events-targets";
 import { Key } from "aws-cdk-lib/aws-kms";
 import {
@@ -70,7 +70,7 @@ import {
 import { ApiGatewayv2DomainProperties } from "aws-cdk-lib/aws-route53-targets";
 import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
 import { type ISecret, Secret } from "aws-cdk-lib/aws-secretsmanager";
-import { Queue } from "aws-cdk-lib/aws-sqs";
+import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import { Trigger } from "aws-cdk-lib/triggers";
 import { Construct } from "constructs";
 
@@ -252,6 +252,47 @@ export interface KiroRemoteProps {
    * and calls `createHandler`.
    */
   apiLambdaCode?: Code;
+
+  /**
+   * Full ARN of a Secrets Manager secret holding the GitHub App credentials as
+   * JSON: `{ "appId": "...", "privateKey": "-----BEGIN ...", "webhookSecret": "..." }`
+   * (see docs/github.md). OPTIONAL: when absent the whole GitHub feature is
+   * off and NOTHING is deployed for it (no route, queues, functions or
+   * schedule, and the bridge keeps its original behaviour). When present, only
+   * the webhook and consumer functions can read it.
+   */
+  githubAppSecretArn?: string;
+
+  /**
+   * GitHub logins whose review/comment text may be quoted to the agent. When
+   * empty, the owner of the repo an event is about (the App installation
+   * owner) is trusted.
+   */
+  githubTrustedLogins?: string[];
+
+  /**
+   * The Kiro agent's own GitHub identities (its comments never wake a
+   * session). Set it to also require that a trailer-linked PR is authored by
+   * the agent.
+   */
+  githubAgentLogins?: string[];
+
+  /**
+   * Ask the agent (one line appended to the launch prompt) to put a
+   * `Kiro-Remote-Session: <id>` trailer in its PR body. Defaults to "on": the
+   * trailer is the link method that does not depend on the PR URL appearing in
+   * the event log (see docs/github.md).
+   */
+  githubPrTrailer?: "on" | "off";
+
+  /** "after_turn" deletes the session once the post-merge wake turn completes. Defaults to "off". */
+  githubAutoCloseOnMerge?: "off" | "after_turn";
+
+  /** Bundled code for the webhook ingress function. Defaults to an inline placeholder (synth only). */
+  githubWebhookCode?: Code;
+
+  /** Bundled code for the GitHub consumer function. Defaults to an inline placeholder (synth only). */
+  githubConsumerCode?: Code;
 }
 
 /** A tiny inline Lambda placeholder so synth needs no bundling. Override in prod. */
@@ -317,6 +358,14 @@ export class KiroRemote extends Construct {
   readonly tokenFn: LambdaFunction;
   /** The main REST/MCP Lambda. */
   readonly apiFn: LambdaFunction;
+  /** GitHub feature (present only when githubAppSecretArn is set): the webhook ingress function. */
+  readonly githubWebhookFn?: LambdaFunction;
+  /** GitHub feature: the queue consumer (also invoked by the 15-minute redelivery schedule). */
+  readonly githubConsumerFn?: LambdaFunction;
+  /** GitHub feature: the standard queue of verified deliveries, harvest requests and delayed drains. */
+  readonly githubQueue?: Queue;
+  /** GitHub feature: the dead-letter queue for the GitHub queue. */
+  readonly githubDlq?: Queue;
 
   constructor(scope: Construct, id: string, props: KiroRemoteProps) {
     super(scope, id);
@@ -450,6 +499,12 @@ export class KiroRemote extends Construct {
       // The launch allow-list the service layer enforces (owner/name globs).
       ALLOWED_REPOS: props.allowedRepos.join(","),
     };
+
+    // The launch prompt asks the agent for the session trailer only when the
+    // GitHub feature is deployed (otherwise the line would be pointless).
+    if (props.githubAppSecretArn) {
+      commonEnv.GITHUB_PR_TRAILER = props.githubPrTrailer ?? "on";
+    }
 
     // Propagate the pre-registered (non-CIMD) clients the auth construct
     // provisions so the API Lambda's ClientResolver accepts them at
@@ -693,6 +748,25 @@ export class KiroRemote extends Construct {
       enforceSSL: true,
     });
 
+    // GitHub feature queues. Created only when githubAppSecretArn is set; the
+    // bridge needs them to harvest and drain at turn settle.
+    const githubEnabled = props.githubAppSecretArn !== undefined;
+    if (githubEnabled) {
+      // A consumer timeout of 120 s, so visibility is 6x that (AWS guidance).
+      this.githubDlq = new Queue(this, "GithubDlq", {
+        retentionPeriod: Duration.days(14),
+        enforceSSL: true,
+        encryption: QueueEncryption.SQS_MANAGED,
+      });
+      this.githubQueue = new Queue(this, "GithubQueue", {
+        retentionPeriod: Duration.days(4),
+        visibilityTimeout: Duration.minutes(12),
+        enforceSSL: true,
+        encryption: QueueEncryption.SQS_MANAGED,
+        deadLetterQueue: { queue: this.githubDlq, maxReceiveCount: 5 },
+      });
+    }
+
     // The SQS FIFO command consumer. 15-minute timeout (the ceiling): a turn
     // is AWAITed in the invocation (holding the FIFO MessageGroupId =
     // sessionId) until it ends or the invocation nears its deadline, at which
@@ -718,6 +792,15 @@ export class KiroRemote extends Construct {
         WORKSPACE_ROOT: "/tmp/workspace",
         // Consumer only: the caps publisher never detaches a turn.
         CATCH_UP_QUEUE_URL: this.catchUpQueue.queueUrl,
+        // With the GitHub feature on, the consumer drains wake items and asks
+        // the GitHub consumer to harvest PR links when a turn settles. It holds
+        // no GitHub credentials.
+        ...(this.githubQueue
+          ? {
+              COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+              GITHUB_QUEUE_URL: this.githubQueue.queueUrl,
+            }
+          : {}),
       },
     });
 
@@ -765,6 +848,10 @@ export class KiroRemote extends Construct {
     this.catchUpQueue.grantSendMessages(this.consumerFn);
     this.catchUpQueue.grantConsumeMessages(this.consumerFn);
     this.kiroApiKeySecret.grantRead(this.consumerFn);
+    if (this.githubQueue) {
+      this.commandQueue.grantSendMessages(this.consumerFn);
+      this.githubQueue.grantSendMessages(this.consumerFn);
+    }
 
     this.table.grantReadWriteData(this.capsPublisherFn);
     this.kiroApiKeySecret.grantRead(this.capsPublisherFn);
@@ -786,5 +873,84 @@ export class KiroRemote extends Construct {
       // scheduled rule (and the API's empty-caps fallback) cover the gap.
       executeOnHandlerChange: true,
     });
+
+    /* ------------------------------ GitHub ------------------------------- */
+
+    if (props.githubAppSecretArn && this.githubQueue) {
+      const appSecret = Secret.fromSecretCompleteArn(
+        this,
+        "GithubAppSecret",
+        props.githubAppSecretArn,
+      );
+      const githubEnv: Record<string, string> = {
+        TABLE_NAME: this.table.tableName,
+        BUCKET_NAME: this.bucket.bucketName,
+        GITHUB_APP_SECRET_ARN: props.githubAppSecretArn,
+        GITHUB_QUEUE_URL: this.githubQueue.queueUrl,
+        ALLOWED_REPOS: props.allowedRepos.join(","),
+      };
+
+      // Ingress: verifies the signature, dedupes, stores and enqueues; returns
+      // inside GitHub's 10 s limit (so a 9 s timeout). Reads the App secret.
+      const webhookFn = new LambdaFunction(this, "GithubWebhookFn", {
+        runtime: NODEJS_26_X,
+        handler: "index.handler",
+        code: props.githubWebhookCode ?? placeholderLambdaCode(),
+        memorySize: 512,
+        timeout: Duration.seconds(9),
+        environment: githubEnv,
+      });
+      this.githubWebhookFn = webhookFn;
+      this.table.grantReadWriteData(webhookFn);
+      this.bucket.grantReadWrite(webhookFn);
+      this.githubQueue.grantSendMessages(webhookFn);
+      appSecret.grantRead(webhookFn);
+
+      // The route has NO OAuth authentication: the X-Hub-Signature-256 check in
+      // the function is the authentication (see SECURITY.md).
+      this.httpApi.addRoutes({
+        path: "/github/webhook",
+        methods: [HttpMethod.POST],
+        integration: new HttpLambdaIntegration("GithubWebhookIntegration", webhookFn),
+      });
+
+      // Consumer: routes deliveries, links PRs, writes inbox items, drains. Also
+      // run by the redelivery schedule, so exactly two functions read the secret.
+      const consumerFn = new LambdaFunction(this, "GithubConsumerFn", {
+        runtime: NODEJS_26_X,
+        handler: "index.handler",
+        code: props.githubConsumerCode ?? placeholderLambdaCode(),
+        memorySize: 512,
+        timeout: Duration.seconds(120),
+        environment: {
+          ...githubEnv,
+          COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+          GITHUB_TRUSTED_LOGINS: (props.githubTrustedLogins ?? []).join(","),
+          GITHUB_AGENT_LOGINS: (props.githubAgentLogins ?? []).join(","),
+          GITHUB_AUTO_CLOSE_ON_MERGE: props.githubAutoCloseOnMerge ?? "off",
+        },
+      });
+      this.githubConsumerFn = consumerFn;
+      this.table.grantReadWriteData(consumerFn);
+      this.bucket.grantRead(consumerFn);
+      this.commandQueue.grantSendMessages(consumerFn);
+      this.githubQueue.grantSendMessages(consumerFn);
+      appSecret.grantRead(consumerFn);
+      consumerFn.addEventSource(
+        new SqsEventSource(this.githubQueue, { batchSize: 5, reportBatchItemFailures: true }),
+      );
+
+      // Missed deliveries: GitHub does not retry failed deliveries, so every 15
+      // minutes the consumer lists the App's failed deliveries and asks GitHub
+      // to redeliver up to 50 of them.
+      new Rule(this, "GithubRedeliverySchedule", {
+        schedule: Schedule.rate(Duration.minutes(15)),
+        targets: [
+          new LambdaFunctionTarget(consumerFn, {
+            event: RuleTargetInput.fromObject({ kind: "redeliver" }),
+          }),
+        ],
+      });
+    }
   }
 }

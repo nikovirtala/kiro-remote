@@ -135,7 +135,7 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     {
       id: "AwsSolutions-APIG4",
       reason:
-        "Authorization runs INSIDE the Lambda via authenticate() (never an API Gateway authorizer); the OAuth facade endpoints and metadata are intentionally public per RFC 9728/8414.",
+        "Authorization runs INSIDE the Lambda via authenticate() (never an API Gateway authorizer); the OAuth facade endpoints and metadata are intentionally public per RFC 9728/8414. The optional POST /github/webhook route (only deployed with githubAppSecretArn) is public on purpose too: GitHub cannot send a bearer token, so the function authenticates every request by its X-Hub-Signature-256 HMAC over the raw body before parsing it (SECURITY.md, packages/github/src/ingress.ts).",
     },
     // S3 server access logging omitted; bucket blocks public access + SSE + SSL.
     {
@@ -148,8 +148,13 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
     {
       id: "AwsSolutions-SQS3",
       reason:
-        "No DLQ: command messages are idempotent and left for visibility-timeout redelivery; catch-up messages are re-scheduled by the consumer until the turn settles or hits its 6 h limit; both expire via the retention period rather than dead-lettering.",
+        "No DLQ on the command and catch-up queues: command messages are idempotent and left for visibility-timeout redelivery; catch-up messages are re-scheduled by the consumer until the turn settles or hits its 6 h limit; both expire via the retention period rather than dead-lettering. (The optional GitHub queue DOES have a DLQ; the DLQ itself is the terminal queue and has none.)",
     },
+    // GitHub feature (optional, only when githubAppSecretArn is set): the webhook
+    // and consumer functions are Zip Lambdas on the same nodejs26.x shim and use
+    // the same scoped grants (table/bucket/queue/secret), so the L1 / IAM4 / IAM5
+    // acknowledgments above cover them by cascade; the public route is covered by
+    // APIG4 above (signature-authenticated), the DLQ-less terminal queue by SQS3.
     // ---------------------------------------------------------------------
     // Lambda bridge. The SQS FIFO consumer and the caps-publisher are
     // container-image (DockerImageFunction) Lambdas whose Node version comes
