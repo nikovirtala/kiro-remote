@@ -19,11 +19,15 @@ import {
   EventsQuerySchema,
   type JsonSchema,
   LaunchSessionSchema,
+  LinkPullRequestSchema,
+  LinkSchema,
   ListSessionsQuerySchema,
   requiredScope,
   SessionSchema,
   TurnSchema,
   toOpenApiSchema,
+  UnmatchedDeliverySchema,
+  UnmatchedQuerySchema,
 } from "@nikovirtala/kiro-remote-core";
 
 /** The resource-server scope identifier prefix advertised in the scheme. */
@@ -254,6 +258,49 @@ export function buildOpenApiDocument(config: FacadeConfig): Record<string, unkno
         parameters: [pathParam("id"), pathParam("requestId"), idempotencyHeader],
         requestBody: jsonBody(toOpenApiSchema(AnswerPermissionSchema)),
         responses: { "202": jsonResponseSpec("Accepted"), ...errorResponses },
+      },
+    },
+    "/sessions/{id}/links": {
+      post: {
+        operationId: "linkPullRequest",
+        summary:
+          "Link a pull request to the session by hand (owner/repo#n or a PR URL). A PR links to at most one session; a conflicting link is refused with 409.",
+        security: securityFor(ri, "link"),
+        parameters: [pathParam("id"), idempotencyHeader],
+        requestBody: jsonBody(toOpenApiSchema(LinkPullRequestSchema)),
+        responses: {
+          "200": jsonResponseSpec("Already linked to this session", toOpenApiSchema(LinkSchema)),
+          "201": jsonResponseSpec("Linked", toOpenApiSchema(LinkSchema)),
+          ...errorResponses,
+        },
+      },
+    },
+    "/sessions/{id}/links/{owner}/{repo}/{n}": {
+      delete: {
+        operationId: "unlinkPullRequest",
+        summary: "Remove a pull request link from the session.",
+        security: securityFor(ri, "link"),
+        parameters: [pathParam("id"), pathParam("owner"), pathParam("repo"), pathParam("n")],
+        responses: { "204": jsonResponseSpec("Unlinked"), ...errorResponses },
+      },
+    },
+    "/github/unmatched": {
+      get: {
+        operationId: "listUnmatchedDeliveries",
+        summary:
+          "Recent GitHub deliveries for allowed repos that matched no session link, so they can be linked by hand.",
+        security: securityFor(ri, "read"),
+        parameters: queryParams(toOpenApiSchema(UnmatchedQuerySchema)),
+        responses: {
+          "200": jsonResponseSpec("Unmatched deliveries", {
+            type: "object",
+            properties: {
+              deliveries: { type: "array", items: toOpenApiSchema(UnmatchedDeliverySchema) },
+            },
+            required: ["deliveries"],
+          }),
+          ...errorResponses,
+        },
       },
     },
     "/sessions/{id}/config": {

@@ -1,5 +1,5 @@
 /**
- * The 14 MCP tools.
+ * The 16 MCP tools.
  *
  * Each tool is defined ONCE here with its name, description, required core
  * {@link Action} (which authorize() turns into a scope), MCP annotations
@@ -28,6 +28,7 @@ import {
   EventsQuerySchema,
   type JsonSchema,
   LaunchSessionSchema,
+  LinkPullRequestSchema,
   ListSessionsQuerySchema,
   type Principal,
   toMcpInputSchema,
@@ -93,6 +94,9 @@ const AnswerPermissionToolSchema = AnswerPermissionSchema.extend({
 /** kiro_set_config: the ConfigPatch body plus the session. The core refine is kept. */
 const SetConfigToolSchema = ConfigPatchSchema.safeExtend(SessionIdField);
 
+/** kiro_link_pull_request / kiro_unlink_pull_request: the link body plus the session. */
+const LinkToolSchema = LinkPullRequestSchema.extend(SessionIdField);
+
 /** kiro_list_permissions. */
 const ListPermissionsSchema = z.object({
   ...SessionIdField,
@@ -111,10 +115,12 @@ export const CORE_SCHEMA_FOR_TOOL: Readonly<Record<string, z.ZodType>> = {
   kiro_wait_for_events: EventsQuerySchema,
   kiro_answer_permission: AnswerPermissionSchema,
   kiro_set_config: ConfigPatchSchema,
+  kiro_link_pull_request: LinkPullRequestSchema,
+  kiro_unlink_pull_request: LinkPullRequestSchema,
 };
 
 /**
- * The canonical list of the 14 tools, in a stable order. Each handler calls
+ * The canonical list of the 16 tools, in a stable order. Each handler calls
  * only the client interface, so the SAME definitions serve both transports.
  */
 export const TOOL_DEFS: readonly ToolDef[] = [
@@ -287,6 +293,32 @@ export const TOOL_DEFS: readonly ToolDef[] = [
     },
   },
   {
+    name: "kiro_link_pull_request",
+    description:
+      "Link a pull request (owner/repo#n or a github.com URL) to a session so GitHub activity on it wakes the session. The PR's repo must be one of the session's repos; a PR links to at most one session.",
+    action: "link",
+    inputZod: LinkToolSchema,
+    annotations: { title: "Link Pull Request", readOnlyHint: false, openWorldHint: true },
+    async run(client, principal, args) {
+      const input = LinkToolSchema.parse(args);
+      const link = await client.linkPullRequest(principal, input.sessionId, { pr: input.pr });
+      return { sessionId: input.sessionId, link };
+    },
+  },
+  {
+    name: "kiro_unlink_pull_request",
+    description: "Remove a pull request link from a session.",
+    action: "link",
+    inputZod: LinkToolSchema,
+    // Not destructive: a link is reversible (link it again).
+    annotations: { title: "Unlink Pull Request", readOnlyHint: false, openWorldHint: true },
+    async run(client, principal, args) {
+      const input = LinkToolSchema.parse(args);
+      await client.unlinkPullRequest(principal, input.sessionId, { pr: input.pr });
+      return { sessionId: input.sessionId, pr: input.pr, status: "unlinked" };
+    },
+  },
+  {
     name: "kiro_cancel_turn",
     description: "Cancel the active turn on a session.",
     action: "cancel",
@@ -322,7 +354,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
 ];
 
-/** The 14 tool names, in order. */
+/** The 16 tool names, in order. */
 export const TOOL_NAMES: readonly string[] = TOOL_DEFS.map((t) => t.name);
 
 /** Look up a tool definition by name. */

@@ -19,6 +19,8 @@ const EXPECTED_TOOLS = [
   "kiro_list_permissions",
   "kiro_answer_permission",
   "kiro_set_config",
+  "kiro_link_pull_request",
+  "kiro_unlink_pull_request",
   "kiro_cancel_turn",
   "kiro_delete_session",
 ];
@@ -34,9 +36,9 @@ const READ_TOOLS = new Set([
 ]);
 
 describe("tool catalog", () => {
-  it("exposes exactly the 14 named tools in a stable order", () => {
+  it("exposes exactly the 16 named tools in a stable order", () => {
     expect(TOOL_NAMES).toEqual(EXPECTED_TOOLS);
-    expect(TOOL_DEFS).toHaveLength(14);
+    expect(TOOL_DEFS).toHaveLength(16);
   });
 
   it("sets readOnlyHint on read tools and not on write tools", () => {
@@ -70,6 +72,9 @@ describe("tool catalog", () => {
     expect(byName.kiro_list_permissions).toBe("read");
     expect(byName.kiro_answer_permission).toBe("answerPermission");
     expect(byName.kiro_set_config).toBe("config");
+    expect(byName.kiro_link_pull_request).toBe("link");
+    expect(byName.kiro_unlink_pull_request).toBe("link");
+    expect(requiredScope("link")).toBe("sessions:write");
     expect(byName.kiro_cancel_turn).toBe("cancel");
     expect(byName.kiro_delete_session).toBe("delete");
   });
@@ -117,5 +122,38 @@ describe("scope mapping matches core requiredScope", () => {
     expect(scopeFor.kiro_answer_permission).toBe("sessions:write");
     expect(scopeFor.kiro_cancel_turn).toBe("sessions:write");
     expect(scopeFor.kiro_delete_session).toBe("sessions:delete");
+  });
+});
+
+describe("link tools", () => {
+  const calls: Array<[string, unknown[]]> = [];
+  const client = {
+    async linkPullRequest(_p: unknown, sessionId: string, args: { pr: string }) {
+      calls.push(["link", [sessionId, args]]);
+      return { pr: "octo/repo#7", linkedBy: "manual" };
+    },
+    async unlinkPullRequest(_p: unknown, sessionId: string, args: { pr: string }) {
+      calls.push(["unlink", [sessionId, args]]);
+    },
+  } as never;
+  const principal = { sub: "u", clientId: "c", scopes: ["sessions:write"] } as never;
+
+  it("kiro_link_pull_request links through the client and returns the link", async () => {
+    const tool = TOOL_DEFS.find((t) => t.name === "kiro_link_pull_request");
+    const out = await tool?.run(client, principal, { sessionId: "S1", pr: "octo/repo#7" });
+    expect(out).toEqual({ sessionId: "S1", link: { pr: "octo/repo#7", linkedBy: "manual" } });
+    expect(calls).toContainEqual(["link", ["S1", { pr: "octo/repo#7" }]]);
+  });
+
+  it("kiro_unlink_pull_request unlinks through the client", async () => {
+    const tool = TOOL_DEFS.find((t) => t.name === "kiro_unlink_pull_request");
+    const out = await tool?.run(client, principal, { sessionId: "S1", pr: "octo/repo#7" });
+    expect(out).toMatchObject({ sessionId: "S1", status: "unlinked" });
+    expect(calls).toContainEqual(["unlink", ["S1", { pr: "octo/repo#7" }]]);
+  });
+
+  it("rejects something that is not a pull request reference", async () => {
+    const tool = TOOL_DEFS.find((t) => t.name === "kiro_link_pull_request");
+    await expect(tool?.run(client, principal, { sessionId: "S1", pr: "nope" })).rejects.toThrow();
   });
 });

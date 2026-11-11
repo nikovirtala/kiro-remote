@@ -247,6 +247,8 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
       repo,
       queue,
       allowedRepos: splitList(env.ALLOWED_REPOS),
+      // Set by the construct only when the GitHub feature is deployed.
+      prTrailer: env.GITHUB_PR_TRAILER === "on" ? "on" : "off",
     },
     repo,
     auth: {

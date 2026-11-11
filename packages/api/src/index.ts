@@ -33,6 +33,7 @@ export type {
   ClientCapabilities,
   ClientEvent,
   ClientEventsPage,
+  ClientLink,
   ClientPermission,
   ClientSession,
   ClientTurn,

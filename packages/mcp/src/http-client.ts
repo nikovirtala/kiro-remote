@@ -12,12 +12,13 @@
 import type {
   ClientCapabilities,
   ClientEventsPage,
+  ClientLink,
   ClientPermission,
   ClientSession,
   ClientTurn,
   KiroRemoteClient,
 } from "@nikovirtala/kiro-remote-api";
-import type { Principal } from "@nikovirtala/kiro-remote-core";
+import { type Principal, parsePrRef } from "@nikovirtala/kiro-remote-core";
 
 /** A minimal fetch signature so tests inject a fake without a real network. */
 export type FetchLike = (
@@ -248,5 +249,31 @@ export class HttpClient implements KiroRemoteClient {
     await this.request("PATCH", `/sessions/${encodeURIComponent(sessionId)}/config`, {
       body: args,
     });
+  }
+
+  async linkPullRequest(
+    _principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+  ): Promise<ClientLink> {
+    return (await this.request("POST", `/sessions/${encodeURIComponent(sessionId)}/links`, {
+      body: args,
+      idempotent: true,
+    })) as ClientLink;
+  }
+
+  async unlinkPullRequest(
+    _principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+  ): Promise<void> {
+    const ref = parsePrRef(args.pr);
+    if (!ref) {
+      throw new Error("pr must be owner/repo#number or a GitHub pull request URL");
+    }
+    await this.request(
+      "DELETE",
+      `/sessions/${encodeURIComponent(sessionId)}/links/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`,
+    );
   }
 }

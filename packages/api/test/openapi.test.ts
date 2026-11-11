@@ -57,6 +57,9 @@ describe("operation scopes match authorize()'s action->scope mapping", () => {
     listPermissions: "read",
     answerPermission: "answerPermission",
     setConfig: "config",
+    linkPullRequest: "link",
+    unlinkPullRequest: "link",
+    listUnmatchedDeliveries: "read",
   };
 
   test("every operation's security scope equals requiredScope(action), resource-prefixed", () => {

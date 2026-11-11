@@ -47,6 +47,19 @@ export interface ClientSession {
   eventSeq: number;
   createdAt: string;
   updatedAt: string;
+  /** Linked pull requests (present when the session is fetched by id). */
+  links?: ClientLink[];
+}
+
+/** A pull request linked to a session. */
+export interface ClientLink {
+  pr: string;
+  repo: string;
+  number: number;
+  linkedBy: "harvest" | "trailer" | "manual";
+  linkedAt: string;
+  prState: "open" | "closed" | "merged" | "unknown";
+  headSha: string | null;
 }
 
 /** A single normalized event row. */
@@ -76,6 +89,8 @@ export interface ClientTurn {
   stopReason: string | null;
   startedAt: string | null;
   endedAt: string | null;
+  /** Why the turn started (a person, or a GitHub event). */
+  trigger?: { source: "user" | "github"; deliveryIds: string[] };
 }
 
 /** A permission request row. */
@@ -169,6 +184,16 @@ export interface KiroRemoteClient {
     sessionId: string,
     args: { model?: string; effort?: string; mode?: string },
   ): Promise<void>;
+
+  /** Link a pull request (`owner/repo#n` or a URL) to a session. */
+  linkPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+  ): Promise<ClientLink>;
+
+  /** Remove a pull request link from a session. */
+  unlinkPullRequest(principal: Principal, sessionId: string, args: { pr: string }): Promise<void>;
 }
 
 /** The request context handed to the MCP transport handler by the router. */

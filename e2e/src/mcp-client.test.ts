@@ -61,7 +61,7 @@ describe("connectMcp", () => {
     const mcp = await connectMcp(s.baseUrl, { accessToken: async () => TOKEN });
     const names = await mcp.listToolNames();
     expect(names).toEqual([...TOOL_NAMES]);
-    expect(names).toHaveLength(14);
+    expect(names).toHaveLength(16);
     const res = await mcp.callTool("kiro_list_models", {});
     expect(res.isError).toBe(false);
     expect(res.structured?.models).toEqual(["m1"]);
