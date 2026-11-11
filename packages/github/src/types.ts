@@ -50,6 +50,13 @@ export interface RouteConfig {
   trustedLogins: readonly string[];
   /** The Kiro agent's own GitHub identities; their comments never wake a session. */
   agentLogins: readonly string[];
+  /**
+   * Slugs of the GitHub Apps the Kiro agent acts through (lower-cased compare).
+   * The agent opens PRs as `kiro-agent[bot]` but comments as the user, through
+   * the `kiro-agent` app; `performed_via_github_app` is the only mark that tells
+   * such a comment from one the user wrote. Without this the agent wakes itself.
+   */
+  agentApps: readonly string[];
   autoCloseOnMerge: "off" | "after_turn";
   /** Debounce for failing-check wakes. */
   checksDebounceMs: number;

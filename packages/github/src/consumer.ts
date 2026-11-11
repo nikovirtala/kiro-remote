@@ -31,6 +31,8 @@ export interface ConsumerConfig {
   trustedLogins: readonly string[];
   /** The Kiro agent's own GitHub identities. Also required to author a trailer-linked PR when set. */
   agentLogins: readonly string[];
+  /** Slugs of the GitHub Apps the agent comments through (see RouteConfig.agentApps). */
+  agentApps: readonly string[];
   autoCloseOnMerge: "off" | "after_turn";
   checksDebounceMs: number;
 }
@@ -181,6 +183,7 @@ export async function processDelivery(
   const routeConfig: RouteConfig = {
     trustedLogins: trusted,
     agentLogins: deps.config.agentLogins,
+    agentApps: deps.config.agentApps,
     autoCloseOnMerge: deps.config.autoCloseOnMerge,
     checksDebounceMs: deps.config.checksDebounceMs,
   };

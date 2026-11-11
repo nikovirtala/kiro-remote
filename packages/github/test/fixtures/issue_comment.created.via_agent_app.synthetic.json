@@ -1,0 +1,52 @@
+{
+  "action": "created",
+  "issue": {
+    "url": "https://api.github.com/repos/octo/repo/issues/7",
+    "html_url": "https://github.com/octo/repo/pull/7",
+    "number": 7,
+    "title": "docs: fix typo in README",
+    "user": {
+      "login": "kiro-agent[bot]",
+      "type": "Bot"
+    },
+    "state": "open",
+    "pull_request": {
+      "url": "https://api.github.com/repos/octo/repo/pulls/7",
+      "html_url": "https://github.com/octo/repo/pull/7"
+    }
+  },
+  "comment": {
+    "id": 5002,
+    "user": {
+      "login": "octocat",
+      "type": "User"
+    },
+    "body": "ACK",
+    "html_url": "https://github.com/octo/repo/pull/7#issuecomment-5002",
+    "performed_via_github_app": {
+      "id": 2331586,
+      "slug": "kiro-agent",
+      "owner": {
+        "login": "kiro-agent",
+        "type": "Organization"
+      }
+    }
+  },
+  "repository": {
+    "id": 1001,
+    "full_name": "octo/repo",
+    "name": "repo",
+    "owner": {
+      "login": "octo",
+      "type": "User"
+    },
+    "html_url": "https://github.com/octo/repo"
+  },
+  "sender": {
+    "login": "octocat",
+    "type": "User"
+  },
+  "installation": {
+    "id": 424242
+  }
+}

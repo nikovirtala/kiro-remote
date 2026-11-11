@@ -16,6 +16,12 @@ import type { ConsumerConfig } from "../consumer.ts";
 
 const SECRET_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * The GitHub App Kiro's agent acts through. Its PR comments are posted as the
+ * user with `performed_via_github_app.slug` set to this (seen in a live run).
+ */
+export const KIRO_AGENT_APP_SLUGS: readonly string[] = ["kiro-agent"];
+
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
   if (!v) {
@@ -36,6 +42,7 @@ export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Con
   return {
     trustedLogins: splitList(env.GITHUB_TRUSTED_LOGINS),
     agentLogins: splitList(env.GITHUB_AGENT_LOGINS),
+    agentApps: KIRO_AGENT_APP_SLUGS,
     autoCloseOnMerge: env.GITHUB_AUTO_CLOSE_ON_MERGE === "after_turn" ? "after_turn" : "off",
     checksDebounceMs: GITHUB_CHECKS_DEBOUNCE_MS,
   };
