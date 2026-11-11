@@ -16,16 +16,19 @@ app. kiro-remote only does two things:
 
 ## How it works
 
-```text
-GitHub ──webhook──▶ POST /github/webhook ──▶ GitHub queue ──▶ GitHub consumer
-         (signature)  verify · dedupe · store   (DLQ)          route() · link · inbox
-                                                                    │
-bridge: a turn settles ──▶ harvest request ─────────────────────────┤
-        │                                                           ▼
-        └──────────▶ drainInbox(sessionId) ◀────────────── Inbox (per session)
-                          │ idle? one prompt turn for all pending items
-                          ▼
-                    FIFO command queue ──▶ bridge ──▶ wake turn
+```mermaid
+flowchart TD
+    gh[GitHub] -->|"webhook (signature)"| ingress["POST /github/webhook<br/>verify · dedupe · store"]
+    ingress --> queue["GitHub queue<br/>(DLQ)"]
+    queue --> consumer["GitHub consumer<br/>route() · link · inbox"]
+    settle["bridge: a turn settles"] --> harvest[harvest request]
+    harvest --> consumer
+    consumer --> inbox["Inbox (per session)"]
+    settle --> drain["drainInbox(sessionId)"]
+    inbox --> drain
+    drain -->|"idle? one prompt turn<br/>for all pending items"| fifo[FIFO command queue]
+    fifo --> bridge[bridge]
+    bridge --> wake[wake turn]
 ```
 
 - **Webhook ingress** (`packages/github/src/ingress.ts`) verifies
