@@ -1,0 +1,94 @@
+{
+  "_note": "SYNTHETIC: hand-written to the shape of normalized events; NOT recorded from a live Kiro session (the step 1 audit was not run: E2E_REPO was unavailable).",
+  "events": [
+    {
+      "seq": 1,
+      "turnId": "T1",
+      "type": "tool.call",
+      "rawType": "tool_call",
+      "payload": {
+        "type": "tool.call",
+        "toolCallId": "tc1",
+        "title": "gh pr create --title \"docs: fix typo\"",
+        "status": "pending",
+        "payload": {
+          "rawInput": {
+            "command": "gh pr create --title 'docs: fix typo' --body 'Kiro-Remote-Session: 01HZX0000000000000000000S1'"
+          }
+        }
+      }
+    },
+    {
+      "seq": 2,
+      "turnId": "T1",
+      "type": "tool.update",
+      "rawType": "tool_call_update",
+      "payload": {
+        "type": "tool.update",
+        "toolCallId": "tc1",
+        "status": "completed",
+        "payload": {
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "https://github.com/octo/repo/pull/7\n"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "seq": 3,
+      "turnId": "T1",
+      "type": "message.chunk",
+      "rawType": "agent_message_chunk",
+      "payload": {
+        "type": "message.chunk",
+        "content": {
+          "type": "text",
+          "text": "I opened https://github.com/octo/repo/pull/7 with the fix. "
+        }
+      }
+    },
+    {
+      "seq": 4,
+      "turnId": "T1",
+      "type": "message.chunk",
+      "rawType": "agent_message_chunk",
+      "payload": {
+        "type": "message.chunk",
+        "content": {
+          "type": "text",
+          "text": "Related earlier work: https://github.com/octo/repo/pull/3 and a PR in another repo https://github.com/other/thing/pull/12."
+        }
+      }
+    },
+    {
+      "seq": 5,
+      "turnId": "T1",
+      "type": "thought.chunk",
+      "rawType": "agent_thought_chunk",
+      "payload": {
+        "type": "thought.chunk",
+        "content": {
+          "type": "text",
+          "text": "internal: https://github.com/octo/repo/pull/99 (thoughts are not scanned)"
+        }
+      }
+    },
+    {
+      "seq": 6,
+      "turnId": "T1",
+      "type": "session.info",
+      "rawType": "session_info_update",
+      "payload": {
+        "type": "session.info",
+        "kind": "turn_end",
+        "payload": {}
+      }
+    }
+  ]
+}

@@ -13,6 +13,21 @@ export const eventSk = (seq: number): string => `EVT#${padSeq(seq)}`;
 export const EVENT_SK_MAX = `EVT#${"9".repeat(EVENT_SEQ_WIDTH)}`;
 export const permSk = (requestId: string): string => `PERM#${requestId}`;
 
+/** GitHub PR link (PK GHPR#<owner>/<repo>#<number>, SK LINK) and its reverse (SESSION#<id>, LINK#...). */
+export const prKey = (owner: string, repo: string, number: number): string =>
+  `${owner}/${repo}#${number}`;
+export const ghPrPk = (key: string): string => `GHPR#${key}`;
+export const GH_LINK_SK = "LINK";
+export const sessionLinkSk = (key: string): string => `LINK#${key}`;
+export const SESSION_LINK_PREFIX = "LINK#";
+/** Webhook delivery record + dedupe marker (GHDLV#<X-GitHub-Delivery>). */
+export const ghDeliveryPk = (deliveryId: string): string => `GHDLV#${deliveryId}`;
+/** Per-session inbox of typed wake items (SESSION#<id>, INBOX#<ulid>). */
+export const inboxSk = (ulid: string): string => `INBOX#${ulid}`;
+export const INBOX_PREFIX = "INBOX#";
+/** Deliveries for allowed repos that matched no session link (one partition, newest last). */
+export const GH_UNMATCHED_PK = "GHUNMATCHED";
+
 export const CONFIG_PK = "CONFIG";
 export const CAPS_SK = "CAPS";
 export const MODELS_SK = "MODELS";

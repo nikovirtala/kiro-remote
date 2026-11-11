@@ -10,6 +10,7 @@
 
 import { z } from "zod";
 import { EVENTS_MAX_WAIT_SECONDS } from "../config.ts";
+import { parsePrRef } from "../github/pr-ref.ts";
 
 /* -------------------------------------------------------------------------- */
 /* Shared primitives                                                          */
@@ -55,6 +56,24 @@ export const LaunchSessionSchema = z.object({
   effort: EffortLevelSchema.optional(),
 });
 export type LaunchSessionInput = z.infer<typeof LaunchSessionSchema>;
+
+/** POST /v1/sessions/{id}/links: `owner/repo#n` or a github.com pull request URL. */
+export const LinkPullRequestSchema = z.object({
+  pr: z
+    .string()
+    .min(1)
+    .refine(
+      (v) => parsePrRef(v) !== null,
+      "pr must be owner/repo#number or a GitHub pull request URL",
+    ),
+});
+export type LinkPullRequestInput = z.infer<typeof LinkPullRequestSchema>;
+
+/** GET /v1/github/unmatched (query) */
+export const UnmatchedQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+export type UnmatchedQuery = z.infer<typeof UnmatchedQuerySchema>;
 
 /** GET /v1/sessions (query) */
 export const ListSessionsQuerySchema = z.object({
@@ -114,6 +133,40 @@ export type ConfigPatchInput = z.infer<typeof ConfigPatchSchema>;
 /* Response bodies                                                            */
 /* -------------------------------------------------------------------------- */
 
+export const LinkSchema = z.object({
+  pr: z.string(),
+  repo: z.string(),
+  number: z.number().int(),
+  linkedBy: z.union([z.literal("harvest"), z.literal("trailer"), z.literal("manual")]),
+  linkedAt: z.string(),
+  prState: z.union([
+    z.literal("open"),
+    z.literal("closed"),
+    z.literal("merged"),
+    z.literal("unknown"),
+  ]),
+  headSha: z.string().nullable(),
+});
+export type LinkView = z.infer<typeof LinkSchema>;
+
+export const TurnTriggerSchema = z.object({
+  source: z.union([z.literal("user"), z.literal("github")]),
+  deliveryIds: z.array(z.string()),
+});
+export type TurnTriggerView = z.infer<typeof TurnTriggerSchema>;
+
+export const UnmatchedDeliverySchema = z.object({
+  deliveryId: z.string(),
+  event: z.string(),
+  action: z.string().nullable(),
+  repo: z.string(),
+  number: z.number().int().nullable(),
+  sender: z.string().nullable(),
+  receivedAt: z.string(),
+  url: z.string().nullable(),
+});
+export type UnmatchedDeliveryView = z.infer<typeof UnmatchedDeliverySchema>;
+
 export const SessionSchema = z.object({
   id: z.string(),
   kiroSessionId: z.string().nullable(),
@@ -127,6 +180,8 @@ export const SessionSchema = z.object({
   eventSeq: z.number().int(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** Linked pull requests. Present on GET /v1/sessions/{id} only. */
+  links: z.array(LinkSchema).optional(),
 });
 export type SessionView = z.infer<typeof SessionSchema>;
 
@@ -137,6 +192,8 @@ export const TurnSchema = z.object({
   stopReason: z.string().nullable(),
   startedAt: z.string().nullable(),
   endedAt: z.string().nullable(),
+  /** Why the turn started. Absent for turns recorded before triggers existed. */
+  trigger: TurnTriggerSchema.optional(),
 });
 export type TurnView = z.infer<typeof TurnSchema>;
 

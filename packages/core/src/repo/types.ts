@@ -36,6 +36,16 @@ export interface SessionMetaItem {
   GSI1SK: string; // updatedAt
 }
 
+/** Why a turn started. `github` turns carry the webhook delivery ids that caused them. */
+export interface TurnTrigger {
+  source: "user" | "github";
+  deliveryIds: string[];
+  /** Inbox item ids folded into this turn (wake turns only). */
+  inboxIds?: string[];
+  /** True when the session should be deleted once this turn completes (autoCloseOnMerge). */
+  autoClose?: boolean;
+}
+
 export interface TurnItem {
   PK: string; // SESSION#<id>
   SK: string; // TURN#<ulid>
@@ -48,6 +58,99 @@ export interface TurnItem {
   endedAt: string | null;
   /** Metering stored exactly as given by turn_completion, or null. Never estimated. */
   metering: Record<string, unknown> | null;
+  /** Why this turn started. Absent on turns written before triggers existed (read as user). */
+  trigger?: TurnTrigger;
+}
+
+export type PrState = "open" | "closed" | "merged" | "unknown";
+export type LinkMethod = "harvest" | "trailer" | "manual";
+
+/** PK GHPR#<owner>/<repo>#<n>, SK LINK: the PR -> session link (a PR links to at most one session). */
+export interface PrLinkItem {
+  PK: string;
+  SK: "LINK";
+  /** owner/repo#n */
+  pr: string;
+  repo: string; // owner/repo
+  number: number;
+  sessionId: string;
+  linkedBy: LinkMethod;
+  linkedAt: string;
+  prState: PrState;
+  headSha: string | null;
+}
+
+/** PK SESSION#<id>, SK LINK#<owner>/<repo>#<n>: the reverse lookup. */
+export interface SessionLinkItem {
+  PK: string;
+  SK: string;
+  pr: string;
+  repo: string;
+  number: number;
+  sessionId: string;
+  linkedBy: LinkMethod;
+  linkedAt: string;
+}
+
+export type DeliveryStatus = "received" | "processed" | "unmatched" | "ignored" | "failed";
+
+/** PK GHDLV#<delivery id>, SK A: dedupe marker + the raw delivery (S3 pointer when large). */
+export interface DeliveryItem {
+  PK: string;
+  SK: "A";
+  deliveryId: string;
+  event: string;
+  action: string | null;
+  repo: string | null;
+  receivedAt: string;
+  status: DeliveryStatus;
+  /** The raw request body, or a pointer to it when over the inline threshold. */
+  body: string | S3Pointer;
+  ttl: number;
+}
+
+export type InboxStatus = "pending" | "delivered" | "dropped";
+
+/** PK SESSION#<id>, SK INBOX#<ulid>: one typed wake item waiting for the session to be idle. */
+export interface InboxItem {
+  PK: string;
+  SK: string;
+  id: string; // the ulid
+  sessionId: string;
+  source: "github";
+  /** First delivery that produced this item. */
+  deliveryId: string;
+  /** Every delivery folded into this item (debounce merge). */
+  deliveryIds: string[];
+  kind: string;
+  /** Merge key: items with the same key and kind inside the debounce window merge. */
+  key: string;
+  prompt: string;
+  /** Structured data the producer needs to re-render the prompt on merge. */
+  data: Record<string, unknown> | null;
+  createdAt: string;
+  /** Not drained before this time (debounce). ISO-8601. */
+  notBefore: string;
+  status: InboxStatus;
+  dropReason: string | null;
+  deliveredTurnId: string | null;
+  autoClose: boolean;
+  ttl: number;
+}
+
+/** PK GHUNMATCHED, SK <ts>#<delivery id>: a delivery for an allowed repo with no linked session. */
+export interface UnmatchedItem {
+  PK: string;
+  SK: string;
+  deliveryId: string;
+  event: string;
+  action: string | null;
+  repo: string;
+  number: number | null;
+  sender: string | null;
+  receivedAt: string;
+  url: string | null;
+  ttl: number;
 }
 
 export interface EventItem {

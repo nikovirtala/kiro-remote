@@ -1,0 +1,609 @@
+{
+  "_note": "RECORDED from a real cloud turn (kiro-cli engine, direct KAS) and redacted: repo/owner names replaced, _meta stripped, learnings and steering tool output dropped. The turn did NOT open a PR: the Kiro GitHub connection could not see the e2e repo. It shows the real shape of tool.call / tool.update / message.chunk events, which carry command text (rawInput.command), command output (rawOutput.output) and message text.",
+  "events": [
+    {
+      "type": "tool.call",
+      "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+      "title": "Run Command",
+      "status": "pending",
+      "payload": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+        "title": "Run Command",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {
+          "command": "ls /projects/sandbox; cd /projects/sandbox/<REPO> 2>/dev/null && git branch --show-current && git status --short && git symbolic-ref refs/remotes/origin/HEAD",
+          "run_in_background": false
+        }
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 1
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "ls /projects/sandbox; cd /projects/sandbox/<REPO> 2>/dev/null && git branch --show-current && git status --short && git symbolic-ref refs/remotes/origin/HEAD",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 2
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "ls /projects/sandbox; cd /projects/sandbox/<REPO> 2>/dev/null && git branch --show-current && git status --short && git symbolic-ref refs/remotes/origin/HEAD",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 3
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+      "status": "failed",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_013traajVDpVMdxvVqt6f3au",
+        "title": "Run Command",
+        "status": "failed",
+        "rawInput": {
+          "command": "ls /projects/sandbox; cd /projects/sandbox/<REPO> 2>/dev/null && git branch --show-current && git status --short && git symbolic-ref refs/remotes/origin/HEAD",
+          "run_in_background": false
+        },
+        "rawOutput": {
+          "output": "",
+          "exitCode": 1,
+          "message": "Output:\n\n\nExit Code: 1\n\nThis command failed while running with the OS sandbox enabled. Sandbox restrictions may have contributed; the exact cause could not be determined."
+        },
+        "content": [
+          {
+            "content": {
+              "text": "Output:\n\n\nExit Code: 1\n\nThis command failed while running with the OS sandbox enabled. Sandbox restrictions may have contributed; the exact cause could not be determined.",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default",
+          "sandboxFailure": {
+            "enabled": true
+          }
+        }
+      },
+      "seq": 4
+    },
+    {
+      "type": "tool.call",
+      "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+      "title": "Run Command",
+      "status": "pending",
+      "payload": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+        "title": "Run Command",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {
+          "command": "cd /projects/sandbox && git clone <E2E_REPO> 2>&1 | tail -3; ls -a",
+          "run_in_background": false
+        }
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 5
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "cd /projects/sandbox && git clone <E2E_REPO> 2>&1 | tail -3; ls -a",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 6
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "cd /projects/sandbox && git clone <E2E_REPO> 2>&1 | tail -3; ls -a",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 7
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+      "status": "completed",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_01EYfpCYG4SoN4WWuPwAp8GG",
+        "title": "Run Command",
+        "status": "completed",
+        "rawInput": {
+          "command": "cd /projects/sandbox && git clone <E2E_REPO> 2>&1 | tail -3; ls -a",
+          "run_in_background": false
+        },
+        "rawOutput": {
+          "output": "Cloning into '<REPO>'...\nremote: Github returned a client error.\nfatal: repository 'https://us-east-1.gateway.connections.autonomous-agents.kiro.dev/github/<E2E_REPO>.git/' not found\n.\n..\n.kiro\n",
+          "exitCode": 0,
+          "message": "Output:\nCloning into '<REPO>'...\nremote: Github returned a client error.\nfatal: repository 'https://us-east-1.gateway.connections.autonomous-agents.kiro.dev/github/<E2E_REPO>.git/' not found\n.\n..\n.kiro\n\n\nExit Code: 0"
+        },
+        "content": [
+          {
+            "content": {
+              "text": "Output:\nCloning into '<REPO>'...\nremote: Github returned a client error.\nfatal: repository 'https://us-east-1.gateway.connections.autonomous-agents.kiro.dev/github/<E2E_REPO>.git/' not found\n.\n..\n.kiro\n\n\nExit Code: 0",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 8
+    },
+    {
+      "type": "tool.call",
+      "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+      "title": "Run Command",
+      "status": "pending",
+      "payload": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+        "title": "Run Command",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {
+          "command": "gh api repos/<E2E_REPO> --jq '.full_name,.default_branch' 2>&1",
+          "run_in_background": false
+        }
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 9
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "gh api repos/<E2E_REPO> --jq '.full_name,.default_branch' 2>&1",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 10
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "gh api repos/<E2E_REPO> --jq '.full_name,.default_branch' 2>&1",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 11
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+      "status": "failed",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_017Wbh27AwLjpbJpkyVhGp7S",
+        "title": "Run Command",
+        "status": "failed",
+        "rawInput": {
+          "command": "gh api repos/<E2E_REPO> --jq '.full_name,.default_branch' 2>&1",
+          "run_in_background": false
+        },
+        "rawOutput": {
+          "output": "{\"message\":\"Github returned a client error.\"}gh: Github returned a client error. (HTTP 404)\n",
+          "exitCode": 1,
+          "message": "Output:\n{\"message\":\"Github returned a client error.\"}gh: Github returned a client error. (HTTP 404)\n\n\nExit Code: 1\n\nThis command failed while running with the OS sandbox enabled. Sandbox restrictions may have contributed; the exact cause could not be determined."
+        },
+        "content": [
+          {
+            "content": {
+              "text": "Output:\n{\"message\":\"Github returned a client error.\"}gh: Github returned a client error. (HTTP 404)\n\n\nExit Code: 1\n\nThis command failed while running with the OS sandbox enabled. Sandbox restrictions may have contributed; the exact cause could not be determined.",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default",
+          "sandboxFailure": {
+            "enabled": true
+          }
+        }
+      },
+      "seq": 12
+    },
+    {
+      "type": "tool.call",
+      "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+      "title": "Run Command",
+      "status": "pending",
+      "payload": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+        "title": "Run Command",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {
+          "command": "gh api user --jq .login 2>&1; gh api \"users/<OWNER>/repos?per_page=100\" --jq '.[].name' 2>&1 | grep -i kiro",
+          "run_in_background": false
+        }
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 13
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "gh api user --jq .login 2>&1; gh api \"users/<OWNER>/repos?per_page=100\" --jq '.[].name' 2>&1 | grep -i kiro",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 14
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+      "status": "in_progress",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+        "status": "in_progress",
+        "rawInput": {
+          "command": "gh api user --jq .login 2>&1; gh api \"users/<OWNER>/repos?per_page=100\" --jq '.[].name' 2>&1 | grep -i kiro",
+          "run_in_background": false
+        },
+        "content": [
+          {
+            "type": "content",
+            "content": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 15
+    },
+    {
+      "type": "tool.update",
+      "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+      "status": "completed",
+      "payload": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "run_command_toolu_bdrk_01FioEauVP64jBTpQceTi6Vk",
+        "title": "Run Command",
+        "status": "completed",
+        "rawInput": {
+          "command": "gh api user --jq .login 2>&1; gh api \"users/<OWNER>/repos?per_page=100\" --jq '.[].name' 2>&1 | grep -i kiro",
+          "run_in_background": false
+        },
+        "rawOutput": {
+          "output": "<OWNER>\n<OTHER_REPO>\nkiro-remote\n<OTHER_REPO>\n<OTHER_REPO>\n",
+          "exitCode": 0,
+          "message": "Output:\n<OWNER>\n<OTHER_REPO>\nkiro-remote\n<OTHER_REPO>\n<OTHER_REPO>\n\n\nExit Code: 0"
+        },
+        "content": [
+          {
+            "content": {
+              "text": "Output:\n<OWNER>\n<OTHER_REPO>\nkiro-remote\n<OTHER_REPO>\n<OTHER_REPO>\n\n\nExit Code: 0",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ]
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "tool_call_update",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "toolOrigin": "default"
+        }
+      },
+      "seq": 16
+    },
+    {
+      "type": "message.chunk",
+      "content": {
+        "text": "I couldn't open the pull request because the repository `<E2E_REPO>` couldn't be reached, so I made no changes.\n\n- **Clone failed:** `git clone <E2E_REPO>` returned \"repository not found\". The repo also wasn't already in the workspace.\n- **The API can't see it either:** `gh api repos/<E2E_REPO>` returned HTTP 404.\n- **Authentication is working:** I'm logged in as `<OWNER>`. That account's repo list has no `<REPO>`. The closest names are `<OTHER_REPO>`, `<OTHER_REPO>`, `<OTHER_REPO>` and `<OTHER_REPO>`.\n\nSo the repo either doesn't exist, has been renamed or deleted, or is private and not covered by this session's GitHub connection.\n\nBecause you asked me to do exactly this and nothing else, I didn't switch to another repo. To go ahead, either grant the GitHub connection access to `<REPO>` (or create the repo), or tell me which repo to use, for example `<OWNER>/kiro-remote`.",
+        "type": "text"
+      },
+      "sessionId": "audit",
+      "turnId": "T1",
+      "replay": false,
+      "rawType": "agent_message_chunk",
+      "meta": {
+        "kiro": {
+          "codeIntelligence": "true",
+          "_providerPowers": "true",
+          "traceId": "85032944-d5e7-472f-be07-c4f2225351e6",
+          "executionId": "c7ea388e-7a63-43dc-8c3b-b85c12886bda",
+          "turnId": "c7ea388e-7a63-43dc-8c3b-b85c12886bda",
+          "replayId": "adac22fd-7dda-4ddd-bc8d-1644305ebfa2-say"
+        }
+      },
+      "seq": 17
+    }
+  ]
+}

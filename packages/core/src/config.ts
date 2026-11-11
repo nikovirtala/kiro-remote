@@ -56,3 +56,12 @@ export const EVENTS_POLL_INTERVAL_MS = 1000;
 
 /** Event-cursor sequence numbers are stored zero-padded to this width. */
 export const EVENT_SEQ_WIDTH = 12;
+
+/** How long a GitHub webhook delivery id is remembered for dedupe (and its raw body kept). */
+export const GITHUB_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Debounce window for failing-check wakes, per PR. */
+export const GITHUB_CHECKS_DEBOUNCE_MS = 2 * 60 * 1000;
+
+/** Cap on quoted GitHub text (review bodies, comments) forwarded to the agent, in characters. */
+export const GITHUB_QUOTE_MAX_CHARS = 8000;
