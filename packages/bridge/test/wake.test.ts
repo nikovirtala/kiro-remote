@@ -95,7 +95,7 @@ class GithubQ implements GithubQueue {
 }
 class Scheduler implements CatchUpScheduler {
   scheduled: CatchUpMessage[] = [];
-  async schedule(msg: CatchUpMessage) {
+  async start(msg: CatchUpMessage) {
     this.scheduled.push(msg);
   }
 }
@@ -122,7 +122,6 @@ async function wire(scenarios: unknown[], opts: { wake?: boolean; detachMarginMs
       tableName: "t",
       bucketName: "b",
       workspaceRoot,
-      catchUpQueueUrl: "https://sqs.test/cu",
       region: "us-east-1",
     },
     ddb: ddb as never,
@@ -266,7 +265,7 @@ describe("a turn settles and the inbox is drained", () => {
     expect(w.githubQueue.sent).toEqual([]);
     expect(w.scheduler.scheduled).toHaveLength(1);
 
-    await w.consumer.handleEvent(ev(w.scheduler.scheduled[0], "m-cu"));
+    await w.consumer.catchUpOnce(w.scheduler.scheduled[0] as CatchUpMessage);
     expect((await w.repo.getSession(SID))?.status).toBe("idle");
     expect(w.githubQueue.sent).toEqual([
       { kind: "harvest", sessionId: SID, turnId: w.scheduler.scheduled[0].turnId, afterSeq: 0 },

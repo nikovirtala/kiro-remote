@@ -1,18 +1,22 @@
 /**
  * Tests for the catch-up planner (dedupe of a load replay against the event
- * log) and the SQS catch-up scheduler.
+ * log), the delay setting and the Lambda catch-up scheduler.
  */
 
-import type { SQSClient } from "@aws-sdk/client-sqs";
+import { createHash } from "node:crypto";
+import { DurableExecutionAlreadyStartedException } from "@aws-sdk/client-lambda";
 import { type NormalizedEvent, normalizeUpdate } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
 import {
   type CatchUpMessage,
+  catchUpDelaySeconds,
   countTurnStarts,
+  DEFAULT_CATCH_UP_DELAY_SECONDS,
   isCatchUpMessage,
   planCatchUp,
-  SqsCatchUpScheduler,
 } from "../src/catch-up.ts";
+import { catchUpExecutionName, LambdaCatchUpScheduler } from "../src/catch-up-scheduler.ts";
+import { createLogger } from "../src/logger.ts";
 
 const SID = "s-1";
 const TURN = "turn-b";
@@ -219,35 +223,110 @@ describe("planCatchUp with a turn ordinal", () => {
   });
 });
 
-describe("SqsCatchUpScheduler", () => {
-  test("sends the message to the queue with the delay", async () => {
-    const inputs: unknown[] = [];
-    const sqs = {
-      send: async (command: { input: unknown }) => {
-        inputs.push(command.input);
-        return {};
+describe("catchUpDelaySeconds", () => {
+  const warnings: string[] = [];
+  const logger = { warn: (m: string) => warnings.push(m) };
+
+  test("defaults to 60 seconds", () => {
+    expect(catchUpDelaySeconds({})).toBe(DEFAULT_CATCH_UP_DELAY_SECONDS);
+    expect(DEFAULT_CATCH_UP_DELAY_SECONDS).toBe(60);
+    expect(catchUpDelaySeconds({ CATCH_UP_DELAY_SECONDS: "" })).toBe(60);
+  });
+
+  test("the env var overrides it", () => {
+    expect(catchUpDelaySeconds({ CATCH_UP_DELAY_SECONDS: "5" })).toBe(5);
+  });
+
+  test("an invalid value warns and falls back to the default", () => {
+    for (const bad of ["soon", "0", "-3", "1.5"]) {
+      warnings.length = 0;
+      expect(catchUpDelaySeconds({ CATCH_UP_DELAY_SECONDS: bad }, logger)).toBe(60);
+      expect(warnings).toEqual(["catch_up_delay_invalid"]);
+    }
+  });
+});
+
+describe("LambdaCatchUpScheduler", () => {
+  const ARN = "arn:aws:lambda:eu-north-1:123456789012:function:catch-up:live";
+  const msg: CatchUpMessage = {
+    kind: "catchUp",
+    sessionId: SID,
+    kiroSessionId: "sess_cloud-1",
+    turnId: TURN,
+    afterSeq: 4,
+    attempt: 1,
+    detachedAt: 1_000,
+  };
+  const logs: string[] = [];
+  const logger = createLogger({ sink: (l) => logs.push(l) });
+
+  function fakeLambda(result: () => unknown) {
+    const inputs: Record<string, unknown>[] = [];
+    return {
+      inputs,
+      lambda: {
+        send: async (command: { input: Record<string, unknown> }) => {
+          inputs.push(command.input);
+          return result();
+        },
       },
-    } as unknown as SQSClient;
-    const scheduler = new SqsCatchUpScheduler({
-      sqs,
-      queueUrl: "https://sqs.eu-north-1.amazonaws.com/123456789012/catch-up",
-    });
-    const msg: CatchUpMessage = {
-      kind: "catchUp",
-      sessionId: SID,
-      kiroSessionId: "sess_cloud-1",
-      turnId: TURN,
-      afterSeq: 4,
-      attempt: 1,
-      detachedAt: 1_000,
     };
-    await scheduler.schedule(msg, 60);
-    expect(inputs).toEqual([
-      {
-        QueueUrl: "https://sqs.eu-north-1.amazonaws.com/123456789012/catch-up",
-        MessageBody: JSON.stringify(msg),
-        DelaySeconds: 60,
-      },
-    ]);
+  }
+
+  test("starts an async durable execution on the alias with a stable name", async () => {
+    const { inputs, lambda } = fakeLambda(() => ({ StatusCode: 202 }));
+    const scheduler = new LambdaCatchUpScheduler({ lambda, functionArn: ARN, logger });
+    await scheduler.start(msg);
+    await scheduler.start({ ...msg, attempt: 9, detachedAt: 99 });
+    expect(inputs[0]).toMatchObject({
+      FunctionName: ARN,
+      InvocationType: "Event",
+      DurableExecutionName: catchUpExecutionName(msg),
+    });
+    expect(JSON.parse(String(inputs[0]?.Payload))).toEqual(msg);
+    expect(inputs[1]?.DurableExecutionName).toBe(inputs[0]?.DurableExecutionName);
+  });
+
+  test("the name is cu- + 40 hex of sha256(session:turn), valid for UUID ids", () => {
+    const uuidMsg = {
+      sessionId: "0b2d5c1e-8f3a-4c7e-9a41-2f6d8b7c3e10",
+      turnId: "6f1e2d3c-4b5a-4968-8777-665544332211",
+    };
+    const name = catchUpExecutionName(uuidMsg);
+    expect(name).toBe(
+      `cu-${createHash("sha256").update(`${uuidMsg.sessionId}:${uuidMsg.turnId}`).digest("hex").slice(0, 40)}`,
+    );
+    expect(name.length).toBeLessThanOrEqual(64);
+    expect(name).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(catchUpExecutionName({ ...uuidMsg, turnId: "other" })).not.toBe(name);
+  });
+
+  test("an already-started execution is tolerated and logged", async () => {
+    const { lambda } = fakeLambda(() => {
+      throw new DurableExecutionAlreadyStartedException({
+        message: "already started",
+        $metadata: {},
+      });
+    });
+    logs.length = 0;
+    await new LambdaCatchUpScheduler({ lambda, functionArn: ARN, logger }).start(msg);
+    expect(logs.some((l) => l.includes("catch_up_already_started"))).toBe(true);
+  });
+
+  test("other errors, a function error and a non-202 status are rethrown", async () => {
+    const boom = fakeLambda(() => {
+      throw new Error("throttled");
+    });
+    await expect(
+      new LambdaCatchUpScheduler({ lambda: boom.lambda, functionArn: ARN, logger }).start(msg),
+    ).rejects.toThrow("throttled");
+    const fnError = fakeLambda(() => ({ StatusCode: 202, FunctionError: "Unhandled" }));
+    await expect(
+      new LambdaCatchUpScheduler({ lambda: fnError.lambda, functionArn: ARN, logger }).start(msg),
+    ).rejects.toThrow();
+    const wrong = fakeLambda(() => ({ StatusCode: 200 }));
+    await expect(
+      new LambdaCatchUpScheduler({ lambda: wrong.lambda, functionArn: ARN, logger }).start(msg),
+    ).rejects.toThrow();
   });
 });

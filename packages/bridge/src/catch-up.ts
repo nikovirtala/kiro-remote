@@ -2,9 +2,10 @@
  * Catch-up for a cloud turn that outlived its Lambda invocation.
  *
  * When the consumer nears its deadline it detaches from a running turn (the
- * turn keeps running in Kiro's cloud sandbox) and schedules a
- * {@link CatchUpMessage} on the standard catch-up queue with a delivery delay.
- * Each catch-up run loads the remote session, which replays its whole history,
+ * turn keeps running in Kiro's cloud sandbox) and starts one Lambda durable
+ * execution (catch-up-durable.ts) with a {@link CatchUpMessage} payload. The
+ * execution repeats "catch up once, wait" until the turn ends. Each round
+ * (LambdaConsumer.catchUpOnce) loads the remote session, which replays its whole history,
  * and {@link planCatchUp} works out which of the replayed events for the
  * detached turn the DynamoDB event log does not hold yet.
  *
@@ -25,15 +26,39 @@
  *    occurrences as the log already holds.
  */
 
-import { SendMessageCommand, type SQSClient } from "@aws-sdk/client-sqs";
 import { type NormalizedEvent, normalizeUpdate } from "@nikovirtala/kiro-remote-core";
 
-/** Delivery delay for each catch-up message. */
-export const CATCH_UP_DELAY_SECONDS = 60;
+/** Default wait between catch-up rounds. */
+export const DEFAULT_CATCH_UP_DELAY_SECONDS = 60;
+/** @deprecated Use {@link DEFAULT_CATCH_UP_DELAY_SECONDS} or {@link catchUpDelaySeconds}. */
+export const CATCH_UP_DELAY_SECONDS = DEFAULT_CATCH_UP_DELAY_SECONDS;
 /** A detached turn with no `turn_end` after this long is failed. */
 export const CATCH_UP_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
-/** The catch-up queue message body. */
+/**
+ * The wait between catch-up rounds. The `CATCH_UP_DELAY_SECONDS` env var
+ * overrides the default: a positive integer, else a warning and the default.
+ */
+export function catchUpDelaySeconds(
+  env: NodeJS.ProcessEnv,
+  logger?: { warn(msg: string, fields?: Record<string, unknown>): void },
+): number {
+  const raw = env.CATCH_UP_DELAY_SECONDS;
+  if (raw === undefined || raw === "") {
+    return DEFAULT_CATCH_UP_DELAY_SECONDS;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    logger?.warn("catch_up_delay_invalid", {
+      value: raw,
+      defaultSeconds: DEFAULT_CATCH_UP_DELAY_SECONDS,
+    });
+    return DEFAULT_CATCH_UP_DELAY_SECONDS;
+  }
+  return value;
+}
+
+/** The catch-up message: the payload of the durable execution. */
 export interface CatchUpMessage {
   kind: "catchUp";
   /** Our session id. */
@@ -73,29 +98,24 @@ export function isCatchUpMessage(value: unknown): value is CatchUpMessage {
   );
 }
 
+/** Starts the durable execution that follows a detached turn to its end. */
 export interface CatchUpScheduler {
-  schedule(msg: CatchUpMessage, delaySeconds: number): Promise<void>;
+  /** Start one durable execution for the turn. A repeated start for the same turn is a no-op. */
+  start(msg: CatchUpMessage): Promise<void>;
 }
 
-/** Schedules catch-up messages on a standard SQS queue with a delivery delay. */
-export class SqsCatchUpScheduler implements CatchUpScheduler {
-  private readonly sqs: SQSClient;
-  private readonly queueUrl: string;
-
-  constructor(args: { sqs: SQSClient; queueUrl: string }) {
-    this.sqs = args.sqs;
-    this.queueUrl = args.queueUrl;
-  }
-
-  async schedule(msg: CatchUpMessage, delaySeconds: number): Promise<void> {
-    await this.sqs.send(
-      new SendMessageCommand({
-        QueueUrl: this.queueUrl,
-        MessageBody: JSON.stringify(msg),
-        DelaySeconds: delaySeconds,
-      }),
-    );
-  }
+/** The outcome of one catch-up round. */
+export interface CatchUpResult {
+  /**
+   * - pending: the turn has not ended yet; wait and try again.
+   * - completed: the turn ended and was settled.
+   * - stale: the session or turn moved on; nothing to do.
+   * - expired: the turn outlived {@link CATCH_UP_MAX_AGE_MS} and was failed.
+   * - load_failed: the remote session could not be loaded; try again.
+   */
+  state: "pending" | "completed" | "stale" | "expired" | "load_failed";
+  /** Events appended to the log in this round. */
+  eventsWritten: number;
 }
 
 export interface CatchUpPlan {
