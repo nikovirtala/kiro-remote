@@ -5,8 +5,8 @@
  * exports `./src/index.ts` -- a raw `.ts` file resolved under pnpm's
  * node_modules symlink. Node refuses to type-strip `.ts` files under a
  * node_modules path, so running the raw entries would crash at module load.
- * Dockerfile.lambda therefore esbuild-bundles both Lambda entries
- * (`lambda-consumer.ts`, `caps-publisher.ts`) into self-contained CommonJS
+ * Dockerfile.lambda therefore esbuild-bundles the Lambda entries
+ * (`lambda-consumer.ts`, `caps-publisher.ts`, `catch-up-durable.ts`) into self-contained CommonJS
  * files at image-build time, inlining the `@nikovirtala/*` workspace code.
  *
  * The bundle tests reproduce that esbuild invocation in-process (no Docker) and
@@ -49,6 +49,7 @@ describe("Lambda bridge bundles", () => {
   test.each([
     ["lambda-consumer.ts", "command_received"],
     ["caps-publisher.ts", "caps_publisher_initialize_result"],
+    ["catch-up-durable.ts", "wait-"],
   ])(
     "bundling %s inlines the @nikovirtala/* workspace code (no bare import)",
     async (entry, marker) => {
