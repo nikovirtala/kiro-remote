@@ -611,8 +611,11 @@ describe("KiroRemote Lambda bridge", () => {
   });
 
   test("the durable catch-up role is granted the same data plane access as the consumer's catch-up", () => {
-    const catchUpPolicies = Object.values(t.findResources("AWS::IAM::Policy")).filter((p) =>
-      (p.Properties as { Roles?: Array<{ Ref?: string }> }).Roles?.[0]?.Ref?.includes("CatchUpFn"),
+    const catchUpPolicies = Object.values(t.findResources("AWS::IAM::Policy")).filter(
+      (p) =>
+        (p.Properties as { Roles?: Array<{ Ref?: string }> }).Roles?.[0]?.Ref?.includes(
+          "CatchUpFn",
+        ) && !JSON.stringify(p.Properties).includes("DurableExecution"),
     );
     expect(catchUpPolicies.length).toBeGreaterThan(0);
     const services = new Set<string>();
@@ -630,26 +633,38 @@ describe("KiroRemote Lambda bridge", () => {
     expect(services.has("s3")).toBe(true);
     expect(services.has("secretsmanager")).toBe(true);
     expect(services.has("*")).toBe(false);
-    // It consumes no queue and may not invoke functions.
+    // It consumes no queue and may not invoke functions (the durable APIs are in
+    // their own policy, see below).
     expect(services.has("lambda")).toBe(false);
   });
 
-  test("the durable role carries the durable execution checkpoint permissions", () => {
+  test("the durable role has only the scoped checkpoint/state statement and no durable managed policy", () => {
     const roles = t.findResources("AWS::IAM::Role");
-    const catchUpRole = Object.values(roles).find((r) =>
-      JSON.stringify((r.Properties as { ManagedPolicyArns?: unknown }).ManagedPolicyArns).includes(
-        "AWSLambdaBasicDurableExecutionRolePolicy",
-      ),
-    );
-    expect(catchUpRole).toBeDefined();
-    // Only one role has it.
     expect(
       Object.values(roles).filter((r) =>
         JSON.stringify(
           (r.Properties as { ManagedPolicyArns?: unknown }).ManagedPolicyArns,
         ).includes("Durable"),
       ).length,
-    ).toBe(1);
+    ).toBe(0);
+    const durablePolicies = Object.values(t.findResources("AWS::IAM::Policy")).filter((p) =>
+      JSON.stringify(p.Properties).includes("DurableExecution"),
+    );
+    expect(durablePolicies).toHaveLength(1);
+    const props = durablePolicies[0].Properties as {
+      PolicyDocument: { Statement: unknown[] };
+      Roles: Array<{ Ref: string }>;
+    };
+    expect(props.Roles[0].Ref).toContain("CatchUpFnRole");
+    expect(props.PolicyDocument.Statement).toEqual([
+      {
+        Action: ["lambda:CheckpointDurableExecution", "lambda:GetDurableExecutionState"],
+        Effect: "Allow",
+        Resource: {
+          "Fn::Join": ["", [{ "Fn::GetAtt": [expect.stringContaining("CatchUpFn"), "Arn"] }, ":*"]],
+        },
+      },
+    ]);
   });
 
   test("grants the consumer scoped data-plane access to its own table/bucket/queues/secret", () => {

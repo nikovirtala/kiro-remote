@@ -256,9 +256,11 @@ There is no VPC and no long-running task. Operational details:
   that alias only. Versions are retained (`RemovalPolicy.RETAIN`) because an
   execution stays pinned to the version that started it for up to 6 h 30 min.
   The role gets the table, bucket, Kiro API key secret and, with the GitHub
-  feature, the command and GitHub queues, plus the AWS managed
-  `AWSLambdaBasicDurableExecutionRolePolicy` that CDK attaches for the
-  checkpoint and state APIs. It has no event-source mapping.
+  feature, the command and GitHub queues, plus
+  `lambda:CheckpointDurableExecution` and `lambda:GetDurableExecutionState`
+  scoped to the function's own ARN with a version wildcard (`<arn>:*`). It uses
+  an explicit role, so CDK does not attach the broader AWS managed
+  `AWSLambdaBasicDurableExecutionRolePolicy`. It has no event-source mapping.
 - **Catch-up queue (legacy).** `CatchUpQueue` is a standard SQS queue (1-day
   retention, 15-minute visibility timeout). Nothing sends to it any more. It and
   its event-source mapping stay for this release only, so messages already in

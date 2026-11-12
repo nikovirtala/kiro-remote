@@ -45,12 +45,12 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
       reason:
         "The Lambda execution roles use the AWS-managed AWSLambdaBasicExecutionRole for CloudWatch Logs only; all data-plane access is granted via scoped inline policies.",
     },
-    // IAM4: CDK attaches the AWS-managed durable-execution policy to any
-    // function that sets durableConfig.
+    // IAM5: the durable execution APIs are authorized on the execution ARN,
+    // which carries the resolved function version after the function ARN.
     {
-      id: "AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicDurableExecutionRolePolicy]",
+      id: "AwsSolutions-IAM5[Resource::<KiroRemoteCatchUpFn7627B437.Arn>:*]",
       reason:
-        "CDK attaches the AWS-managed AWSLambdaBasicDurableExecutionRolePolicy to the durable catch-up function's role: CloudWatch Logs plus lambda:CheckpointDurableExecution and lambda:GetDurableExecutionState, which a durable execution needs to checkpoint. Only the catch-up function carries it; all data-plane access is granted via scoped inline policies.",
+        "lambda:CheckpointDurableExecution and lambda:GetDurableExecutionState are authorized on the durable execution ARN (function-arn:version/durable-execution/...), so the resource is this one catch-up function's ARN with a version wildcard; no other function is reachable.",
     },
     // IAM5: the object-level and index wildcards are intrinsic to S3/DynamoDB
     // access and remain bound to THIS construct's OWN bucket/table.
