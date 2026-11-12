@@ -371,8 +371,8 @@ replay contains `turn_end`, the turn settles (`prompt.response`, session back
 to `idle`, `CatchUpCompleted`); otherwise the execution waits (`wait-N`, 60 s by default; the catch-up
 function's `CATCH_UP_DELAY_SECONDS` overrides it) and runs the next round. The
 waits are suspended by the platform, and one execution stays far below the
-30,000 operation limit (about 720 operations in 6 h). A failed step is retried
-up to 3 times; a failed `session/load` is a round, not a failed execution.
+30,000 operation limit (about 720 operations in 6 h). A failed step is attempted
+up to 3 times in total; if it still fails the handler treats the round as pending and waits again (the 6 h expiry then fails the turn once the dependency is back); a failed `session/load` is a round, not a failed execution.
 A turn with no `turn_end` 6 h after it detached is failed like any failed turn
 (`turn.failed` with `rawType: "catch_up_expired"`, `CatchUpExpired` and
 `CloudTurnFailed` metrics, session back to `idle`). A catch-up for a
@@ -380,6 +380,8 @@ session that is gone, failed, or has moved to another turn ends the execution
 without writing (`catch_up_stale`). Inspect executions with
 `aws lambda list-durable-executions-by-function` and
 `get-durable-execution-history` (see [testing.md](testing.md)).
+
+The catch-up function has no reserved concurrency on purpose: `maxCloudSessions` bounds the consumer only, and a reserved value would also set aside account capacity for a function that mostly waits (waits hold no concurrency). Set one on `CatchUpFn` if you need a hard cap on engines during catch-up.
 
 Because META stays `running`, a follow-up, steer, cancel or `whenBusy=queue`
 sent during a detached turn is rejected as mid-turn, exactly as it is during a

@@ -66,7 +66,7 @@ mise exec -- pnpm exec cdk synth --quiet -o /tmp/kiro-remote-synth \
 ```
 
 `/tmp/kiro-remote-synth/KiroRemoteStack.template.json` then holds the
-the durable catch-up function (`DurableConfig`), its retained `AWS::Lambda::Version`
+durable catch-up function (`DurableConfig`), its retained `AWS::Lambda::Version`
 and the `live` `AWS::Lambda::Alias`, the legacy `CatchUpQueue` and two
 `AWS::Lambda::EventSourceMapping` resources (both on the consumer, none on the
 durable function), no `RecursiveLoop: Allow` on any function, and no
@@ -118,6 +118,7 @@ and a real Kiro API key:
   the event log once, without duplicates. Inspect the execution:
 
   ```bash
+  # Unverified: written from the CLI naming, not run here; check `aws lambda help`.
   aws lambda list-durable-executions-by-function \
     --function-name <catch-up function name>:live --region eu-north-1
   aws lambda get-durable-execution-history \

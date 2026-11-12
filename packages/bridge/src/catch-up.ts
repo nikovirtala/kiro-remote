@@ -30,8 +30,6 @@ import { type NormalizedEvent, normalizeUpdate } from "@nikovirtala/kiro-remote-
 
 /** Default wait between catch-up rounds. */
 export const DEFAULT_CATCH_UP_DELAY_SECONDS = 60;
-/** @deprecated Use {@link DEFAULT_CATCH_UP_DELAY_SECONDS} or {@link catchUpDelaySeconds}. */
-export const CATCH_UP_DELAY_SECONDS = DEFAULT_CATCH_UP_DELAY_SECONDS;
 /** A detached turn with no `turn_end` after this long is failed. */
 export const CATCH_UP_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 

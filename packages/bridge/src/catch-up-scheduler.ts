@@ -68,7 +68,10 @@ export class LambdaCatchUpScheduler implements CatchUpScheduler {
       }
     } catch (err) {
       if (isAlreadyStarted(err)) {
-        this.logger.info("catch_up_already_started", {
+        // Normal for a running execution. A closed (failed or timed out)
+        // execution with the same name also lands here and cannot be
+        // restarted, so this is a warning; check the execution status.
+        this.logger.warn("catch_up_already_started", {
           sessionId: msg.sessionId,
           turnId: msg.turnId,
           executionName: name,
