@@ -22,17 +22,21 @@
  * log. The session META is re-read at the start of every command, because
  * another container (or a catch-up) may have moved the session on.
  *
- * DETACH + CATCH-UP (the standard catch-up queue)
+ * DETACH + CATCH-UP (a Lambda durable execution)
  * A Lambda invocation ends at its timeout, but a cloud turn may run longer.
  * When the remaining time falls below {@link DETACH_MARGIN_MS} the consumer
  * flushes what it has, stops the engine (the cloud turn keeps running), leaves
- * META `running`, and schedules a {@link CatchUpMessage} with a delivery
- * delay. A catch-up run loads the remote session, appends the replayed events
- * the log does not hold yet ({@link planCatchUp}), and either settles the turn
- * (the replay reached `turn_end`) or schedules the next attempt. A turn still
- * unfinished {@link CATCH_UP_MAX_AGE_MS} after detaching is failed. While META
- * stays `running`, a mid-turn steer, cancel or `whenBusy=queue` is rejected
- * exactly as before.
+ * META `running`, and starts ONE durable execution of the catch-up function
+ * (catch-up-durable.ts) with a {@link CatchUpMessage} payload; the execution
+ * name is derived from the turn, so a repeated start is a no-op. The
+ * execution repeats {@link LambdaConsumer.catchUpOnce} and a wait: a round
+ * loads the remote session, appends the replayed events the log does not hold
+ * yet ({@link planCatchUp}), and either settles the turn (the replay reached
+ * `turn_end`) or reports it pending. A turn still unfinished
+ * {@link CATCH_UP_MAX_AGE_MS} after detaching is failed. A catch-up message
+ * left on the legacy catch-up queue is handed to a durable execution too.
+ * While META stays `running`, a mid-turn steer, cancel or `whenBusy=queue` is
+ * rejected exactly as before.
  *
  * WAKE TURNS (GitHub, and any later producer)
  * A prompt command may carry a `trigger` (see TurnTrigger): a wake turn that
@@ -53,6 +57,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
@@ -73,15 +78,15 @@ import {
 } from "@nikovirtala/kiro-remote-core";
 import { ulid } from "ulid";
 import {
-  CATCH_UP_DELAY_SECONDS,
   CATCH_UP_MAX_AGE_MS,
   type CatchUpMessage,
+  type CatchUpResult,
   type CatchUpScheduler,
   countTurnStarts,
   isCatchUpMessage,
   planCatchUp,
-  SqsCatchUpScheduler,
 } from "./catch-up.ts";
+import { LambdaCatchUpScheduler } from "./catch-up-scheduler.ts";
 import {
   type CloudLaunchArgs,
   CloudSession,
@@ -171,8 +176,11 @@ export interface ConsumerConfig {
   tableName: string;
   bucketName: string;
   workspaceRoot: string;
-  /** The standard queue catch-up messages are scheduled on. */
-  catchUpQueueUrl: string;
+  /**
+   * The qualified (alias) ARN of the durable catch-up function. Unset on the
+   * durable function itself, which never starts catch-ups.
+   */
+  catchUpFunctionArn?: string;
   /**
    * The FIFO command queue and the GitHub queue. Both set means the GitHub
    * feature is on: settles then drain the inbox and request PR harvests.
@@ -218,7 +226,7 @@ export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Con
     tableName: requireEnv(env, "TABLE_NAME"),
     bucketName: requireEnv(env, "BUCKET_NAME"),
     workspaceRoot: env.WORKSPACE_ROOT ?? "/workspace",
-    catchUpQueueUrl: requireEnv(env, "CATCH_UP_QUEUE_URL"),
+    ...(env.CATCH_UP_FUNCTION_ARN ? { catchUpFunctionArn: env.CATCH_UP_FUNCTION_ARN } : {}),
     ...(env.COMMAND_QUEUE_URL ? { commandQueueUrl: env.COMMAND_QUEUE_URL } : {}),
     ...(env.GITHUB_QUEUE_URL ? { githubQueueUrl: env.GITHUB_QUEUE_URL } : {}),
     ...(env.ADDITIONAL_DIRECTORIES
@@ -251,7 +259,7 @@ export class LambdaConsumer {
   private readonly logger: Logger;
   private readonly metrics: Metrics;
   private readonly cloud: CloudSession;
-  private readonly scheduler: CatchUpScheduler;
+  private readonly scheduler: CatchUpScheduler | undefined;
   private readonly settler: TurnSettler;
   private readonly engineSpec: SpawnSpec;
   private readonly spawnFn?: SpawnFn;
@@ -270,7 +278,7 @@ export class LambdaConsumer {
     logger: Logger;
     metrics: Metrics;
     cloud: CloudSession;
-    scheduler: CatchUpScheduler;
+    scheduler: CatchUpScheduler | undefined;
     settler: TurnSettler;
     engineSpec: SpawnSpec;
     spawnFn?: SpawnFn;
@@ -328,7 +336,13 @@ export class LambdaConsumer {
     const sqs = deps.sqs ?? new SQSClient({ region });
     const scheduler =
       deps.catchUpScheduler ??
-      new SqsCatchUpScheduler({ sqs, queueUrl: deps.config.catchUpQueueUrl });
+      (deps.config.catchUpFunctionArn
+        ? new LambdaCatchUpScheduler({
+            lambda: new LambdaClient({ region }),
+            functionArn: deps.config.catchUpFunctionArn,
+            logger,
+          })
+        : undefined);
 
     // The GitHub feature is on only when BOTH queues are known.
     const githubQueue =
@@ -462,7 +476,9 @@ export class LambdaConsumer {
     }
     if (isCatchUpMessage(body)) {
       try {
-        await this.catchUp(body);
+        // A message left on the legacy catch-up queue: hand it to a durable
+        // execution instead of processing it and re-sending it.
+        await this.startCatchUp(body);
         return false;
       } catch (err) {
         this.logger.error("catch_up_error", {
@@ -862,19 +878,16 @@ export class LambdaConsumer {
       case "detach": {
         this.logger.info("turn_detached", { sessionId: rt.id, turnId, kiroSessionId: cloudId });
         this.metrics.count("TurnDetached");
-        await this.scheduler.schedule(
-          {
-            kind: "catchUp",
-            sessionId: rt.id,
-            kiroSessionId: cloudId,
-            turnId,
-            afterSeq: place.afterSeq,
-            attempt: 1,
-            detachedAt: this.now(),
-            turnOrdinal: place.turnOrdinal,
-          },
-          CATCH_UP_DELAY_SECONDS,
-        );
+        await this.startCatchUp({
+          kind: "catchUp",
+          sessionId: rt.id,
+          kiroSessionId: cloudId,
+          turnId,
+          afterSeq: place.afterSeq,
+          attempt: 1,
+          detachedAt: this.now(),
+          turnOrdinal: place.turnOrdinal,
+        });
         return;
       }
     }
@@ -933,26 +946,34 @@ export class LambdaConsumer {
     if (item?.status !== "running" || !item.activeTurnId || !item.kiroSessionId) {
       return;
     }
-    await this.scheduler.schedule(
-      {
-        kind: "catchUp",
-        sessionId: item.id,
-        kiroSessionId: item.kiroSessionId,
-        turnId: item.activeTurnId,
-        afterSeq: 0,
-        attempt: 1,
-        detachedAt: this.now(),
-      },
-      CATCH_UP_DELAY_SECONDS,
-    );
+    await this.startCatchUp({
+      kind: "catchUp",
+      sessionId: item.id,
+      kiroSessionId: item.kiroSessionId,
+      turnId: item.activeTurnId,
+      afterSeq: 0,
+      attempt: 1,
+      detachedAt: this.now(),
+    });
+  }
+
+  /** Start the durable catch-up execution for a detached turn. */
+  private async startCatchUp(msg: CatchUpMessage): Promise<void> {
+    if (!this.scheduler) {
+      throw new Error("no catch-up scheduler configured (set CATCH_UP_FUNCTION_ARN)");
+    }
+    await this.scheduler.start(msg);
+    this.logger.info("catch_up_started", { sessionId: msg.sessionId, turnId: msg.turnId });
   }
 
   /**
-   * Finish a detached turn: load the remote session, append the replayed
-   * events the log is missing, and settle the turn once the replay reaches
-   * `turn_end` (otherwise schedule the next attempt).
+   * One catch-up round for a detached turn: load the remote session, append
+   * the replayed events the log is missing, and settle the turn once the
+   * replay reaches `turn_end`. Idempotent (the event log is the ledger) and
+   * never schedules anything: the durable catch-up execution decides what
+   * happens next.
    */
-  private async catchUp(msg: CatchUpMessage): Promise<void> {
+  async catchUpOnce(msg: CatchUpMessage): Promise<CatchUpResult> {
     const id = msg.sessionId;
     const { rt, item } = await this.refresh(id);
     const fields = { sessionId: id, turnId: msg.turnId, attempt: msg.attempt };
@@ -963,7 +984,7 @@ export class LambdaConsumer {
       item.activeTurnId !== msg.turnId
     ) {
       this.logger.info("catch_up_stale", { ...fields, status: item?.status ?? null });
-      return;
+      return { state: "stale", eventsWritten: 0 };
     }
 
     if (this.now() - msg.detachedAt > CATCH_UP_MAX_AGE_MS) {
@@ -974,7 +995,7 @@ export class LambdaConsumer {
         "catch_up_expired",
         msg.afterSeq,
       );
-      return;
+      return { state: "expired", eventsWritten: 0 };
     }
 
     const updates: unknown[] = [];
@@ -991,8 +1012,7 @@ export class LambdaConsumer {
       });
     } catch (err) {
       this.logger.warn("catch_up_load_failed", { ...fields, error: String(err) });
-      await this.scheduleNext(msg);
-      return;
+      return { state: "load_failed", eventsWritten: 0 };
     }
 
     const recorded = (await this.allEventsAfter(id, msg.afterSeq))
@@ -1014,13 +1034,12 @@ export class LambdaConsumer {
     }
 
     if (!plan.ended) {
-      await this.scheduleNext(msg);
       this.logger.info("catch_up_pending", {
         ...fields,
         turnFound: plan.turnFound,
         eventsWritten: plan.events.length,
       });
-      return;
+      return { state: "pending", eventsWritten: plan.events.length };
     }
     this.cloud.applyMachine(rt, {
       kind: "prompt.response",
@@ -1038,6 +1057,7 @@ export class LambdaConsumer {
       stopReason: plan.stopReason ?? "end_turn",
       afterSeq: msg.afterSeq,
     });
+    return { state: "completed", eventsWritten: plan.events.length };
   }
 
   /**
@@ -1056,10 +1076,6 @@ export class LambdaConsumer {
       all.push(...page);
       after = last.seq;
     }
-  }
-
-  private async scheduleNext(msg: CatchUpMessage): Promise<void> {
-    await this.scheduler.schedule({ ...msg, attempt: msg.attempt + 1 }, CATCH_UP_DELAY_SECONDS);
   }
 
   /* -------------------------------- delete --------------------------------- */
@@ -1118,7 +1134,7 @@ export class LambdaConsumer {
 /**
  * The Lambda handler entry. The consumer is built ONCE per container (lazily,
  * on the first invocation) so the resolved API key and runtime map survive
- * across warm invocations. Both the command queue and the catch-up queue
+ * across warm invocations. The command queue and the legacy catch-up queue
  * event-source mappings invoke this handler, with ReportBatchItemFailures.
  */
 let consumerPromise: Promise<LambdaConsumer> | null = null;

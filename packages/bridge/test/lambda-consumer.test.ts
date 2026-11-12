@@ -29,11 +29,11 @@ import {
 } from "@nikovirtala/kiro-remote-core";
 import { describe, expect, test } from "vitest";
 import {
-  CATCH_UP_DELAY_SECONDS,
   CATCH_UP_MAX_AGE_MS,
   type CatchUpMessage,
   type CatchUpScheduler,
 } from "../src/catch-up.ts";
+import { LambdaCatchUpScheduler } from "../src/catch-up-scheduler.ts";
 import {
   createHandler,
   LambdaConsumer,
@@ -117,9 +117,14 @@ function textOf(ev: { payload: unknown }): string {
 }
 
 class RecordingScheduler implements CatchUpScheduler {
-  readonly scheduled: { msg: CatchUpMessage; delaySeconds: number }[] = [];
-  async schedule(msg: CatchUpMessage, delaySeconds: number): Promise<void> {
-    this.scheduled.push({ msg, delaySeconds });
+  readonly scheduled: { msg: CatchUpMessage }[] = [];
+  /** Set to make the next start fail. */
+  failWith: Error | null = null;
+  async start(msg: CatchUpMessage): Promise<void> {
+    if (this.failWith) {
+      throw this.failWith;
+    }
+    this.scheduled.push({ msg });
   }
 }
 
@@ -171,7 +176,6 @@ async function wire(scenarios: unknown[], opts: WireOptions = {}): Promise<Wired
         tableName: "kiro-remote-test",
         bucketName: "kiro-remote-test-bucket",
         workspaceRoot,
-        catchUpQueueUrl: "https://sqs.test/catch-up",
         region: "us-east-1",
       },
       ddb: consumerDdb,
@@ -492,7 +496,7 @@ describe("LambdaConsumer detach + catch-up", () => {
     return (await w.repo.queryEvents("sd", 0, { limit: 100 })).filter((e) => e.turnId === turnId);
   }
 
-  test("a turn still running near the deadline detaches and schedules a catch-up", async () => {
+  test("a turn still running near the deadline detaches and starts one durable catch-up", async () => {
     const { w, msg } = await detached([]);
 
     const session = await w.repo.getSession("sd");
@@ -500,7 +504,6 @@ describe("LambdaConsumer detach + catch-up", () => {
     expect(session?.kiroSessionId).toBe(CLOUD_ID);
     expect(session?.activeTurnId).toEqual(expect.any(String));
     expect(w.scheduler.scheduled).toHaveLength(1);
-    expect(w.scheduler.scheduled[0]?.delaySeconds).toBe(CATCH_UP_DELAY_SECONDS);
     expect(msg).toEqual({
       kind: "catchUp",
       sessionId: "sd",
@@ -536,8 +539,8 @@ describe("LambdaConsumer detach + catch-up", () => {
     ]);
     const before = (await turnEvents(w, msg.turnId)).length;
 
-    const res = await w.consumer.handleEvent(event(msg, "m-catch-up"));
-    expect(res.batchItemFailures).toEqual([]);
+    const result = await w.consumer.catchUpOnce(msg);
+    expect(result).toEqual({ state: "completed", eventsWritten: 5 });
 
     expect(echoed(w.logLines, "fakeAgentLoadParams")).toEqual([
       {
@@ -569,22 +572,21 @@ describe("LambdaConsumer detach + catch-up", () => {
 
     // Delivering the same catch-up again writes nothing (the turn settled).
     const count = (await w.repo.queryEvents("sd", 0, { limit: 100 })).length;
-    await w.consumer.handleEvent(event(msg, "m-catch-up-again"));
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "stale", eventsWritten: 0 });
     expect((await w.repo.queryEvents("sd", 0, { limit: 100 })).length).toBe(count);
     expect(w.logLines.some((l) => l.includes("catch_up_stale"))).toBe(true);
   });
 
-  test("a catch-up without turn_end records progress and reschedules attempt + 1", async () => {
+  test("a catch-up without turn_end records progress and reports pending", async () => {
     const { w, msg } = await detached([
       loadScenario(DETACHED_RUNNING),
       loadScenario(DETACHED_DONE),
     ]);
 
-    await w.consumer.handleEvent(event(msg, "m-catch-up-1"));
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "pending", eventsWritten: 3 });
     expect((await w.repo.getSession("sd"))?.status).toBe("running");
-    expect(w.scheduler.scheduled).toHaveLength(2);
-    const next = w.scheduler.scheduled[1]?.msg;
-    expect(next).toEqual({ ...msg, attempt: 2 });
+    // Catch-up never schedules anything itself.
+    expect(w.scheduler.scheduled).toHaveLength(1);
     expect(w.logLines.some((l) => l.includes("catch_up_pending"))).toBe(true);
     const afterFirst = await turnEvents(w, msg.turnId);
     expect(afterFirst.map((e) => e.type)).toEqual([
@@ -596,10 +598,10 @@ describe("LambdaConsumer detach + catch-up", () => {
     ]);
 
     // The next attempt sees the same replay plus the end: only the end is new.
-    if (!next) {
-      throw new Error("no next catch-up");
-    }
-    await w.consumer.handleEvent(event(next, "m-catch-up-2"));
+    expect(await w.consumer.catchUpOnce({ ...msg, attempt: 2 })).toEqual({
+      state: "completed",
+      eventsWritten: 2,
+    });
     const added = (await turnEvents(w, msg.turnId)).slice(afterFirst.length);
     expect(added.map((e) => e.type)).toEqual(["turn.completed", "session.info"]);
     expect((await w.repo.getSession("sd"))?.status).toBe("idle");
@@ -613,7 +615,7 @@ describe("LambdaConsumer detach + catch-up", () => {
     });
     const before = (await turnEvents(w, msg.turnId)).length;
 
-    await w.consumer.handleEvent(event(msg, "m-catch-up"));
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "completed", eventsWritten: 5 });
     const added = (await turnEvents(w, msg.turnId)).slice(before);
     expect(added.map((e) => e.type)).toEqual([
       "message.chunk",
@@ -626,16 +628,15 @@ describe("LambdaConsumer detach + catch-up", () => {
     expect((await w.repo.getSession("sd"))?.status).toBe("idle");
   });
 
-  test("a catch-up whose session/load fails reschedules attempt + 1", async () => {
+  test("a catch-up whose session/load fails reports load_failed", async () => {
     const { w, msg } = await detached([
       { initialize: initResult(), onLoad: { error: { code: -32603, message: "load failed" } } },
     ]);
     const before = (await turnEvents(w, msg.turnId)).length;
 
-    const res = await w.consumer.handleEvent(event(msg, "m-catch-up"));
-    expect(res.batchItemFailures).toEqual([]);
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "load_failed", eventsWritten: 0 });
     expect(w.logLines.some((l) => l.includes("catch_up_load_failed"))).toBe(true);
-    expect(w.scheduler.scheduled[1]?.msg).toEqual({ ...msg, attempt: 2 });
+    expect(w.scheduler.scheduled).toHaveLength(1);
     expect((await turnEvents(w, msg.turnId)).length).toBe(before);
     expect((await w.repo.getSession("sd"))?.status).toBe("running");
   });
@@ -719,17 +720,13 @@ describe("LambdaConsumer detach + catch-up", () => {
     });
 
     // The replay only holds the launch turn: nothing written, still running.
-    await w.consumer.handleEvent(event(msg, "m-catch-up-1"));
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "pending", eventsWritten: 0 });
     expect((await followUp()).length).toBe(recorded);
     expect((await w.repo.getSession("sfd"))?.status).toBe("running");
-    const next = w.scheduler.scheduled[2]?.msg;
-    expect(next).toEqual({ ...msg, attempt: 2 });
-    if (!next) {
-      throw new Error("no next catch-up");
-    }
+    expect(w.scheduler.scheduled).toHaveLength(2);
 
     // The replay now holds turn 2 through turn_end.
-    await w.consumer.handleEvent(event(next, "m-catch-up-2"));
+    expect((await w.consumer.catchUpOnce({ ...msg, attempt: 2 })).state).toBe("completed");
     const added = (await followUp()).slice(recorded);
     expect(added.map((e) => e.type)).toEqual([
       "message.chunk",
@@ -744,7 +741,7 @@ describe("LambdaConsumer detach + catch-up", () => {
     expect(session?.activeTurnId).toBeNull();
   });
 
-  test("a write failure mid-turn is retried, and the redelivered launch schedules a leftover catch-up", async () => {
+  test("a write failure mid-turn is retried, and the redelivered launch starts a leftover catch-up", async () => {
     const state = { armed: false };
     const w = await wire(
       [
@@ -785,7 +782,7 @@ describe("LambdaConsumer detach + catch-up", () => {
     }
 
     // The leftover catch-up (no ordinal, whole log) settles the turn.
-    await w.consumer.handleEvent(event(leftover, "m-catch-up"));
+    expect((await w.consumer.catchUpOnce(leftover)).state).toBe("completed");
     const events = (await w.repo.queryEvents("sw", 0, { limit: 100 })).filter(
       (e) => e.turnId === leftover.turnId,
     );
@@ -808,8 +805,7 @@ describe("LambdaConsumer detach + catch-up", () => {
       attempt: 3,
       detachedAt: 0,
     };
-    const res = await w.consumer.handleEvent(event(msg));
-    expect(res.batchItemFailures).toEqual([]);
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "stale", eventsWritten: 0 });
     expect(await w.repo.queryEvents("ss", 0, { limit: 100 })).toEqual([]);
     expect(w.spawner.specs).toHaveLength(0);
     expect(w.scheduler.scheduled).toEqual([]);
@@ -828,8 +824,7 @@ describe("LambdaConsumer detach + catch-up", () => {
       attempt: 360,
       detachedAt: -CATCH_UP_MAX_AGE_MS,
     };
-    const res = await w.consumer.handleEvent(event(msg));
-    expect(res.batchItemFailures).toEqual([]);
+    expect(await w.consumer.catchUpOnce(msg)).toEqual({ state: "expired", eventsWritten: 0 });
 
     const events = await w.repo.queryEvents("se", 0, { limit: 100 });
     const failed = events.find((e) => e.type === "turn.failed");
@@ -841,6 +836,83 @@ describe("LambdaConsumer detach + catch-up", () => {
     expect(w.metrics.sum("CatchUpExpired")).toBe(1);
     expect(w.spawner.specs).toHaveLength(0);
     expect(w.scheduler.scheduled).toEqual([]);
+  });
+});
+
+describe("LambdaConsumer catch-up start", () => {
+  const legacy: CatchUpMessage = {
+    kind: "catchUp",
+    sessionId: "sl",
+    kiroSessionId: CLOUD_ID,
+    turnId: "t-legacy",
+    afterSeq: 0,
+    attempt: 7,
+    detachedAt: 5,
+  };
+
+  test("a detach starts exactly one execution with attempt 1 and the turn ordinal", async () => {
+    const w = await wire([LAUNCH_NEVER_ENDS], { detachMarginMs: 100 });
+    await w.seed("sx");
+    await w.consumer.handleEvent(event(launchCmd("sx")), { remainingTimeMs: () => 300 });
+    expect(w.scheduler.scheduled).toHaveLength(1);
+    expect(w.scheduler.scheduled[0]?.msg).toMatchObject({ attempt: 1, turnOrdinal: 1 });
+    expect(w.logLines.some((l) => l.includes("catch_up_started"))).toBe(true);
+  });
+
+  test("a legacy catch-up queue message hands off to start and processes nothing", async () => {
+    const w = await wire([LAUNCH]);
+    await w.seed("sl", { status: "running", kiroSessionId: CLOUD_ID, activeTurnId: "t-legacy" });
+    const res = await w.consumer.handleEvent(event(legacy));
+    expect(res.batchItemFailures).toEqual([]);
+    expect(w.scheduler.scheduled.map((s) => s.msg)).toEqual([legacy]);
+    expect(w.spawner.specs).toHaveLength(0);
+    expect(await w.repo.queryEvents("sl", 0, { limit: 100 })).toEqual([]);
+    expect(w.logLines.some((l) => l.includes("catch_up_pending"))).toBe(false);
+  });
+
+  test("a failed start of a legacy message is retried via batchItemFailures", async () => {
+    const w = await wire([LAUNCH]);
+    w.scheduler.failWith = new Error("throttled");
+    const res = await w.consumer.handleEvent(event(legacy, "m-legacy"));
+    expect(res.batchItemFailures).toEqual([{ itemIdentifier: "m-legacy" }]);
+    expect(w.logLines.some((l) => l.includes("catch_up_error"))).toBe(true);
+  });
+
+  test("a duplicate start through the real scheduler is tolerated", async () => {
+    const sent: unknown[] = [];
+    const lambda = {
+      send: async (command: { input: unknown }) => {
+        sent.push(command.input);
+        const err = new Error("already");
+        err.name = "DurableExecutionAlreadyStartedException";
+        throw err;
+      },
+    };
+    const w = await wire([LAUNCH]);
+    const scheduler = new LambdaCatchUpScheduler({
+      lambda,
+      functionArn: "arn:aws:lambda:eu-north-1:123456789012:function:cu:live",
+      logger: w.logger,
+    });
+    const consumer = await LambdaConsumer.create({
+      config: {
+        tableName: "kiro-remote-test",
+        bucketName: "kiro-remote-test-bucket",
+        workspaceRoot: await mkdtemp(join(tmpdir(), "kiro-remote-ws-")),
+        region: "us-east-1",
+      },
+      ddb: new FakeDocClient() as unknown as DynamoDBDocumentClient,
+      // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
+      s3: new FakeS3Client() as any,
+      spawnFn: w.spawner.spawnFn,
+      catchUpScheduler: scheduler,
+      logger: w.logger,
+      env: { KIRO_API_KEY: "ksk_test_key" },
+    });
+    const res = await consumer.handleEvent(event(legacy));
+    expect(res.batchItemFailures).toEqual([]);
+    expect(sent).toHaveLength(1);
+    expect(w.logLines.some((l) => l.includes("catch_up_already_started"))).toBe(true);
   });
 });
 
