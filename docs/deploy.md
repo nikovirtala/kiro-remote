@@ -223,8 +223,10 @@ entrypoint only wires the three context keys above; to set the rest you edit
 The bridge is serverless. Every deploy provisions:
 
 - the **consumer**, a container-image Lambda function (arm64) that consumes the
-  SQS FIFO command queue and the standard `CatchUpQueue`, and launches and
-  drives cloud sessions;
+  SQS FIFO command queue and launches and drives cloud sessions (it also
+  still consumes the legacy `CatchUpQueue`, see below);
+- the **catch-up function**, a durable function from the same image
+  (`catch-up-durable.handler`) that follows detached turns to their end;
 - the **caps publisher**, a second function from the same image that writes
   `CONFIG#CAPS`, invoked once right after deploy (a CDK Trigger custom
   resource) and then on a 6-hour schedule.
@@ -244,13 +246,24 @@ There is no VPC and no long-running task. Operational details:
   or `acp-server.js` is missing. The runtime stage copies only `/opt/kiro`;
   kiro-cli itself is not in the runtime image. See
   [Building the bridge image](#building-the-bridge-image).
-- **Catch-up queue.** `CatchUpQueue` is a standard (non-FIFO) SQS queue (1-day
-  retention, 15-minute visibility timeout), consumed by the same consumer
-  function through a second event-source mapping. The consumer uses it to
-  finish turns that outlive one invocation (see
-  [the catch-up](#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
-  Its URL reaches the consumer as `CATCH_UP_QUEUE_URL`; the caps publisher does
-  not get it.
+- **Catch-up function.** A Lambda durable function (arm64, same memory as the
+  consumer, 5-minute function timeout, which only has to cover one `session/load`
+  round). Its durable config has an execution timeout of 6 h 30 min (the 6 h
+  catch-up expiry plus a margin, so the code's own check fires first) and a
+  14-day retention period. A durable function must be invoked through a
+  qualified ARN, so CDK publishes a version and an alias `live`; the consumer
+  gets the alias ARN as `CATCH_UP_FUNCTION_ARN` and `lambda:InvokeFunction` on
+  that alias only. Versions are retained (`RemovalPolicy.RETAIN`) because an
+  execution stays pinned to the version that started it for up to 6 h 30 min.
+  The role gets the table, bucket, Kiro API key secret and, with the GitHub
+  feature, the command and GitHub queues, plus the AWS managed
+  `AWSLambdaBasicDurableExecutionRolePolicy` that CDK attaches for the
+  checkpoint and state APIs. It has no event-source mapping.
+- **Catch-up queue (legacy).** `CatchUpQueue` is a standard SQS queue (1-day
+  retention, 15-minute visibility timeout). Nothing sends to it any more. It and
+  its event-source mapping stay for this release only, so messages already in
+  flight at deploy time are not lost: the consumer hands each one to the catch-up
+  function. Follow-up: remove the queue and the mapping.
 - **Concurrency.** `maxCloudSessions` maps to the consumer function's RESERVED
   CONCURRENCY. Because the queue is FIFO and the producer sets
   `MessageGroupId = sessionId`, SQS already serializes work per session; the
@@ -336,27 +349,35 @@ invocation does not have to wait for it. When the turn is still running with
 90 s left before the 15-minute deadline (the consumer's `DETACH_MARGIN_MS` env
 var overrides the 90 s, in milliseconds), the consumer flushes what it has,
 stops the engine (the cloud turn keeps running), logs `turn_detached`, emits
-the `TurnDetached` metric, and sends a catch-up message to `CatchUpQueue` with
-a 60 s delay. While detached, the session META stays `status: running` with
-`activeTurnId` set to the turn. Each catch-up run starts a fresh engine, makes
+the `TurnDetached` metric, and starts a durable execution of the catch-up
+function (asynchronous invoke of the `live` alias, execution name `cu-` plus the
+first 40 hex characters of `sha256(sessionId:turnId)`, so a repeated start for
+the same turn is deduplicated; `catch_up_started`). While detached, the session META stays `status: running` with
+`activeTurnId` set to the turn. The execution loops: a `catch-up-N` step starts a fresh engine, makes
 one remote `session/load`, and compares the replay of the detached turn with
 the events already in the log for that `turnId`. The catch-up message carries
 the turn's position among the replay's turns (1 for a launch; for a follow-up,
 the number of turns in the load replay taken before the prompt, plus 1), so a
 replay that does not hold the turn yet writes nothing and is retried. A
 redelivered command that finds its own turn still running (its first delivery
-died before it could detach) also schedules a catch-up; that one has no
+died before it could detach) also starts a catch-up (the same execution name makes this idempotent); that one has no
 position, uses the replay's last turn, and writes nothing if that turn's text
 diverges from the log (`catch_up_segment_mismatch`). Text chunks are matched by prefix,
 tool calls by `(toolCallId, status)`, other events by count, so only missing
 events are appended and a repeated catch-up writes nothing twice. When the
 replay contains `turn_end`, the turn settles (`prompt.response`, session back
-to `idle`, `CatchUpCompleted`); otherwise the run schedules the next message.
+to `idle`, `CatchUpCompleted`); otherwise the execution waits (`wait-N`, 60 s by default; the catch-up
+function's `CATCH_UP_DELAY_SECONDS` overrides it) and runs the next round. The
+waits are suspended by the platform, and one execution stays far below the
+30,000 operation limit (about 720 operations in 6 h). A failed step is retried
+up to 3 times; a failed `session/load` is a round, not a failed execution.
 A turn with no `turn_end` 6 h after it detached is failed like any failed turn
 (`turn.failed` with `rawType: "catch_up_expired"`, `CatchUpExpired` and
-`CloudTurnFailed` metrics, session back to `idle`). A catch-up message for a
-session that is gone, failed, or has moved to another turn is dropped
-(`catch_up_stale`).
+`CloudTurnFailed` metrics, session back to `idle`). A catch-up for a
+session that is gone, failed, or has moved to another turn ends the execution
+without writing (`catch_up_stale`). Inspect executions with
+`aws lambda list-durable-executions-by-function` and
+`get-durable-execution-history` (see [testing.md](testing.md)).
 
 Because META stays `running`, a follow-up, steer, cancel or `whenBusy=queue`
 sent during a detached turn is rejected as mid-turn, exactly as it is during a

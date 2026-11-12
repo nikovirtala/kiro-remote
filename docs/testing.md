@@ -66,7 +66,10 @@ mise exec -- pnpm exec cdk synth --quiet -o /tmp/kiro-remote-synth \
 ```
 
 `/tmp/kiro-remote-synth/KiroRemoteStack.template.json` then holds the
-`CatchUpQueue` and two `AWS::Lambda::EventSourceMapping` resources, and no
+the durable catch-up function (`DurableConfig`), its retained `AWS::Lambda::Version`
+and the `live` `AWS::Lambda::Alias`, the legacy `CatchUpQueue` and two
+`AWS::Lambda::EventSourceMapping` resources (both on the consumer, none on the
+durable function), no `RecursiveLoop: Allow` on any function, and no
 `AWS::ECS::*` or `AWS::EC2::*` resources.
 
 ## Building the bridge image and the engine smoke
@@ -107,9 +110,26 @@ and a real Kiro API key:
   function (in the Lambda console, so the other env vars stay as they are) to
   `890000`, which detaches about 10 s into a turn on the 15-minute function.
   Send a prompt that runs longer than that, once as a launch and once as a
-  follow-up. Expect `turn_detached`, then one or more `catch_up_pending`, then
+  follow-up. Expect `turn_detached` and `catch_up_started` on the consumer, which starts
+  one durable execution of the catch-up function (alias `live`) named
+  `cu-<40 hex chars>`, derived from the session and turn ids. Then, on the
+  catch-up function, one or more `catch_up_pending` and finally
   `catch_up_completed`, with the session back to `idle` and the turn's text in
-  the event log once, without duplicates. This shows whether stopping the
+  the event log once, without duplicates. Inspect the execution:
+
+  ```bash
+  aws lambda list-durable-executions-by-function \
+    --function-name <catch-up function name>:live --region eu-north-1
+  aws lambda get-durable-execution-history \
+    --durable-execution-arn <DurableExecutionArn from the list> --region eu-north-1
+  ```
+
+  The history shows one `catch-up-N` step per round with a `wait-N` between
+  rounds, and ends `SUCCEEDED`. For a short run, also set `CATCH_UP_DELAY_SECONDS`
+  (default 60) on the catch-up function, for example to `10`. Also check that
+  the `RecursiveInvocationsDropped` metric of the consumer and the catch-up
+  function stays 0: no function opts out of recursive loop detection any more,
+  and whether durable resumptions count towards it is verified by this run. This shows whether stopping the
   engine leaves the cloud turn running and whether a remote `session/load`
   replays a running turn. A `catch_up_segment_mismatch` or a catch-up that
   stays pending after the turn finished in Kiro is a failure to report.
