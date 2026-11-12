@@ -64,6 +64,16 @@ function imageFunctions(t: Template): Array<{ Properties: Record<string, unknown
   return Object.values(found) as Array<{ Properties: Record<string, unknown> }>;
 }
 
+/** The image function whose CMD is `cmd`. */
+function commandOf(
+  fns: Array<{ Properties: Record<string, unknown> }>,
+  cmd: string,
+): { Properties: Record<string, unknown> } | undefined {
+  return fns.find((fn) =>
+    (fn.Properties.ImageConfig as { Command?: string[] } | undefined)?.Command?.includes(cmd),
+  );
+}
+
 /** The environment variables of a synthesized Lambda function. */
 function envOf(fn: { Properties: Record<string, unknown> }): Record<string, unknown> {
   return (fn.Properties.Environment as { Variables?: Record<string, unknown> })?.Variables ?? {};
@@ -212,7 +222,7 @@ describe("KiroRemote", () => {
     // not-yet-deployed placeholder ECR repo -- NOT a CDK container asset
     // (which would require a Docker build at synth time).
     const images = imageFunctions(template);
-    expect(images.length).toBe(2);
+    expect(images.length).toBe(3);
     for (const fn of images) {
       const imageUri = JSON.stringify((fn.Properties.Code as { ImageUri?: unknown }).ImageUri);
       expect(imageUri).toContain("kiro-remote-bridge-lambda-placeholder");
@@ -225,7 +235,7 @@ describe("KiroRemote", () => {
     // makes the engine ITSELF emit verbose diagnostics to stderr (which the
     // transport surfaces on failure).
     const images = imageFunctions(template);
-    expect(images.length).toBe(2);
+    expect(images.length).toBe(3);
     for (const fn of images) {
       expect(envOf(fn).BRIDGE_LOG_LEVEL).toBe("debug");
       expect(envOf(fn).KIRO_LOG_LEVEL).toBe("debug");
@@ -257,12 +267,12 @@ describe("KiroRemote", () => {
 
     // Both bridge functions resolve the key from the provided ARN.
     const images = imageFunctions(t);
-    expect(images.length).toBe(2);
+    expect(images.length).toBe(3);
     for (const fn of images) {
       expect(envOf(fn).KIRO_API_KEY_SECRET_ARN).toBe(arn);
     }
 
-    // Exactly the consumer and caps-publisher roles are granted GetSecretValue
+    // Exactly the consumer, durable catch-up and caps-publisher roles are granted GetSecretValue
     // on the exact imported ARN (no created secret Ref, no wildcard resource).
     const policies = t.findResources("AWS::IAM::Policy");
     const secretGrantRoles = new Set<string>();
@@ -286,7 +296,8 @@ describe("KiroRemote", () => {
         }
       }
     }
-    expect(secretGrantRoles.size).toBe(2);
+    expect(secretGrantRoles.size).toBe(3);
+    expect([...secretGrantRoles].some((r) => r.includes("CatchUpFn"))).toBe(true);
     expect([...secretGrantRoles].some((r) => r.includes("BridgeConsumerFn"))).toBe(true);
     expect([...secretGrantRoles].some((r) => r.includes("BridgeCapsPublisherFn"))).toBe(true);
   });
@@ -458,7 +469,7 @@ describe("KiroRemote Lambda bridge", () => {
   test("provisions the arm64 DockerImageFunction consumer wired to the FIFO queue", () => {
     // Two container-image functions: the SQS consumer + the caps publisher.
     const images = imageFunctions(t);
-    expect(images.length).toBe(2);
+    expect(images.length).toBe(3);
     // Both are arm64.
     for (const fn of images) {
       expect(fn.Properties.Architectures).toEqual(["arm64"]);
@@ -469,9 +480,12 @@ describe("KiroRemote Lambda bridge", () => {
     const consumer = images.find((fn) => (fn.Properties.Timeout as number) === 900);
     expect(consumer).toBeDefined();
     expect(consumer?.Properties.ReservedConcurrentExecutions).toBe(10);
-    // The catch-up queue re-triggers the consumer once per check; Lambda's
-    // recursive loop detection would stop that after ~16 rounds.
-    expect(consumer?.Properties.RecursiveLoop).toBe("Allow");
+    // No function opts out of Lambda's recursive loop detection.
+    for (const fn of Object.values(t.findResources("AWS::Lambda::Function"))) {
+      expect([undefined, "Terminate"]).toContain(
+        (fn.Properties as { RecursiveLoop?: string }).RecursiveLoop,
+      );
+    }
 
     // Two native SQS event-source mappings (command queue + catch-up queue),
     // each with partial-batch failure reporting and a batch size of 1.
@@ -501,14 +515,15 @@ describe("KiroRemote Lambda bridge", () => {
       VisibilityTimeout: 900,
     });
 
-    // CATCH_UP_QUEUE_URL is on the consumer only, not the caps publisher.
-    expect(
-      envOf(consumer as { Properties: Record<string, unknown> }).CATCH_UP_QUEUE_URL,
-    ).toBeDefined();
-    const publisher = images.find((fn) => (fn.Properties.Timeout as number) === 300);
+    // The consumer starts durable executions through the alias and no longer
+    // sends to the catch-up queue.
+    const consumerEnv = envOf(consumer as { Properties: Record<string, unknown> });
+    expect(consumerEnv.CATCH_UP_FUNCTION_ARN).toBeDefined();
+    expect(consumerEnv.CATCH_UP_QUEUE_URL).toBeUndefined();
+    const publisher = commandOf(images, "caps-publisher.handler");
     expect(publisher).toBeDefined();
     expect(
-      envOf(publisher as { Properties: Record<string, unknown> }).CATCH_UP_QUEUE_URL,
+      envOf(publisher as { Properties: Record<string, unknown> }).CATCH_UP_FUNCTION_ARN,
     ).toBeUndefined();
 
     // The caps-publisher is invoked on a schedule.
@@ -516,6 +531,125 @@ describe("KiroRemote Lambda bridge", () => {
     t.hasResourceProperties("AWS::Events::Rule", {
       ScheduleExpression: Match.stringLikeRegexp("rate\\(6 hours\\)"),
     });
+  });
+
+  test("the durable catch-up function has a durable config, a retained version and an alias", () => {
+    const images = imageFunctions(t);
+    const catchUp = commandOf(images, "catch-up-durable.handler");
+    expect(catchUp).toBeDefined();
+    const props = catchUp?.Properties as Record<string, unknown>;
+    expect(props.Architectures).toEqual(["arm64"]);
+    expect(props.MemorySize).toBe(2048);
+    // One load round per invocation: minutes, not the 15 minute ceiling.
+    expect(props.Timeout).toBe(300);
+    // 6 h catch-up expiry + 30 min margin, so the code's own check fires first.
+    expect(props.DurableConfig).toEqual({
+      ExecutionTimeout: 6 * 3600 + 30 * 60,
+      RetentionPeriodInDays: 14,
+    });
+    expect(props.RecursiveLoop).toBeUndefined();
+    const logicalId = Object.keys(t.findResources("AWS::Lambda::Function")).find(
+      (id) => t.toJSON().Resources[id].Properties === props,
+    ) as string;
+    expect(logicalId).toBeDefined();
+
+    // Versions are retained: in-flight executions stay pinned to theirs.
+    const versions = Object.entries(t.findResources("AWS::Lambda::Version")).filter(
+      ([, v]) =>
+        (v.Properties as { FunctionName?: { Ref?: string } }).FunctionName?.Ref === logicalId,
+    );
+    expect(versions.length).toBe(1);
+    expect(versions[0][1].DeletionPolicy).toBe("Retain");
+    expect(versions[0][1].UpdateReplacePolicy).toBe("Retain");
+
+    // The alias points at that version.
+    t.resourceCountIs("AWS::Lambda::Alias", 1);
+    t.hasResourceProperties("AWS::Lambda::Alias", {
+      Name: "live",
+      FunctionName: { Ref: logicalId },
+      FunctionVersion: { "Fn::GetAtt": [versions[0][0], "Version"] },
+    });
+
+    // It gets no event-source mapping: both mappings belong to the consumer.
+    const consumerId = Object.entries(t.findResources("AWS::Lambda::Function")).find(
+      ([, f]) => (f.Properties as { Timeout?: number }).Timeout === 900,
+    )?.[0] as string;
+    const mappings = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"));
+    expect(mappings.length).toBe(2);
+    for (const esm of mappings) {
+      expect((esm.Properties as { FunctionName: { Ref: string } }).FunctionName.Ref).toBe(
+        consumerId,
+      );
+    }
+  });
+
+  test("the consumer may invoke the catch-up alias only", () => {
+    const aliasId = Object.keys(t.findResources("AWS::Lambda::Alias"))[0];
+    const consumerEnv = envOf(
+      Object.values(t.findResources("AWS::Lambda::Function")).find(
+        (f) => (f.Properties as { Timeout?: number }).Timeout === 900,
+      ) as { Properties: Record<string, unknown> },
+    );
+    expect(consumerEnv.CATCH_UP_FUNCTION_ARN).toEqual({ Ref: aliasId });
+
+    const invokes: unknown[] = [];
+    for (const [, policy] of Object.entries(t.findResources("AWS::IAM::Policy"))) {
+      const props = policy.Properties as {
+        PolicyDocument: { Statement: Array<{ Action?: string | string[]; Resource?: unknown }> };
+        Roles?: Array<{ Ref?: string }>;
+      };
+      for (const stmt of props.PolicyDocument.Statement) {
+        const actions = ([] as string[]).concat(stmt.Action ?? []);
+        if (actions.includes("lambda:InvokeFunction")) {
+          expect(props.Roles?.[0]?.Ref).toContain("BridgeConsumerFn");
+          invokes.push(stmt.Resource);
+        }
+      }
+    }
+    // Exactly one grant, on the alias ARN (no unqualified function, no wildcard).
+    expect(invokes).toEqual([{ Ref: aliasId }]);
+  });
+
+  test("the durable catch-up role is granted the same data plane access as the consumer's catch-up", () => {
+    const catchUpPolicies = Object.values(t.findResources("AWS::IAM::Policy")).filter((p) =>
+      (p.Properties as { Roles?: Array<{ Ref?: string }> }).Roles?.[0]?.Ref?.includes("CatchUpFn"),
+    );
+    expect(catchUpPolicies.length).toBeGreaterThan(0);
+    const services = new Set<string>();
+    for (const policy of catchUpPolicies) {
+      const doc = (
+        policy.Properties as {
+          PolicyDocument: { Statement: Array<{ Action?: string | string[] }> };
+        }
+      ).PolicyDocument;
+      for (const stmt of doc.Statement) {
+        for (const a of ([] as string[]).concat(stmt.Action ?? [])) services.add(a.split(":")[0]);
+      }
+    }
+    expect(services.has("dynamodb")).toBe(true);
+    expect(services.has("s3")).toBe(true);
+    expect(services.has("secretsmanager")).toBe(true);
+    expect(services.has("*")).toBe(false);
+    // It consumes no queue and may not invoke functions.
+    expect(services.has("lambda")).toBe(false);
+  });
+
+  test("the durable role carries the durable execution checkpoint permissions", () => {
+    const roles = t.findResources("AWS::IAM::Role");
+    const catchUpRole = Object.values(roles).find((r) =>
+      JSON.stringify((r.Properties as { ManagedPolicyArns?: unknown }).ManagedPolicyArns).includes(
+        "AWSLambdaBasicDurableExecutionRolePolicy",
+      ),
+    );
+    expect(catchUpRole).toBeDefined();
+    // Only one role has it.
+    expect(
+      Object.values(roles).filter((r) =>
+        JSON.stringify(
+          (r.Properties as { ManagedPolicyArns?: unknown }).ManagedPolicyArns,
+        ).includes("Durable"),
+      ).length,
+    ).toBe(1);
   });
 
   test("grants the consumer scoped data-plane access to its own table/bucket/queues/secret", () => {
@@ -575,8 +709,8 @@ describe("KiroRemote Lambda bridge", () => {
     for (const runtime of runtimes) {
       expect(runtime).toBe("nodejs26.x");
     }
-    // Sanity: the two container-image bridge functions carry no Runtime.
-    expect(imageFunctions(t).length).toBe(2);
+    // Sanity: the three container-image bridge functions carry no Runtime.
+    expect(imageFunctions(t).length).toBe(3);
   });
 });
 
