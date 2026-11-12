@@ -16,12 +16,19 @@
  */
 
 import { type DurableContext, withDurableExecution } from "@aws/durable-execution-sdk-js";
-import { type CatchUpResult, catchUpDelaySeconds, isCatchUpMessage } from "./catch-up.ts";
+import {
+  CATCH_UP_MAX_AGE_MS,
+  type CatchUpResult,
+  catchUpDelaySeconds,
+  isCatchUpMessage,
+} from "./catch-up.ts";
 import { consumerConfigFromEnv, LambdaConsumer } from "./lambda-consumer.ts";
+import { createLogger, type Logger } from "./logger.ts";
 
 /** What the execution returns: the last round's state and how many rounds ran. */
 export interface CatchUpSummary {
-  state: CatchUpResult["state"];
+  /** `step_failed`: the step kept throwing until the expiry horizon; the turn was not settled. */
+  state: CatchUpResult["state"] | "step_failed";
   attempts: number;
 }
 
@@ -45,27 +52,50 @@ function stepRetryStrategy(
 export function createCatchUpHandler(
   consumer: () => Promise<LambdaConsumer>,
   env: NodeJS.ProcessEnv = process.env,
+  logger: Logger = createLogger(),
 ) {
   return withDurableExecution(
     async (event: unknown, context: DurableContext): Promise<CatchUpSummary> => {
       if (!isCatchUpMessage(event)) {
         throw new Error("catch-up-durable: payload is not a catch-up message");
       }
-      const delay = catchUpDelaySeconds(env);
+      const delay = catchUpDelaySeconds(env, logger);
       let attempt = event.attempt;
       for (;;) {
         const current = attempt;
-        const result = await context.step(
-          `catch-up-${current}`,
-          async (): Promise<CatchUpResult> => {
-            const { state, eventsWritten } = await (await consumer()).catchUpOnce({
-              ...event,
-              attempt: current,
-            });
-            return { state, eventsWritten };
-          },
-          { retryStrategy: stepRetryStrategy },
-        );
+        let result: CatchUpResult;
+        try {
+          result = await context.step(
+            `catch-up-${current}`,
+            async (): Promise<CatchUpResult> => {
+              const { state, eventsWritten } = await (await consumer()).catchUpOnce({
+                ...event,
+                attempt: current,
+              });
+              return { state, eventsWritten };
+            },
+            { retryStrategy: stepRetryStrategy },
+          );
+        } catch (err) {
+          // The step exhausted its retries (a throttling episode, a short
+          // outage). Failing the execution would strand the session in
+          // `running` with nothing left to settle it, so treat the round as
+          // pending: wait and go again. The in-step 6 h check then fails the
+          // turn once the dependency is back. Only a failure lasting past
+          // the expiry horizon ends the execution, which is bounded by the
+          // round count (no clock reads outside steps).
+          const rounds = current - event.attempt + 1;
+          logger.warn("catch_up_step_failed", {
+            sessionId: event.sessionId,
+            turnId: event.turnId,
+            attempt: current,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          if (rounds * delay * 1000 > CATCH_UP_MAX_AGE_MS + delay * 1000) {
+            return { state: "step_failed", attempts: rounds };
+          }
+          result = { state: "pending", eventsWritten: 0 };
+        }
         if (result.state !== "pending" && result.state !== "load_failed") {
           return { state: result.state, attempts: current - event.attempt + 1 };
         }

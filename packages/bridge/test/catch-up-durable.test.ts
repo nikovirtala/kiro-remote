@@ -76,7 +76,12 @@ const MSG: CatchUpMessage = {
 
 async function setup(
   scenarios: unknown[],
-  opts: { session?: Partial<SessionMetaItem>; env?: NodeJS.ProcessEnv } = {},
+  opts: {
+    session?: Partial<SessionMetaItem>;
+    env?: NodeJS.ProcessEnv;
+    /** catchUpOnce throws this many times in a row before the real one runs. */
+    throwTimes?: number;
+  } = {},
 ) {
   const ddb = new FakeDocClient() as unknown as DynamoDBDocumentClient;
   const s3 = new FakeS3Client();
@@ -130,8 +135,27 @@ async function setup(
     env: { KIRO_API_KEY: "ksk_test_key" },
     now: () => (clock += 1),
   });
+  let throwsLeft = opts.throwTimes ?? 0;
+  const flaky = new Proxy(consumer, {
+    get(target, prop, receiver) {
+      if (prop === "catchUpOnce") {
+        return async (msg: CatchUpMessage) => {
+          if (throwsLeft > 0) {
+            throwsLeft -= 1;
+            throw new Error("dynamodb throttled");
+          }
+          return target.catchUpOnce(msg);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
   const runner = new LocalDurableTestRunner({
-    handlerFunction: createCatchUpHandler(async () => consumer, opts.env ?? {}),
+    handlerFunction: createCatchUpHandler(
+      async () => flaky,
+      opts.env ?? {},
+      createLogger({ level: "debug", sink: (l) => logLines.push(l) }),
+    ),
   });
   const turnEvents = async () =>
     (await repo.queryEvents(SID, 0, { limit: 1000 })).filter((e) => e.turnId === TURN);
@@ -242,6 +266,17 @@ describe("durable catch-up handler", () => {
     expect(t.logLines.some((l) => l.includes("catch_up_load_failed"))).toBe(true);
     const chunks = (await t.turnEvents()).filter((e) => e.type === "message.chunk");
     expect(chunks.map(textOf).join("")).toBe("c0 c1 ");
+  });
+
+  test("a step that exhausts its retries is a pending round, not a failed execution", async () => {
+    // Three attempts of round 1 throw, then the real rounds run.
+    const t = await setup([finished(1)], { throwTimes: 3 });
+    const exec = await t.runner.run({ payload: MSG });
+
+    expect(exec.getStatus()).toBe("SUCCEEDED");
+    expect(exec.getResult()).toEqual({ state: "completed", attempts: 2 });
+    expect(t.logLines.some((l) => l.includes("catch_up_step_failed"))).toBe(true);
+    expect(exec.getOperations().filter((o) => o.getType() === "WAIT")).toHaveLength(1);
   });
 
   test("CATCH_UP_DELAY_SECONDS overrides the wait", async () => {
