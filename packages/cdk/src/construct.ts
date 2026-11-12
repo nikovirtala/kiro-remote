@@ -51,12 +51,12 @@ import { Rule, RuleTargetInput, Schedule } from "aws-cdk-lib/aws-events";
 import { LambdaFunction as LambdaFunctionTarget } from "aws-cdk-lib/aws-events-targets";
 import { Key } from "aws-cdk-lib/aws-kms";
 import {
+  Alias,
   Architecture,
   Code,
   DockerImageCode,
   DockerImageFunction,
   Function as LambdaFunction,
-  RecursiveLoop,
   Runtime,
   RuntimeFamily,
 } from "aws-cdk-lib/aws-lambda";
@@ -114,6 +114,20 @@ export const DEFAULT_EVENT_TTL_DAYS = 30;
  * caps publisher). The OAuth callback ran out of memory at 256 MB.
  */
 export const LAMBDA_MEMORY_MB = 2048;
+
+/**
+ * The bridge gives up on a detached turn this long after it detached
+ * (CATCH_UP_MAX_AGE_MS in packages/bridge/src/catch-up.ts; the CDK package does
+ * not import the bridge, so keep the two in step).
+ */
+export const CATCH_UP_MAX_AGE_HOURS = 6;
+
+/**
+ * Margin added to the durable execution timeout so the code's own 6 h expiry
+ * check (which fails the turn cleanly) always fires before the platform
+ * times the execution out.
+ */
+export const CATCH_UP_EXECUTION_MARGIN_MINUTES = 30;
 
 export interface KiroRemoteProps {
   /**
@@ -337,6 +351,10 @@ export class KiroRemote extends Construct {
   readonly auth: KiroRemoteAuth;
   /** The bridge's SQS FIFO command consumer (container-image Lambda). */
   readonly consumerFn: DockerImageFunction;
+  /** The durable catch-up function (one durable execution per detached turn). */
+  readonly catchUpFn: DockerImageFunction;
+  /** Alias the consumer invokes to start durable executions. */
+  readonly catchUpAlias: Alias;
   /** The bridge's one-shot CONFIG#CAPS publisher (container-image Lambda). */
   readonly capsPublisherFn: DockerImageFunction;
   /**
@@ -713,6 +731,7 @@ export class KiroRemote extends Construct {
     // its own entry from the ONE image asset.
     const CONSUMER_CMD = ["lambda-consumer.handler"];
     const CAPS_CMD = ["caps-publisher.handler"];
+    const CATCH_UP_CMD = ["catch-up-durable.handler"];
     const buildLambdaImage = (cmd: string[]): DockerImageCode =>
       props.lambdaImage ? props.lambdaImage(cmd) : placeholderLambdaImage(this, cmd);
 
@@ -734,15 +753,13 @@ export class KiroRemote extends Construct {
       BRIDGE_LOG_LEVEL: "debug",
     };
 
-    // Catch-up queue: a STANDARD (non-FIFO) queue, because a FIFO queue cannot
-    // delay a single message. When a turn is still running ~90 s before the
-    // consumer's deadline, the consumer detaches (the cloud turn keeps running
-    // in Kiro's sandbox, META stays `running`) and sends a catch-up message
-    // here with a 60 s delay. Each catch-up run starts a fresh engine, does
-    // one remote `session/load`, appends the events the log is missing, and
-    // either settles the turn on `turn_end` or re-schedules itself; after 6 h
-    // the turn is failed. Visibility must be >= the consumer's 15-minute
-    // timeout, as the event-source mapping requires.
+    // LEGACY catch-up queue, kept for this release only. Catch-up now runs as
+    // a durable execution of the catch-up function (below); nothing sends to
+    // this queue any more. It stays, with its event-source mapping, so messages
+    // already in flight at deploy time are still delivered: the consumer hands
+    // each one to the durable function. Follow-up: remove the queue and the
+    // mapping. Visibility must be >= the consumer's 15-minute timeout, as the
+    // event-source mapping requires.
     this.catchUpQueue = new Queue(this, "CatchUpQueue", {
       retentionPeriod: Duration.days(1),
       visibilityTimeout: Duration.minutes(15),
@@ -785,21 +802,14 @@ export class KiroRemote extends Construct {
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.minutes(15),
       reservedConcurrentExecutions: maxCloudSessions,
-      // The catch-up loop is intentional: each catch-up invocation that finds
-      // the turn still running re-sends itself to the catch-up queue, which
-      // triggers this same function. Lambda's recursive loop detection stops
-      // such a chain after ~16 invocations (about 30 min into a turn), which
-      // silently strands long turns. The loop is bounded by the 6 h catch-up
-      // expiry, so allow it. Stopgap until catch-up no longer re-enqueues itself.
-      recursiveLoop: RecursiveLoop.ALLOW,
       environment: {
         ...bridgeLambdaEnv,
         // On Lambda only /tmp is writable, so the per-turn working directory
         // lives under it (durable state is in DynamoDB/S3, never on local
         // disk).
         WORKSPACE_ROOT: "/tmp/workspace",
-        // Consumer only: the caps publisher never detaches a turn.
-        CATCH_UP_QUEUE_URL: this.catchUpQueue.queueUrl,
+        // Consumer only: the caps publisher never detaches a turn. Set below,
+        // once the alias exists.
         // With the GitHub feature on, the consumer drains wake items and asks
         // the GitHub consumer to harvest PR links when a turn settles. It holds
         // no GitHub credentials.
@@ -826,14 +836,60 @@ export class KiroRemote extends Construct {
       }),
     );
 
-    // Second mapping: the catch-up queue feeds the SAME handler (it tells a
-    // catch-up body apart by `kind: "catchUp"`).
+    // Second mapping: the LEGACY catch-up queue feeds the SAME handler, which
+    // hands each message to the durable catch-up function (see CatchUpQueue).
     this.consumerFn.addEventSource(
       new SqsEventSource(this.catchUpQueue, {
         batchSize: 1,
         reportBatchItemFailures: true,
       }),
     );
+
+    // The durable catch-up function: same image, its own entry. One durable
+    // execution per detached turn polls the cloud turn (session/load) until it
+    // ends. The consumer starts it asynchronously (a durable function cannot be
+    // an SQS event-source target for longer than 15 minutes in total, and
+    // Lambda's recursive loop detection must stay on). It has NO event-source
+    // mapping. The function timeout covers one load round only; waits between
+    // rounds are suspended by the platform and cost nothing.
+    this.catchUpFn = new DockerImageFunction(this, "CatchUpFn", {
+      code: buildLambdaImage(CATCH_UP_CMD),
+      architecture: Architecture.ARM_64,
+      memorySize: LAMBDA_MEMORY_MB,
+      timeout: Duration.minutes(5),
+      // The code gives up (and fails the turn) 6 h after detach; the execution
+      // timeout sits above that so the code's check always fires first.
+      durableConfig: {
+        executionTimeout: Duration.minutes(
+          CATCH_UP_MAX_AGE_HOURS * 60 + CATCH_UP_EXECUTION_MARGIN_MINUTES,
+        ),
+        retentionPeriod: Duration.days(14),
+      },
+      environment: {
+        ...bridgeLambdaEnv,
+        WORKSPACE_ROOT: "/tmp/workspace",
+        ...(this.githubQueue
+          ? {
+              COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+              GITHUB_QUEUE_URL: this.githubQueue.queueUrl,
+            }
+          : {}),
+      },
+    });
+
+    // Durable executions are pinned to the version that started them, so old
+    // versions must outlive the deployment that replaced them: RETAIN keeps
+    // them when a new version is published. Durable functions require a
+    // qualified ARN, hence the alias the consumer invokes.
+    const catchUpVersion = this.catchUpFn.currentVersion;
+    catchUpVersion.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    this.catchUpAlias = new Alias(this, "CatchUpAlias", {
+      aliasName: "live",
+      version: catchUpVersion,
+    });
+    this.consumerFn.addEnvironment("CATCH_UP_FUNCTION_ARN", this.catchUpAlias.functionArn);
+    // InvokeFunction on the alias ARN only.
+    this.catchUpAlias.grantInvoke(this.consumerFn);
 
     // The caps-publisher runs the SAME image with a different handler CMD.
     // It is short-lived: start the bundled engine, `initialize`, write
@@ -853,12 +909,21 @@ export class KiroRemote extends Construct {
     this.table.grantReadWriteData(this.consumerFn);
     this.bucket.grantReadWrite(this.consumerFn);
     this.commandQueue.grantConsumeMessages(this.consumerFn);
-    this.catchUpQueue.grantSendMessages(this.consumerFn);
     this.catchUpQueue.grantConsumeMessages(this.consumerFn);
     this.kiroApiKeySecret.grantRead(this.consumerFn);
     if (this.githubQueue) {
       this.commandQueue.grantSendMessages(this.consumerFn);
       this.githubQueue.grantSendMessages(this.consumerFn);
+    }
+
+    // The durable catch-up function gets what the consumer needs to load and
+    // settle a turn (no command-queue consumption, no catch-up queue).
+    this.table.grantReadWriteData(this.catchUpFn);
+    this.bucket.grantReadWrite(this.catchUpFn);
+    this.kiroApiKeySecret.grantRead(this.catchUpFn);
+    if (this.githubQueue) {
+      this.commandQueue.grantSendMessages(this.catchUpFn);
+      this.githubQueue.grantSendMessages(this.catchUpFn);
     }
 
     this.table.grantReadWriteData(this.capsPublisherFn);
