@@ -292,6 +292,7 @@ describe("GET /v1/sessions/{id}/turns/{turnId}", () => {
     });
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body).status).toBe("completed");
+    expect(JSON.parse(res.body).prompt).toBe("hi");
   });
 });
 

@@ -194,6 +194,11 @@ export const TurnSchema = z.object({
   endedAt: z.string().nullable(),
   /** Why the turn started. Absent for turns recorded before triggers existed. */
   trigger: TurnTriggerSchema.optional(),
+  /**
+   * The prompt the turn ran with (GET only): what the user sent, or for a
+   * GitHub wake the prompt kiro-remote rendered from the events.
+   */
+  prompt: z.string().optional(),
 });
 export type TurnView = z.infer<typeof TurnSchema>;
 
