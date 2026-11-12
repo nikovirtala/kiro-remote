@@ -156,6 +156,9 @@ export async function getTurn(
     trigger: turn.trigger
       ? { source: turn.trigger.source, deliveryIds: turn.trigger.deliveryIds }
       : { source: "user", deliveryIds: [] },
+    // The session owner can see what a turn ran with, including what a GitHub
+    // wake told the agent (which text was quoted, and which was withheld).
+    prompt: typeof turn.prompt === "string" ? turn.prompt : "",
   });
 }
 

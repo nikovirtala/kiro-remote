@@ -71,7 +71,9 @@ or if neither the agent nor the image reports a version.
 `GET /v1/sessions/{id}` also returns `links[]` (the PRs linked to the session,
 each with `linkedBy`: `harvest`, `trailer` or `manual`), and
 `GET /v1/sessions/{id}/turns/{turnId}` returns `trigger`
-(`{ source: "user" | "github", deliveryIds }`). The links and the GitHub-woken
+(`{ source: "user" | "github", deliveryIds }`) and `prompt`, the prompt the
+turn ran with: what you sent, or for a GitHub wake the prompt kiro-remote
+rendered (so you can see which text was quoted and which was withheld). The links and the GitHub-woken
 turns exist only when the optional [GitHub wake](./github.md) is deployed.
 
 ### Request-body shapes
