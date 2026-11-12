@@ -49,6 +49,13 @@ import {
 import { Repository as EcrRepository } from "aws-cdk-lib/aws-ecr";
 import { Rule, RuleTargetInput, Schedule } from "aws-cdk-lib/aws-events";
 import { LambdaFunction as LambdaFunctionTarget } from "aws-cdk-lib/aws-events-targets";
+import {
+  ManagedPolicy,
+  Policy,
+  PolicyStatement,
+  Role,
+  ServicePrincipal,
+} from "aws-cdk-lib/aws-iam";
 import { Key } from "aws-cdk-lib/aws-kms";
 import {
   Alias,
@@ -852,7 +859,17 @@ export class KiroRemote extends Construct {
     // Lambda's recursive loop detection must stay on). It has NO event-source
     // mapping. The function timeout covers one load round only; waits between
     // rounds are suspended by the platform and cost nothing.
+    // An explicit role keeps CDK from attaching the broad AWS managed
+    // AWSLambdaBasicDurableExecutionRolePolicy (logs and the durable APIs on
+    // Resource "*"); the durable APIs are granted below, scoped to this function.
+    const catchUpRole = new Role(this, "CatchUpFnRole", {
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+      ],
+    });
     this.catchUpFn = new DockerImageFunction(this, "CatchUpFn", {
+      role: catchUpRole,
       code: buildLambdaImage(CATCH_UP_CMD),
       architecture: Architecture.ARM_64,
       memorySize: LAMBDA_MEMORY_MB,
@@ -875,6 +892,21 @@ export class KiroRemote extends Construct {
             }
           : {}),
       },
+    });
+
+    // Checkpoint and state APIs for durable executions, and nothing else. The
+    // execution ARN is qualified with the resolved version, so the resource is
+    // `<function-arn>:*`. A standalone Policy (not the role's default policy)
+    // avoids a circular dependency: the function depends on the role's default
+    // policy, while this policy depends on the function's ARN.
+    new Policy(this, "CatchUpDurablePolicy", {
+      roles: [catchUpRole],
+      statements: [
+        new PolicyStatement({
+          actions: ["lambda:CheckpointDurableExecution", "lambda:GetDurableExecutionState"],
+          resources: [`${this.catchUpFn.functionArn}:*`],
+        }),
+      ],
     });
 
     // Durable executions are pinned to the version that started them, so old
