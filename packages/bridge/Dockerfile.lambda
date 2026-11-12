@@ -20,18 +20,21 @@
 #   command and env are an INTERNAL, unversioned interface of kiro-cli, so a
 #   KIRO_CLI_VERSION bump must re-run the engine smoke before deploy; the
 #   build fails loudly here if the unpacked layout changes.
-# - esbuild-bundles BOTH Lambda entries at IMAGE-BUILD time into single
+# - esbuild-bundles ALL THREE Lambda entries at IMAGE-BUILD time into single
 #   self-contained CommonJS files, so there is no bare `@nikovirtala/*` import
 #   and no raw `.ts` under a node_modules path at runtime (Node refuses to
 #   type-strip `.ts` resolved under node_modules):
 #     - dist/lambda-consumer.cjs  -> the SQS FIFO cloud consumer `handler`
 #       (packages/bridge/src/lambda-consumer.ts), and
 #     - dist/caps-publisher.cjs   -> the one-shot CONFIG#CAPS publisher
-#       `handler` (packages/bridge/src/caps-publisher.ts).
+#       `handler` (packages/bridge/src/caps-publisher.ts), and
+#     - dist/catch-up-durable.cjs -> the durable catch-up `handler`
+#       (packages/bridge/src/catch-up-durable.ts), wrapped with
+#       withDurableExecution.
 # - Uses the AWS Lambda Node base image so the handler is invokable by the
 #   Lambda runtime. The CDK construct selects WHICH handler each function runs
 #   by overriding the image CMD (the `<file>.handler` string), so one image
-#   serves both the consumer and the publisher.
+#   serves the consumer, the publisher and the durable catch-up.
 # - KIRO_API_KEY is NEVER baked into the image: the functions resolve it at
 #   runtime from Secrets Manager via KIRO_API_KEY_SECRET_ARN (resolveKiroApiKey).
 
@@ -54,7 +57,7 @@
 ARG NODE_VERSION=26
 
 ############################
-# deps: install workspace node_modules with pnpm and bundle both Lambda entries
+# deps: install workspace node_modules with pnpm and bundle the Lambda entries
 ############################
 # CDK passes platform: Platform.LINUX_ARM64 to DockerImageCode.fromImageAsset,
 # so buildkit already sets the target platform from the build-level --platform
@@ -86,7 +89,7 @@ COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages/core ./packages/core
 COPY packages/bridge ./packages/bridge
 
-# Bundle BOTH Lambda entries to SINGLE self-contained CommonJS files.
+# Bundle ALL Lambda entries to SINGLE self-contained CommonJS files.
 # @aws-sdk/* is BUNDLED IN (no --external) so the runtime image needs no
 # node_modules at all; `.cjs` forces
 # CommonJS (the repo-root package.json is "type": "module"); and
@@ -112,7 +115,14 @@ RUN packages/cdk/node_modules/.bin/esbuild packages/bridge/src/lambda-consumer.t
       --target=node26 \
       --format=cjs \
       --resolve-extensions=.ts,.js,.mjs,.json \
-      --outfile=/app/dist/caps-publisher.cjs
+      --outfile=/app/dist/caps-publisher.cjs \
+    && packages/cdk/node_modules/.bin/esbuild packages/bridge/src/catch-up-durable.ts \
+      --bundle \
+      --platform=node \
+      --target=node26 \
+      --format=cjs \
+      --resolve-extensions=.ts,.js,.mjs,.json \
+      --outfile=/app/dist/catch-up-durable.cjs
 
 ############################
 # kiro: install kiro-cli and unpack its bundled engine into /opt/kiro
@@ -205,15 +215,16 @@ ENV KIRO_CLI_VERSION=${KIRO_CLI_VERSION}
 ENV HOME=/tmp \
     KIRO_HOME=/tmp/.kiro
 
-# Both self-contained bundles are the only app artifacts needed at runtime:
+# The self-contained bundles are the only app artifacts needed at runtime:
 # each inlines the @nikovirtala/* workspace code AND @aws-sdk/*, so there is no
 # node_modules and no raw .ts source in the runtime image. They land under the
 # Lambda task root so the CMD can address them as `<file>.handler`.
 COPY --from=deps /app/dist/lambda-consumer.cjs ${LAMBDA_TASK_ROOT}/lambda-consumer.cjs
 COPY --from=deps /app/dist/caps-publisher.cjs ${LAMBDA_TASK_ROOT}/caps-publisher.cjs
+COPY --from=deps /app/dist/catch-up-durable.cjs ${LAMBDA_TASK_ROOT}/catch-up-durable.cjs
 
 # Default to the SQS consumer handler. The CDK construct overrides this CMD for
-# the caps-publisher function (to `caps-publisher.handler`) so one image serves
-# both functions. The AWS Lambda base image's ENTRYPOINT is the Runtime
+# the caps-publisher function (to `caps-publisher.handler` or `catch-up-durable.handler`) so one image
+# serves all three functions. The AWS Lambda base image's ENTRYPOINT is the Runtime
 # Interface Client, which invokes the handler named by this CMD.
 CMD ["lambda-consumer.handler"]

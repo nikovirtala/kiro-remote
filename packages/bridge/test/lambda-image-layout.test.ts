@@ -46,3 +46,16 @@ describe("Lambda image engine layout", () => {
     expect(dockerfile).toContain(`COPY --from=kiro ${KAS_ROOT} ${KAS_ROOT}`);
   });
 });
+
+describe("Lambda image entries", () => {
+  test.each(["lambda-consumer", "caps-publisher", "catch-up-durable"])(
+    "the Dockerfile bundles and ships %s.cjs",
+    (name) => {
+      expect(dockerfile).toContain(`packages/bridge/src/${name}.ts`);
+      expect(dockerfile).toContain(`--outfile=/app/dist/${name}.cjs`);
+      expect(dockerfile).toContain(
+        `COPY --from=deps /app/dist/${name}.cjs \${LAMBDA_TASK_ROOT}/${name}.cjs`,
+      );
+    },
+  );
+});
