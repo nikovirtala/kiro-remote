@@ -1,7 +1,16 @@
+import { HttpClientError } from "@nikovirtala/kiro-remote-mcp";
 import { describe, expect, it } from "vitest";
 import { Report } from "./report.ts";
 import { REASON_NO_GITHUB, runSteps } from "./runner.ts";
-import { expectNoWake, GITHUB_STEPS, githubWakes, STEPS } from "./steps.ts";
+import {
+  checkWakePrompt,
+  expectNoWake,
+  GH_QUOTE_BEGIN,
+  GITHUB_STEPS,
+  githubWakes,
+  STEPS,
+  untrustedExpected,
+} from "./steps.ts";
 
 describe("githubWakes", () => {
   const wake = (seq: number, turnId: string, source: string, deliveryIds: unknown) => ({
@@ -59,6 +68,25 @@ describe("expectNoWake", () => {
     const { ctx, calls } = ctxWith([[{ seq: 5, turnId: "t1", type: "message.chunk" }]]);
     await expect(expectNoWake(ctx, { id: "S", cursor: 4 }, 20_000, "x")).resolves.toBeUndefined();
     expect(calls()).toBe(5); // t = 0, 5, 10, 15, 20 s
+  });
+
+  it("names auto-close as the likely cause when the session is gone (404)", async () => {
+    const ctx = {
+      deps: { now: () => 0, sleep: async () => {} },
+      state: {
+        created: new Set<string>(),
+        rest: {
+          getEvents: async () => {
+            throw new HttpClientError(404, "{}");
+          },
+        },
+      },
+    };
+    await expect(
+      expectNoWake(ctx as never, { id: "S", cursor: 4 }, 45_000, "the merge wake turn settled"),
+    ).rejects.toThrow(
+      /session was deleted after the merge wake turn settled; .*set KIRO_API_E2E_GITHUB_AUTOCLOSE=1/,
+    );
   });
 
   it("fails on a GitHub wake the harness did not cause, naming the turn and delivery", async () => {
@@ -200,6 +228,59 @@ describe("gh-checks-wake", () => {
   });
 });
 
+describe("checkWakePrompt", () => {
+  const header =
+    "[GitHub webhook] This turn was started by GitHub, not by the user: issue_comment.created on o/r#3 (delivery d1).";
+  const fact = "@me commented on PR #3.";
+  const text = "E2E X comment canary";
+  const trustedPrompt = [
+    header,
+    fact,
+    "Quoted below is text written by @me, a trusted login. ...",
+    GH_QUOTE_BEGIN,
+    "[comment]",
+    text,
+    "<<<END GITHUB QUOTE>>>",
+  ].join("\n");
+  const untrustedPrompt = [header, fact].join("\n");
+  const args = { header: "issue_comment.created", fact, text };
+
+  it("trusted: requires the text inside a quote block", () => {
+    expect(checkWakePrompt(trustedPrompt, { ...args, untrusted: false })).toEqual({ quoted: true });
+    expect(() => checkWakePrompt(untrustedPrompt, { ...args, untrusted: false })).toThrow(
+      /trusted login's text was not quoted/,
+    );
+  });
+
+  it("untrusted: requires the fact only, with no quote block and none of the text", () => {
+    expect(checkWakePrompt(untrustedPrompt, { ...args, untrusted: true })).toEqual({
+      quoted: false,
+    });
+    expect(() => checkWakePrompt(trustedPrompt, { ...args, untrusted: true })).toThrow(
+      /untrusted login's text reached the wake prompt \(quote block: true, text: true\)/,
+    );
+    // Text leaking without the markers is caught too.
+    expect(() =>
+      checkWakePrompt(`${untrustedPrompt}\n${text}`, { ...args, untrusted: true }),
+    ).toThrow(/quote block: false, text: true/);
+  });
+
+  it("rejects a prompt for another event, or without the fact", () => {
+    expect(() =>
+      checkWakePrompt(untrustedPrompt, { ...args, header: "pull_request_review", untrusted: true }),
+    ).toThrow(/header is not for pull_request_review/);
+    expect(() => checkWakePrompt(header, { ...args, untrusted: true })).toThrow(
+      /does not state "@me commented on PR #3."/,
+    );
+  });
+
+  it("the untrusted switch is KIRO_API_E2E_GITHUB_UNTRUSTED=1 only", () => {
+    expect(untrustedExpected({ KIRO_API_E2E_GITHUB_UNTRUSTED: "1" })).toBe(true);
+    expect(untrustedExpected({ KIRO_API_E2E_GITHUB_UNTRUSTED: "true" })).toBe(false);
+    expect(untrustedExpected({})).toBe(false);
+  });
+});
+
 describe("the GitHub scenario is opt-in", () => {
   it("is separate from the default steps and every step requires the github flag", () => {
     expect(STEPS.some((s) => GITHUB_STEPS.includes(s))).toBe(false);
@@ -207,6 +288,7 @@ describe("the GitHub scenario is opt-in", () => {
       "gh-launch",
       "gh-link",
       "gh-review-wake",
+      "gh-comment-wake",
       "gh-merge-wake",
       "gh-cleanup",
       "gh-chain-launch",

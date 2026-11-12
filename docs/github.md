@@ -253,7 +253,8 @@ settles turns.
 ## Where it shows up
 
 - `GET /v1/sessions/{id}`: `links[]` (`pr`, `linkedBy`, `prState`, `headSha`).
-- `GET /v1/sessions/{id}/turns/{turnId}`: `trigger` (`{ source: "user" | "github", deliveryIds }`).
+- `GET /v1/sessions/{id}/turns/{turnId}`: `trigger` (`{ source: "user" | "github", deliveryIds }`)
+  and `prompt`, the exact wake prompt the agent got.
 - `GET /v1/sessions/{id}/events`: a wake turn begins with a `session.info` event,
   `rawType: "turn_started"`, whose payload has the trigger.
 - `kiro_get_transcript`: every turn has a `trigger`.
@@ -306,8 +307,13 @@ KIRO_API_E2E_GITHUB=1 [KIRO_API_E2E_GITHUB_AUTOCLOSE=1] \
 
 Steps (after the normal ones): `gh-launch` (the agent opens a docs-only PR),
 `gh-link` (the PR is linked; reports the method), `gh-review-wake` (posts a review
-comment as the trusted login and waits for the wake turn; reports review-to-turn
-latency), `gh-merge-wake` (merges the PR and waits for the post-merge wake turn;
+comment and waits for the wake turn; reports review-to-turn latency),
+`gh-comment-wake` (posts a PR comment and waits for that wake turn). Both read the
+wake prompt from `GET /v1/sessions/{id}/turns/{turnId}` and check what was
+forwarded: by default the harness's `gh` login is trusted, so its text must be
+quoted between the markers; with `KIRO_API_E2E_GITHUB_UNTRUSTED=1` (see below)
+the prompt must state only `@<login> submitted a review…` / `@<login> commented…`,
+with no quote block and none of the text. Then `gh-merge-wake` (merges the PR and waits for the post-merge wake turn;
 with `KIRO_API_E2E_GITHUB_AUTOCLOSE=1`, also that the session is deleted), and
 `gh-cleanup` (closes the PR, deletes its branch; the session is deleted by the
 harness cleanup). After each wake turn settles, the step fails if **any**
@@ -357,6 +363,29 @@ jobs:
 The launch prompt tells the agent not to fix the failure or push anything, so
 the PR's head commit stays put and only the harness's own actions wake the
 session.
+
+### The untrusted-commenter run
+
+Trust is decided by login, so the harness tests the untrusted path with **its
+own** `gh` login made untrusted, no second account needed. A blank
+`GITHUB_TRUSTED_LOGINS` means "the repo owner", which is you, so point it at a
+login that cannot exist (GitHub logins cannot contain `--`):
+
+1. In `deploy.env`: `GITHUB_TRUSTED_LOGINS=nobody--e2e`, then deploy. While it is
+   set, **your own** reviews and comments are untrusted too: wakes state only
+   who did what.
+2. Run with the switch (the harness cannot read the stack's setting, so they
+   must match, as with auto-close):
+
+   ```bash
+   KIRO_REMOTE_URL=https://<host> KIRO_API_E2E_REPO=<owner>/<name> \
+   KIRO_API_E2E_GITHUB=1 KIRO_API_E2E_GITHUB_UNTRUSTED=1 pnpm e2e
+   ```
+3. Set `GITHUB_TRUSTED_LOGINS` back (for example to your login) and deploy.
+
+The agent has its own GitHub access, so it can still read the comment itself
+(for example `gh pr view`); the check is that kiro-remote never forwards the
+text in the wake prompt.
 
 ## Out of scope (next steps)
 

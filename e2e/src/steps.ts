@@ -815,11 +815,21 @@ export async function expectNoWake(
   const client = restOf(ctx);
   const start = ctx.deps.now();
   for (;;) {
-    const page = await client.getEvents(REST_PRINCIPAL, s.id, {
-      after: s.cursor,
-      wait: 0,
-      types: ["session.info"],
-    });
+    let page: Awaited<ReturnType<KiroRemoteClient["getEvents"]>>;
+    try {
+      page = await client.getEvents(REST_PRINCIPAL, s.id, {
+        after: s.cursor,
+        wait: 0,
+        types: ["session.info"],
+      });
+    } catch (err) {
+      if (err instanceof HttpClientError && err.status === 404) {
+        throw new Error(
+          `the session was deleted after ${after}; if the stack runs with GITHUB_AUTO_CLOSE_ON_MERGE=after_turn, set KIRO_API_E2E_GITHUB_AUTOCLOSE=1`,
+        );
+      }
+      throw err;
+    }
     const extra = githubWakes(page.events as unknown as EventLike[])[0];
     if (extra) {
       throw new Error(
@@ -838,7 +848,7 @@ async function waitForWake(
   ctx: HarnessContext,
   s: SessionCursor,
   startedAt: number,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; closeExpected?: boolean } = {},
 ) {
   const client = restOf(ctx);
   const wake = await pollUntil(
@@ -866,17 +876,29 @@ async function waitForWake(
   }
   ctx.state.ghWakeDeliveries = [...seen, ...wake.deliveryIds];
   const latencyMs = (wake.ts ? Date.parse(wake.ts) : ctx.deps.now()) - startedAt;
-  const settled = await waitForTurn({
-    after: s.cursor,
-    turnId: wake.turnId,
-    read: restEventReader(ctx, s.id),
-    now: ctx.deps.now,
-    sleep: ctx.deps.sleep,
-    ...(ctx.signal ? { signal: ctx.signal } : {}),
-    timeoutMs: ctx.deps.turnTimeoutMs,
-  });
-  s.cursor = settled.cursor;
-  return { wake, settled, latencyMs };
+  try {
+    const settled = await waitForTurn({
+      after: s.cursor,
+      turnId: wake.turnId,
+      read: restEventReader(ctx, s.id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = settled.cursor;
+    return { wake, settled: turnCaptured(settled), latencyMs };
+  } catch (err) {
+    // autoCloseOnMerge deletes the session within a second of the post-merge
+    // turn ending (seen live), which can beat the harness's next event read.
+    // The stack only auto-closes after that turn COMPLETED, so a 404 here,
+    // with a close expected, means the turn ended and the session was closed;
+    // the caller still confirms the session is gone.
+    if (opts.closeExpected && err instanceof HttpClientError && err.status === 404) {
+      return { wake, settled: { turnEndSeen: false }, latencyMs };
+    }
+    throw err;
+  }
 }
 
 const ghLaunch: Step<HarnessContext> = {
@@ -945,9 +967,82 @@ const ghLink: Step<HarnessContext> = {
   },
 };
 
+/**
+ * The stack treats the harness's GitHub login as UNTRUSTED (its
+ * GITHUB_TRUSTED_LOGINS names someone else). The harness cannot read the
+ * stack's setting, so KIRO_API_E2E_GITHUB_UNTRUSTED=1 says so; the wake prompt
+ * checks then expect the fact only, never the text.
+ */
+export function untrustedExpected(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.KIRO_API_E2E_GITHUB_UNTRUSTED === "1";
+}
+
+/** The marker kiro-remote puts around quoted trusted text (packages/github/src/render.ts). */
+export const GH_QUOTE_BEGIN = "<<<BEGIN GITHUB QUOTE>>>";
+
+/** GET /v1/sessions/{id}/turns/{turnId}: the prompt the turn ran with. */
+async function turnPrompt(ctx: HarnessContext, sessionId: string, turnId: string): Promise<string> {
+  const url = `${baseOf(ctx)}/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`;
+  const res = await ctx.deps.fetch(url, {
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${await tokensOf(ctx).accessToken()}`,
+    },
+  });
+  if (res.status !== 200) {
+    throw new Error(`GET /v1/sessions/{id}/turns/{turnId} answered ${res.status}`);
+  }
+  const body = (await res.json()) as unknown;
+  if (!isObj(body) || typeof body.prompt !== "string") {
+    throw new Error("GET /v1/sessions/{id}/turns/{turnId} has no prompt");
+  }
+  return body.prompt;
+}
+
+/** The GitHub login the harness's `gh` acts as. */
+async function ghLogin(ctx: HarnessContext): Promise<string> {
+  const user = JSON.parse(await ghOf(ctx)(["api", "user"])) as { login?: unknown };
+  if (typeof user.login !== "string" || user.login === "") {
+    throw new Error("gh api user returned no login");
+  }
+  return user.login;
+}
+
+/**
+ * Check what a wake prompt forwarded from a person's text. Trusted (the
+ * default): the text is quoted between the markers. Untrusted: only `fact`,
+ * with no quote block and none of the text.
+ */
+export function checkWakePrompt(
+  prompt: string,
+  args: { header: string; fact: string; text: string; untrusted: boolean },
+): { quoted: boolean } {
+  const first = prompt.split("\n")[0] ?? "";
+  if (!first.startsWith("[GitHub webhook]") || !first.includes(args.header)) {
+    throw new Error(`the wake prompt's header is not for ${args.header}: ${first.slice(0, 200)}`);
+  }
+  if (!prompt.includes(args.fact)) {
+    throw new Error(`the wake prompt does not state "${args.fact}"`);
+  }
+  const quoted = prompt.includes(GH_QUOTE_BEGIN);
+  const hasText = prompt.includes(args.text);
+  if (args.untrusted) {
+    if (quoted || hasText) {
+      throw new Error(
+        `an untrusted login's text reached the wake prompt (quote block: ${quoted}, text: ${hasText})`,
+      );
+    }
+  } else if (!quoted || !hasText) {
+    throw new Error(
+      `a trusted login's text was not quoted in the wake prompt (quote block: ${quoted}, text: ${hasText})`,
+    );
+  }
+  return { quoted };
+}
+
 const ghReviewWake: Step<HarnessContext> = {
   id: "gh-review-wake",
-  name: "GitHub: a trusted review comment wakes the session",
+  name: "GitHub: a review comment wakes the session (text quoted only when trusted)",
   requires: ["baseUrl", "repo", "github"],
   needs: ["gh-link"],
   async run(ctx) {
@@ -956,6 +1051,8 @@ const ghReviewWake: Step<HarnessContext> = {
     if (!pr) {
       throw new Error("no PR from gh-link");
     }
+    const login = await ghLogin(ctx);
+    const text = `E2E ${ctx.deps.runId} review canary: please reply with the word ACK.`;
     const startedAt = ctx.deps.now();
     await ghOf(ctx)([
       "api",
@@ -965,9 +1062,16 @@ const ghReviewWake: Step<HarnessContext> = {
       "-f",
       "event=COMMENT",
       "-f",
-      `body=E2E ${ctx.deps.runId}: please reply with the word ACK.`,
+      `body=${text}`,
     ]);
     const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    const untrusted = untrustedExpected();
+    const { quoted } = checkWakePrompt(await turnPrompt(ctx, s.id, wake.turnId), {
+      header: "pull_request_review.submitted (commented)",
+      fact: `@${login} submitted a review on PR #${pr.number}: commented.`,
+      text,
+      untrusted,
+    });
     // The prompt asks for a reply, which the agent may post as a PR comment
     // (it did in a live run). That comment must not wake the session again.
     await expectNoWake(ctx, s, GH_QUIET_MS, "the review wake turn settled");
@@ -975,8 +1079,52 @@ const ghReviewWake: Step<HarnessContext> = {
       wakeTurnId: wake.turnId,
       deliveries: wake.deliveryIds.length,
       reviewToWakeTurnStartMs: latencyMs,
+      reviewer: untrusted ? "untrusted" : "trusted",
+      quoted,
       quietAfterMs: GH_QUIET_MS,
-      ...turnCaptured(settled),
+      ...settled,
+    };
+  },
+};
+
+const ghCommentWake: Step<HarnessContext> = {
+  id: "gh-comment-wake",
+  name: "GitHub: a PR comment wakes the session (text quoted only when trusted)",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-review-wake"],
+  async run(ctx) {
+    const s = ghSessionOf(ctx);
+    const pr = ctx.state.ghPr;
+    if (!pr) {
+      throw new Error("no PR from gh-link");
+    }
+    const login = await ghLogin(ctx);
+    const text = `E2E ${ctx.deps.runId} comment canary: reply in one sentence, do not change any file.`;
+    const startedAt = ctx.deps.now();
+    await ghOf(ctx)([
+      "api",
+      "--method",
+      "POST",
+      `repos/${pr.repo}/issues/${pr.number}/comments`,
+      "-f",
+      `body=${text}`,
+    ]);
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    const untrusted = untrustedExpected();
+    const { quoted } = checkWakePrompt(await turnPrompt(ctx, s.id, wake.turnId), {
+      header: "issue_comment.created",
+      fact: `@${login} commented on PR #${pr.number}.`,
+      text,
+      untrusted,
+    });
+    await expectNoWake(ctx, s, GH_QUIET_MS, "the comment wake turn settled");
+    return {
+      wakeTurnId: wake.turnId,
+      commentToWakeTurnStartMs: latencyMs,
+      commenter: untrusted ? "untrusted" : "trusted",
+      quoted,
+      quietAfterMs: GH_QUIET_MS,
+      ...settled,
     };
   },
 };
@@ -985,7 +1133,7 @@ const ghMergeWake: Step<HarnessContext> = {
   id: "gh-merge-wake",
   name: "GitHub: merging the PR wakes the session (and closes it with autoCloseOnMerge)",
   requires: ["baseUrl", "repo", "github"],
-  needs: ["gh-review-wake"],
+  needs: ["gh-comment-wake"],
   async run(ctx) {
     const s = ghSessionOf(ctx);
     const pr = ctx.state.ghPr;
@@ -1001,11 +1149,13 @@ const ghMergeWake: Step<HarnessContext> = {
       "-f",
       "merge_method=squash",
     ]);
-    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt, {
+      closeExpected: autoCloseExpected(),
+    });
     const out: Obj = {
       wakeTurnId: wake.turnId,
       mergeToWakeTurnStartMs: latencyMs,
-      ...turnCaptured(settled),
+      ...settled,
     };
     // With GITHUB_AUTO_CLOSE_ON_MERGE=after_turn the session is deleted once this turn completes.
     if (autoCloseExpected()) {
@@ -1245,7 +1395,7 @@ const ghChainMergeFirst: Step<HarnessContext> = {
       wakeTurnId: wake.turnId,
       mergeToWakeTurnStartMs: latencyMs,
       quietAfterMs: GH_QUIET_MS,
-      ...turnCaptured(settled),
+      ...settled,
     };
   },
 };
@@ -1261,12 +1411,14 @@ const ghChainMergeSecond: Step<HarnessContext> = {
     const second = chain.prs[1];
     const startedAt = ctx.deps.now();
     await ghMerge(ctx, second.repo, second.number);
-    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt);
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt, {
+      closeExpected: autoCloseExpected(),
+    });
     const out: Obj = {
       secondPr: second.number,
       wakeTurnId: wake.turnId,
       mergeToWakeTurnStartMs: latencyMs,
-      ...turnCaptured(settled),
+      ...settled,
     };
     if (autoCloseExpected()) {
       // Every linked PR is merged now, so this post-merge turn closes the session.
@@ -1433,7 +1585,7 @@ const ghChecksWake: Step<HarnessContext> = {
       deliveries: wake.deliveryIds.length,
       checkFailureToWakeTurnStartMs: latencyMs,
       quietAfterMs: GH_QUIET_MS,
-      ...turnCaptured(settled),
+      ...settled,
     };
   },
 };
@@ -1469,7 +1621,7 @@ const ghCloseWake: Step<HarnessContext> = {
       wakeTurnId: wake.turnId,
       closeToWakeTurnStartMs: latencyMs,
       quietAfterMs: GH_QUIET_MS,
-      ...turnCaptured(settled),
+      ...settled,
     };
   },
 };
@@ -1494,6 +1646,7 @@ export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghLaunch,
   ghLink,
   ghReviewWake,
+  ghCommentWake,
   ghMergeWake,
   ghCleanup,
   ghChainLaunch,
