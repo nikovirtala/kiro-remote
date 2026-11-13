@@ -147,6 +147,8 @@ interface WireOptions {
   /** Wrap the consumer's view of the shared table (the test's repo reads it raw). */
   wrapDdb?: (inner: DynamoDBDocumentClient) => DynamoDBDocumentClient;
   env?: NodeJS.ProcessEnv;
+  /** Replace the recording scheduler (built with the wired logger). */
+  catchUpScheduler?: (logger: Logger) => CatchUpScheduler;
 }
 
 async function wire(scenarios: unknown[], opts: WireOptions = {}): Promise<Wired> {
@@ -182,7 +184,7 @@ async function wire(scenarios: unknown[], opts: WireOptions = {}): Promise<Wired
       // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
       s3: s3 as any,
       spawnFn: spawner.spawnFn,
-      catchUpScheduler: scheduler,
+      catchUpScheduler: opts.catchUpScheduler ? opts.catchUpScheduler(logger) : scheduler,
       ...(opts.detachMarginMs !== undefined ? { detachMarginMs: opts.detachMarginMs } : {}),
       logger,
       metricSink: metrics,
@@ -225,8 +227,8 @@ async function wire(scenarios: unknown[], opts: WireOptions = {}): Promise<Wired
   return { consumer, repo, metrics, logLines, logger, scheduler, spawner, newConsumer, seed };
 }
 
-/** Wrap a command or catch-up message as a single-record SQS event. */
-function event(body: Command | CatchUpMessage, messageId = "m-1"): SQSEvent {
+/** Wrap a command as a single-record SQS event. */
+function event(body: Command, messageId = "m-1"): SQSEvent {
   const record: SQSRecord = {
     messageId,
     body: JSON.stringify(body),
@@ -840,16 +842,6 @@ describe("LambdaConsumer detach + catch-up", () => {
 });
 
 describe("LambdaConsumer catch-up start", () => {
-  const legacy: CatchUpMessage = {
-    kind: "catchUp",
-    sessionId: "sl",
-    kiroSessionId: CLOUD_ID,
-    turnId: "t-legacy",
-    afterSeq: 0,
-    attempt: 7,
-    detachedAt: 5,
-  };
-
   test("a detach starts exactly one execution with attempt 1 and the turn ordinal", async () => {
     const w = await wire([LAUNCH_NEVER_ENDS], { detachMarginMs: 100 });
     await w.seed("sx");
@@ -857,25 +849,6 @@ describe("LambdaConsumer catch-up start", () => {
     expect(w.scheduler.scheduled).toHaveLength(1);
     expect(w.scheduler.scheduled[0]?.msg).toMatchObject({ attempt: 1, turnOrdinal: 1 });
     expect(w.logLines.some((l) => l.includes("catch_up_started"))).toBe(true);
-  });
-
-  test("a legacy catch-up queue message hands off to start and processes nothing", async () => {
-    const w = await wire([LAUNCH]);
-    await w.seed("sl", { status: "running", kiroSessionId: CLOUD_ID, activeTurnId: "t-legacy" });
-    const res = await w.consumer.handleEvent(event(legacy));
-    expect(res.batchItemFailures).toEqual([]);
-    expect(w.scheduler.scheduled.map((s) => s.msg)).toEqual([legacy]);
-    expect(w.spawner.specs).toHaveLength(0);
-    expect(await w.repo.queryEvents("sl", 0, { limit: 100 })).toEqual([]);
-    expect(w.logLines.some((l) => l.includes("catch_up_pending"))).toBe(false);
-  });
-
-  test("a failed start of a legacy message is retried via batchItemFailures", async () => {
-    const w = await wire([LAUNCH]);
-    w.scheduler.failWith = new Error("throttled");
-    const res = await w.consumer.handleEvent(event(legacy, "m-legacy"));
-    expect(res.batchItemFailures).toEqual([{ itemIdentifier: "m-legacy" }]);
-    expect(w.logLines.some((l) => l.includes("catch_up_error"))).toBe(true);
   });
 
   test("a duplicate start through the real scheduler is tolerated", async () => {
@@ -888,28 +861,19 @@ describe("LambdaConsumer catch-up start", () => {
         throw err;
       },
     };
-    const w = await wire([LAUNCH]);
-    const scheduler = new LambdaCatchUpScheduler({
-      lambda,
-      functionArn: "arn:aws:lambda:eu-north-1:123456789012:function:cu:live",
-      logger: w.logger,
+    const w = await wire([LAUNCH_NEVER_ENDS], {
+      detachMarginMs: 100,
+      catchUpScheduler: (logger) =>
+        new LambdaCatchUpScheduler({
+          lambda,
+          functionArn: "arn:aws:lambda:eu-north-1:123456789012:function:cu:live",
+          logger,
+        }),
     });
-    const consumer = await LambdaConsumer.create({
-      config: {
-        tableName: "kiro-remote-test",
-        bucketName: "kiro-remote-test-bucket",
-        workspaceRoot: await mkdtemp(join(tmpdir(), "kiro-remote-ws-")),
-        region: "us-east-1",
-      },
-      ddb: new FakeDocClient() as unknown as DynamoDBDocumentClient,
-      // biome-ignore lint/suspicious/noExplicitAny: fake S3 client.
-      s3: new FakeS3Client() as any,
-      spawnFn: w.spawner.spawnFn,
-      catchUpScheduler: scheduler,
-      logger: w.logger,
-      env: { KIRO_API_KEY: "ksk_test_key" },
+    await w.seed("sd");
+    const res = await w.consumer.handleEvent(event(launchCmd("sd")), {
+      remainingTimeMs: () => 300,
     });
-    const res = await consumer.handleEvent(event(legacy));
     expect(res.batchItemFailures).toEqual([]);
     expect(sent).toHaveLength(1);
     expect(w.logLines.some((l) => l.includes("catch_up_already_started"))).toBe(true);

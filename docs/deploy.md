@@ -223,8 +223,7 @@ entrypoint only wires the three context keys above; to set the rest you edit
 The bridge is serverless. Every deploy provisions:
 
 - the **consumer**, a container-image Lambda function (arm64) that consumes the
-  SQS FIFO command queue and launches and drives cloud sessions (it also
-  still consumes the legacy `CatchUpQueue`, see below);
+  SQS FIFO command queue and launches and drives cloud sessions;
 - the **catch-up function**, a durable function from the same image
   (`catch-up-durable.handler`) that follows detached turns to their end;
 - the **caps publisher**, a second function from the same image that writes
@@ -261,11 +260,6 @@ There is no VPC and no long-running task. Operational details:
   scoped to the function's own ARN with a version wildcard (`<arn>:*`). It uses
   an explicit role, so CDK does not attach the broader AWS managed
   `AWSLambdaBasicDurableExecutionRolePolicy`. It has no event-source mapping.
-- **Catch-up queue (legacy).** `CatchUpQueue` is a standard SQS queue (1-day
-  retention, 15-minute visibility timeout). Nothing sends to it any more. It and
-  its event-source mapping stay for this release only, so messages already in
-  flight at deploy time are not lost: the consumer hands each one to the catch-up
-  function. Follow-up: remove the queue and the mapping.
 - **Concurrency.** `maxCloudSessions` maps to the consumer function's RESERVED
   CONCURRENCY. Because the queue is FIFO and the producer sets
   `MessageGroupId = sessionId`, SQS already serializes work per session; the

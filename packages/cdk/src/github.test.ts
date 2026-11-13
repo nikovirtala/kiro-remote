@@ -43,7 +43,7 @@ describe("GitHub feature OFF (no githubAppSecretArn)", () => {
   test("deploys nothing for it: no route, functions, queues or schedule", () => {
     expect(JSON.stringify(t.toJSON())).not.toContain("github");
     expect(functionsByLogicalIdPart(t, "Github")).toHaveLength(0);
-    t.resourceCountIs("AWS::SQS::Queue", 2); // command FIFO and catch-up only
+    t.resourceCountIs("AWS::SQS::Queue", 1); // the command FIFO only
     t.resourceCountIs("AWS::Events::Rule", 1); // only the caps publisher schedule
   });
 
@@ -65,7 +65,7 @@ describe("GitHub feature ON", () => {
   });
 
   test("a standard queue with a DLQ, and exactly one extra queue pair", () => {
-    t.resourceCountIs("AWS::SQS::Queue", 4); // + the GitHub queue and its DLQ
+    t.resourceCountIs("AWS::SQS::Queue", 3); // + the GitHub queue and its DLQ
     t.hasResourceProperties("AWS::SQS::Queue", {
       RedrivePolicy: Match.objectLike({ maxReceiveCount: 5 }),
     });

@@ -9,10 +9,10 @@
  *   - the command queue is FIFO,
  *   - the KMS key grants are scoped to EXACTLY the callback/token handler roles,
  *   - there are no ECS or EC2 (VPC) resources,
- *   - the Lambda bridge: two arm64 container-image functions (SQS consumer +
- *     caps publisher), the catch-up queue, the event-source mappings, the caps
- *     schedule, and the consumer role scoped to its own table/bucket/queues/
- *     secret,
+ *   - the Lambda bridge: three arm64 container-image functions (SQS consumer,
+ *     durable catch-up, caps publisher), the command-queue event-source
+ *     mapping, the caps schedule, and the consumer role scoped to its own
+ *     table/bucket/queues/secret,
  *   - KIRO_API_KEY is resolved at runtime from Secrets Manager via
  *     KIRO_API_KEY_SECRET_ARN (never a plain env var),
  *   - the HTTP API stage is throttled via native API Gateway rate limiting and
@@ -487,9 +487,9 @@ describe("KiroRemote Lambda bridge", () => {
       );
     }
 
-    // Two native SQS event-source mappings (command queue + catch-up queue),
-    // each with partial-batch failure reporting and a batch size of 1.
-    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 2);
+    // One native SQS event-source mapping (the command queue), with
+    // partial-batch failure reporting and a batch size of 1.
+    t.resourceCountIs("AWS::Lambda::EventSourceMapping", 1);
     const mappings = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"));
     for (const esm of mappings) {
       const props = esm.Properties as {
@@ -499,7 +499,7 @@ describe("KiroRemote Lambda bridge", () => {
       };
       expect(props.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
       expect(props.BatchSize).toBe(1);
-      // Neither mapping is filtered: the consumer receives every command,
+      // The mapping is not filtered: the consumer receives every command,
       // including `adopt`, and rejects unsupported ones loudly.
       expect(props.FilterCriteria).toBeUndefined();
     }
@@ -507,16 +507,10 @@ describe("KiroRemote Lambda bridge", () => {
     // The command queue visibility timeout is raised to >= the consumer timeout
     // so a long cloud turn does not get redelivered mid-flight.
     t.hasResourceProperties("AWS::SQS::Queue", { FifoQueue: true, VisibilityTimeout: 900 });
-    // The catch-up queue is a STANDARD queue (per-message delay) with the same
-    // visibility timeout.
-    t.resourceCountIs("AWS::SQS::Queue", 2);
-    t.hasResourceProperties("AWS::SQS::Queue", {
-      FifoQueue: Match.absent(),
-      VisibilityTimeout: 900,
-    });
+    // The command queue is the only queue: catch-up runs as a durable function.
+    t.resourceCountIs("AWS::SQS::Queue", 1);
 
-    // The consumer starts durable executions through the alias and no longer
-    // sends to the catch-up queue.
+    // The consumer starts durable executions through the alias.
     const consumerEnv = envOf(consumer as { Properties: Record<string, unknown> });
     expect(consumerEnv.CATCH_UP_FUNCTION_ARN).toBeDefined();
     expect(consumerEnv.CATCH_UP_QUEUE_URL).toBeUndefined();
@@ -570,12 +564,12 @@ describe("KiroRemote Lambda bridge", () => {
       FunctionVersion: { "Fn::GetAtt": [versions[0][0], "Version"] },
     });
 
-    // It gets no event-source mapping: both mappings belong to the consumer.
+    // It gets no event-source mapping: the only mapping belongs to the consumer.
     const consumerId = Object.entries(t.findResources("AWS::Lambda::Function")).find(
       ([, f]) => (f.Properties as { Timeout?: number }).Timeout === 900,
     )?.[0] as string;
     const mappings = Object.values(t.findResources("AWS::Lambda::EventSourceMapping"));
-    expect(mappings.length).toBe(2);
+    expect(mappings.length).toBe(1);
     for (const esm of mappings) {
       expect((esm.Properties as { FunctionName: { Ref: string } }).FunctionName.Ref).toBe(
         consumerId,
