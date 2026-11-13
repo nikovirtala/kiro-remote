@@ -1,7 +1,7 @@
 /** POST /github/webhook (API Gateway HTTP API v2). Reads the webhook secret; nothing else. */
 
 import { handleWebhook } from "../ingress.ts";
-import { createLogger, emfMetrics } from "../log.ts";
+import { createLogger, powertoolsMetrics } from "../log.ts";
 import { buildQueues, buildRepository, secretLoader, splitList } from "./runtime.ts";
 
 interface HttpEvent {
@@ -21,7 +21,7 @@ function getDeps(): Parameters<typeof handleWebhook>[0] {
       repo: buildRepository(env),
       queue: buildQueues(env).githubQueue,
       allowedRepos: splitList(env.ALLOWED_REPOS),
-      metrics: emfMetrics(),
+      metrics: powertoolsMetrics(),
       logger: createLogger(),
     };
   }
@@ -38,6 +38,11 @@ export function toIngressRequest(event: HttpEvent) {
 }
 
 export async function handler(event: HttpEvent): Promise<{ statusCode: number; body: string }> {
-  const res = await handleWebhook(getDeps(), toIngressRequest(event));
-  return { statusCode: res.status, body: res.body };
+  const d = getDeps();
+  try {
+    const res = await handleWebhook(d, toIngressRequest(event));
+    return { statusCode: res.status, body: res.body };
+  } finally {
+    d.metrics.flush();
+  }
 }
