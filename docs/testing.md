@@ -117,23 +117,32 @@ and a real Kiro API key:
   the event log once, without duplicates. Inspect the execution:
 
   ```bash
-  # Unverified: written from the CLI naming, not run here; check `aws lambda help`.
   aws lambda list-durable-executions-by-function \
-    --function-name <catch-up function name>:live --region eu-north-1
+    --function-name <catch-up function name> --region eu-north-1
   aws lambda get-durable-execution-history \
     --durable-execution-arn <DurableExecutionArn from the list> --region eu-north-1
   ```
 
-  The history shows one `catch-up-N` step per round with a `wait-N` between
-  rounds, and ends `SUCCEEDED`. For a short run, also set `CATCH_UP_DELAY_SECONDS`
-  (default 60) on the catch-up function, for example to `10`. Also check that
-  the `RecursiveInvocationsDropped` metric of the consumer and the catch-up
-  function stays 0: no function opts out of recursive loop detection any more,
-  and whether durable resumptions count towards it is verified by this run. This shows whether stopping the
-  engine leaves the cloud turn running and whether a remote `session/load`
-  replays a running turn. A `catch_up_segment_mismatch` or a catch-up that
+  The list covers executions on every version, each with the version it is
+  pinned to. The history shows one `catch-up-N` step per round with a `wait-N`
+  between rounds, and ends `SUCCEEDED`.
+
+  For a short run, also lower `CATCH_UP_DELAY_SECONDS` (default 60), for
+  example to `10`. The consumer invokes the catch-up function through the
+  `live` alias, which points at a published version, so changing the variable
+  on `$LATEST` has no effect. Change it on `$LATEST`, publish a version
+  (`aws lambda publish-version`), point `live` at it (`aws lambda
+  update-alias`), and afterwards point `live` back at the version the stack
+  deployed, restore the variable and delete the extra version.
+
+  Also check that the `RecursiveInvocationsDropped` metric of the consumer and
+  the catch-up function stays 0: no function opts out of recursive loop
+  detection. A live run on 2026-11-13 (19 rounds at 10 s) confirmed that
+  durable resumptions do not count towards it. The run exercises stopping the
+  engine while the cloud turn keeps running, and a remote `session/load`
+  replaying a running turn. A `catch_up_segment_mismatch` or a catch-up that
   stays pending after the turn finished in Kiro is a failure to report.
-  Remove the variable afterwards.
+  Remove `DETACH_MARGIN_MS` afterwards.
 
 ## The live end-to-end harness
 
@@ -241,11 +250,15 @@ minutes per launch.
 
 ### The GitHub wake scenario (opt-in)
 
-With `KIRO_API_E2E_GITHUB=1` the harness appends five steps (`gh-launch`,
-`gh-link`, `gh-review-wake`, `gh-merge-wake`, `gh-cleanup`) that need the GitHub
-App installed on the repo and the GitHub CLI logged in as a trusted login. See
+With `KIRO_API_E2E_GITHUB=1` the harness appends 15 steps in three sessions
+(28 in total, plus `cleanup` when sessions were left behind): the single-PR
+flow (`gh-launch` to `gh-cleanup`), a chain of two dependent PRs
+(`gh-chain-*`), and failing checks plus a PR closed unmerged (`gh-checks-*`,
+`gh-close-wake`). They need the GitHub App installed on
+the repo and the GitHub CLI logged in as a trusted login. See
 [GitHub wake](./github.md#live-end-to-end-scenario-opt-in). Without the flag
-they are reported as skipped.
+they are not in the step list at all, so a normal run has 13 steps and none
+skipped.
 
 ### Output and exit codes
 

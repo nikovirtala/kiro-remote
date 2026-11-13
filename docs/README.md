@@ -12,9 +12,10 @@ single CDK stack (`KiroRemoteStack`) into your own AWS account. It exposes:
 - an **MCP server** (stdio via the `kiro-remote` CLI, and Streamable HTTP at
   `<host>/mcp`),
 
-both backed by a serverless **bridge**: two container-image Lambda functions
+both backed by a serverless **bridge**: three container-image Lambda functions
 built from one image. An SQS consumer launches and drives Kiro cloud sessions
-over ACP against kiro-cli's bundled engine, and a publisher records the
+over ACP against kiro-cli's bundled engine, a durable catch-up function follows
+turns that outlive one consumer invocation, and a publisher records the
 engine's capabilities (see
 [deploy.md](./deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
 
@@ -84,7 +85,7 @@ deployed.
 ```
 packages/core     shared zod schemas, auth primitives, domain types
 packages/auth      Cognito OAuth 2.1 facade construct + handlers
-packages/bridge    Lambda bridge: SQS consumer + caps publisher (ACP to kiro-cli's engine)
+packages/bridge    Lambda bridge: SQS consumer, durable catch-up, caps publisher (ACP to kiro-cli's engine)
 packages/api       REST API (/v1) + facade routing + /mcp + /openapi.json
 packages/github    optional GitHub App webhook ingress, event routing, PR links
 packages/mcp       the `kiro-remote` CLI and the MCP tools/transports
