@@ -13,6 +13,7 @@ import {
 } from "@nikovirtala/kiro-remote-core";
 import { type AppCredentials, GithubClient, parseAppSecret } from "../app-client.ts";
 import type { ConsumerConfig } from "../consumer.ts";
+import { traced } from "../tracer.ts";
 
 const SECRET_TTL_MS = 5 * 60 * 1000;
 
@@ -54,7 +55,7 @@ export function secretLoader(
   sm?: SecretsManagerClient,
   now = () => Date.now(),
 ) {
-  const client = sm ?? new SecretsManagerClient({});
+  const client = sm ?? traced(new SecretsManagerClient({}));
   const arn = required(env, "GITHUB_APP_SECRET_ARN");
   let cached: { creds: AppCredentials; at: number } | null = null;
   return async (): Promise<AppCredentials> => {
@@ -72,15 +73,15 @@ export function secretLoader(
 
 export function buildRepository(env: NodeJS.ProcessEnv): Repository {
   return new Repository({
-    ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})),
-    s3: new S3Client({}),
+    ddb: DynamoDBDocumentClient.from(traced(new DynamoDBClient({}))),
+    s3: traced(new S3Client({})),
     tableName: required(env, "TABLE_NAME"),
     bucketName: required(env, "BUCKET_NAME"),
   });
 }
 
 export function buildQueues(env: NodeJS.ProcessEnv) {
-  const sqs = new SQSClient({});
+  const sqs = traced(new SQSClient({}));
   return {
     githubQueue: new SqsGithubQueue({ sqs, queueUrl: required(env, "GITHUB_QUEUE_URL") }),
     commandQueue: env.COMMAND_QUEUE_URL

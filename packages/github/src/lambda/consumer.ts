@@ -7,7 +7,7 @@
 
 import { isGithubQueueMessage } from "@nikovirtala/kiro-remote-core";
 import { type ConsumerDeps, handleQueueMessage } from "../consumer.ts";
-import { createLogger, emfMetrics } from "../log.ts";
+import { createLogger, powertoolsMetrics } from "../log.ts";
 import { redeliverMissed } from "../redelivery.ts";
 import {
   buildQueues,
@@ -38,7 +38,7 @@ function getDeps(): ConsumerDeps {
       queue: queues.commandQueue,
       githubQueue: queues.githubQueue,
       config: consumerConfigFromEnv(env),
-      metrics: emfMetrics(),
+      metrics: powertoolsMetrics(),
       logger: createLogger(),
       now: () => Date.now(),
     };
@@ -75,12 +75,16 @@ export async function processRecords(
 
 export async function handler(event: { Records?: SqsRecord[]; kind?: string }) {
   const d = getDeps();
-  if (!event.Records) {
-    if (event.kind === "redeliver") {
-      return redeliverMissed({ github: d.github, metrics: d.metrics, logger: d.logger });
+  try {
+    if (!event.Records) {
+      if (event.kind === "redeliver") {
+        return await redeliverMissed({ github: d.github, metrics: d.metrics, logger: d.logger });
+      }
+      d.logger.error("github_consumer_unknown_event");
+      return { batchItemFailures: [] };
     }
-    d.logger.error("github_consumer_unknown_event");
-    return { batchItemFailures: [] };
+    return await processRecords(d, event.Records);
+  } finally {
+    d.metrics.flush();
   }
-  return processRecords(d, event.Records);
 }
