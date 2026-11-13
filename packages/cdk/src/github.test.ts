@@ -144,3 +144,20 @@ describe("GitHub feature ON", () => {
     expect(() => app.synth()).not.toThrow();
   });
 });
+
+describe("GitHub Lambdas Powertools configuration", () => {
+  test("the webhook and consumer (also the redelivery target) set Powertools env and active tracing", () => {
+    const t = on();
+    for (const part of ["GithubWebhookFn", "GithubConsumerFn"]) {
+      const fns = functionsByLogicalIdPart(t, part);
+      expect(fns.length).toBe(1);
+      const props = fns[0]?.[1].Properties;
+      expect(props.TracingConfig).toEqual({ Mode: "Active" });
+      expect(props.Environment.Variables).toMatchObject({
+        POWERTOOLS_SERVICE_NAME: "kiro-remote-github",
+        POWERTOOLS_METRICS_NAMESPACE: "KiroRemote",
+        POWERTOOLS_LOG_LEVEL: "INFO",
+      });
+    }
+  });
+});

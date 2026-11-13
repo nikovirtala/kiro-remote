@@ -66,6 +66,7 @@ import {
   Function as LambdaFunction,
   Runtime,
   RuntimeFamily,
+  Tracing,
 } from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import {
@@ -325,6 +326,20 @@ function placeholderLambdaCode(): Code {
 }
 
 /**
+ * Shared Powertools for AWS Lambda configuration. Every Lambda uses the same
+ * Logger, Metrics and Tracer; the service name differs per deployable and the
+ * metrics namespace defaults to KiroRemote (the GitHub Lambdas override it in
+ * code to KiroRemote/GitHub). Active X-Ray tracing is enabled per function.
+ */
+function powertoolsEnv(service: string, logLevel: "INFO" | "DEBUG"): Record<string, string> {
+  return {
+    POWERTOOLS_SERVICE_NAME: service,
+    POWERTOOLS_METRICS_NAMESPACE: "KiroRemote",
+    POWERTOOLS_LOG_LEVEL: logLevel,
+  };
+}
+
+/**
  * A placeholder {@link DockerImageCode} for the bridge functions so `cdk synth`
  * needs no Docker build. It references a not-yet-deployed ECR repo by name (the
  * image URI is synthesized but never built/pulled). The `cmd` (the
@@ -518,6 +533,7 @@ export class KiroRemote extends Construct {
       OAUTH_CODE_KMS_KEY_ID: this.oauthCodeKey.keyId,
       // The launch allow-list the service layer enforces (owner/name globs).
       ALLOWED_REPOS: props.allowedRepos.join(","),
+      ...powertoolsEnv("kiro-remote-api", "INFO"),
     };
 
     // The launch prompt asks the agent for the session trailer only when the
@@ -551,6 +567,7 @@ export class KiroRemote extends Construct {
       code: lambdaCode,
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.seconds(29),
+      tracing: Tracing.ACTIVE,
       environment: commonEnv,
     });
 
@@ -561,6 +578,7 @@ export class KiroRemote extends Construct {
       code: lambdaCode,
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.seconds(29),
+      tracing: Tracing.ACTIVE,
       environment: commonEnv,
     });
 
@@ -571,6 +589,7 @@ export class KiroRemote extends Construct {
       code: lambdaCode,
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.seconds(29),
+      tracing: Tracing.ACTIVE,
       environment: commonEnv,
     });
 
@@ -752,6 +771,7 @@ export class KiroRemote extends Construct {
       KIRO_API_KEY_SECRET_ARN: this.kiroApiKeySecret.secretArn,
       KIRO_LOG_LEVEL: "debug",
       BRIDGE_LOG_LEVEL: "debug",
+      ...powertoolsEnv("kiro-remote-bridge", "DEBUG"),
     };
 
     // GitHub feature queues. Created only when githubAppSecretArn is set; the
@@ -790,6 +810,7 @@ export class KiroRemote extends Construct {
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.minutes(15),
       reservedConcurrentExecutions: maxCloudSessions,
+      tracing: Tracing.ACTIVE,
       environment: {
         ...bridgeLambdaEnv,
         // On Lambda only /tmp is writable, so the per-turn working directory
@@ -840,8 +861,18 @@ export class KiroRemote extends Construct {
         ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
       ],
     });
+    // CDK adds X-Ray write access to roles it creates for Tracing.ACTIVE, but
+    // not to an explicit role. The X-Ray write APIs do not support
+    // resource-level permissions.
+    catchUpRole.addToPolicy(
+      new PolicyStatement({
+        actions: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+        resources: ["*"],
+      }),
+    );
     this.catchUpFn = new DockerImageFunction(this, "CatchUpFn", {
       role: catchUpRole,
+      tracing: Tracing.ACTIVE,
       code: buildLambdaImage(CATCH_UP_CMD),
       architecture: Architecture.ARM_64,
       memorySize: LAMBDA_MEMORY_MB,
@@ -903,6 +934,7 @@ export class KiroRemote extends Construct {
       architecture: Architecture.ARM_64,
       memorySize: LAMBDA_MEMORY_MB,
       timeout: Duration.minutes(5),
+      tracing: Tracing.ACTIVE,
       environment: bridgeLambdaEnv,
     });
 
@@ -964,6 +996,7 @@ export class KiroRemote extends Construct {
         GITHUB_APP_SECRET_ARN: props.githubAppSecretArn,
         GITHUB_QUEUE_URL: this.githubQueue.queueUrl,
         ALLOWED_REPOS: props.allowedRepos.join(","),
+        ...powertoolsEnv("kiro-remote-github", "INFO"),
       };
 
       // Ingress: verifies the signature, dedupes, stores and enqueues; returns
@@ -974,6 +1007,7 @@ export class KiroRemote extends Construct {
         code: props.githubWebhookCode ?? placeholderLambdaCode(),
         memorySize: 512,
         timeout: Duration.seconds(9),
+        tracing: Tracing.ACTIVE,
         environment: githubEnv,
       });
       this.githubWebhookFn = webhookFn;
@@ -998,6 +1032,7 @@ export class KiroRemote extends Construct {
         code: props.githubConsumerCode ?? placeholderLambdaCode(),
         memorySize: 512,
         timeout: Duration.seconds(120),
+        tracing: Tracing.ACTIVE,
         environment: {
           ...githubEnv,
           COMMAND_QUEUE_URL: this.commandQueue.queueUrl,

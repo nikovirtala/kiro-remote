@@ -135,6 +135,8 @@ and a real Kiro API key:
   update-alias`), and afterwards point `live` back at the version the stack
   deployed, restore the variable and delete the extra version.
 
+  Logs and metrics come from Powertools (see [observability](./deploy.md#observability)); X-Ray traces are on for every function.
+
   Also check that the `RecursiveInvocationsDropped` metric of the consumer and
   the catch-up function stays 0: no function opts out of recursive loop
   detection. A live run on 2026-11-13 (19 rounds at 10 s) confirmed that

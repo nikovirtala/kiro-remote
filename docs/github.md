@@ -256,7 +256,7 @@ investigate the DLQ.
 
 ## Metrics
 
-Namespace `KiroRemote/GitHub` (webhook, consumer): `WebhooksReceived`,
+The GitHub Lambdas use the same Powertools Logger, Metrics and Tracer as the rest of the stack (see [observability](./deploy.md#observability)). Namespace `KiroRemote/GitHub` (webhook, consumer): `WebhooksReceived`,
 `WebhooksRejectedSignature`, `WebhooksDuplicate`, `WebhooksDropped`
 (`reason=repo_not_allowed`), `WebhooksUnmatched`, `LinksCreated` (by `method`),
 `LinksRejected` (by `reason`), `WakesDelivered`, `WakesDropped` (by `reason`),
