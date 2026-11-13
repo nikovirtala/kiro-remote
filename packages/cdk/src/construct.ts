@@ -789,6 +789,10 @@ export class KiroRemote extends Construct {
       KIRO_LOG_LEVEL: "debug",
       BRIDGE_LOG_LEVEL: "debug",
       ...powertoolsEnv("kiro-remote-bridge", "DEBUG"),
+      // The container image's TZ is ":/etc/localtime", which is not an IANA
+      // zone: the Powertools Logger then warns on every cold start and per
+      // logger instance before falling back to UTC. TZ is not reserved.
+      TZ: "UTC",
     };
 
     // GitHub feature queues. Created only when githubAppSecretArn is set; the

@@ -809,6 +809,8 @@ describe("KiroRemote Powertools configuration", () => {
     )) {
       expect(vars(fn).POWERTOOLS_LOG_LEVEL).toBe("DEBUG");
       expect(vars(fn).BRIDGE_LOG_LEVEL).toBe("debug");
+      // An IANA zone, so the Powertools Logger does not warn about the image's TZ.
+      expect(vars(fn).TZ).toBe("UTC");
     }
   });
 
