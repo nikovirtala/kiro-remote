@@ -1,8 +1,9 @@
 /** Shared wiring for the three GitHub Lambda handlers, built once per container from the function env. */
 
+import { SecretsProvider } from "@aws-lambda-powertools/parameters/secrets";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
-import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
@@ -15,7 +16,7 @@ import { type AppCredentials, GithubClient, parseAppSecret } from "../app-client
 import type { ConsumerConfig } from "../consumer.ts";
 import { traced } from "../tracer.ts";
 
-const SECRET_TTL_MS = 5 * 60 * 1000;
+const SECRET_TTL_SECONDS = 5 * 60;
 
 /**
  * The GitHub App Kiro's agent acts through. Its PR comments are posted as the
@@ -49,25 +50,18 @@ export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Con
   };
 }
 
-/** Reads the App secret from Secrets Manager, cached for a few minutes (so a rotation is picked up). */
-export function secretLoader(
-  env: NodeJS.ProcessEnv,
-  sm?: SecretsManagerClient,
-  now = () => Date.now(),
-) {
-  const client = sm ?? traced(new SecretsManagerClient({}));
+/** Reads the App secret via Powertools Parameters, cached for a few minutes (so a rotation is picked up). */
+export function secretLoader(env: NodeJS.ProcessEnv, sm?: SecretsManagerClient) {
+  const provider = new SecretsProvider({
+    awsSdkV3Client: sm ?? traced(new SecretsManagerClient({})),
+  });
   const arn = required(env, "GITHUB_APP_SECRET_ARN");
-  let cached: { creds: AppCredentials; at: number } | null = null;
   return async (): Promise<AppCredentials> => {
-    if (cached && now() - cached.at < SECRET_TTL_MS) {
-      return cached.creds;
-    }
-    const res = await client.send(new GetSecretValueCommand({ SecretId: arn }));
-    if (!res.SecretString) {
+    const secret = await provider.get(arn, { maxAge: SECRET_TTL_SECONDS });
+    if (typeof secret !== "string" || !secret) {
       throw new Error("GitHub App secret has no SecretString");
     }
-    cached = { creds: parseAppSecret(res.SecretString), at: now() };
-    return cached.creds;
+    return parseAppSecret(secret);
   };
 }
 
