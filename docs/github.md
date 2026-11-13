@@ -59,6 +59,19 @@ flowchart TD
 - A wake turn is launch-class: if you already have `MAX_CLOUD_SESSIONS` (10)
   _other_ sessions running, the items stay pending and the next drain retries.
 
+An inbox item moves through three states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: route() writes a wake item
+    pending --> pending: session busy, item not due yet (checks debounce), or session limit reached
+    pending --> delivered: drainInbox folds it into one prompt turn
+    delivered --> pending: released, because the enqueue failed or the bridge found the session busy
+    pending --> dropped: session failed, deleted or missing
+    delivered --> [*]
+    dropped --> [*]
+```
+
 ## Linking a PR to a session
 
 A PR links to **at most one** session; a conflicting second link is refused and
@@ -305,7 +318,27 @@ KIRO_API_E2E_GITHUB=1 [KIRO_API_E2E_GITHUB_AUTOCLOSE=1] \
   pnpm e2e
 ```
 
-Steps (after the normal ones): `gh-launch` (the agent opens a docs-only PR),
+The scenario runs three sessions, one after another, after the normal steps.
+Every wake step also waits 45 s to check that no other wake follows:
+
+```mermaid
+flowchart LR
+    subgraph s1["Session 1: one PR"]
+        direction TB
+        l1["gh-launch"] --> k1["gh-link"] --> rv["gh-review-wake"] --> cm["gh-comment-wake"] --> mg["gh-merge-wake"] --> c1["gh-cleanup"]
+    end
+    subgraph s2["Session 2: a chain of two PRs"]
+        direction TB
+        l2["gh-chain-launch"] --> f2["gh-chain-first-pr"] --> m1["gh-chain-merge-first"] --> m2["gh-chain-merge-second"] --> c2["gh-chain-cleanup"]
+    end
+    subgraph s3["Session 3: failing checks, closed unmerged"]
+        direction TB
+        l3["gh-checks-launch"] --> w3["gh-checks-wake"] --> x3["gh-close-wake"] --> c3["gh-checks-cleanup"]
+    end
+    s1 --> s2 --> s3
+```
+
+The steps in detail: `gh-launch` (the agent opens a docs-only PR),
 `gh-link` (the PR is linked; reports the method), `gh-review-wake` (posts a review
 comment and waits for the wake turn; reports review-to-turn latency),
 `gh-comment-wake` (posts a PR comment and waits for that wake turn). Both read the

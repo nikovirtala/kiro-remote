@@ -98,6 +98,39 @@ turns exist only when the optional [GitHub wake](./github.md) is deployed.
 - A route whose extension the server does not advertise returns **501**
   (`type: capability-unavailable`).
 
+### Session status
+
+A session's `status` (also the `GET /v1/sessions?status=` filter) moves like
+this on the cloud bridge:
+
+```mermaid
+stateDiagram-v2
+    [*] --> provisioning: launch accepted
+    provisioning --> running: cloud session created, first turn sent
+    provisioning --> failed: session/new failed
+    idle --> running: prompt sent
+    running --> idle: turn settles
+    running --> running: detached, catch-up follows the turn
+    provisioning --> deleted: delete
+    idle --> deleted: delete
+    running --> deleted: delete
+    failed --> deleted: delete
+    deleted --> [*]
+```
+
+- A launch creates the cloud session and starts its first turn in the same
+  command, so a new session goes from `provisioning` straight to `running`.
+- A turn settles as `completed`, `failed`, `refused` or `cancelled`; the
+  session returns to `idle` in every case. A catch-up that sees no `turn_end`
+  within 6 h fails the turn (`catch_up_expired`), and the session is `idle`
+  again.
+- `failed` means the cloud session could not be created, so there is nothing to
+  prompt; delete the session and launch a new one.
+- `DELETE /v1/sessions/{id}` answers `status: "deleting"`; the row reads
+  `deleted` once the bridge has deleted the cloud session.
+- `awaiting_permission` is part of the schema, but cloud turns never ask for
+  permission, so a cloud session never enters it.
+
 ## Unauthenticated discovery / facade endpoints (host root, not under `/v1`)
 
 | Method | Path                                        | Purpose                                                                                            |
@@ -130,7 +163,8 @@ mise exec -- pnpm --filter @nikovirtala/kiro-remote-mcp exec kiro-remote login
 ```
 
 Alternatively, drive the discovery → authorize → token chain yourself using the
-`/.well-known/*` and `/oauth/*` endpoints above.
+`/.well-known/*` and `/oauth/*` endpoints above; the order of the requests is
+in [the sign-in flow](./mcp.md#the-sign-in-flow).
 
 Once you have an access token, set it and call the API. (Replace `<token>` with
 the Cognito access token, not your `ksk_` key.)
