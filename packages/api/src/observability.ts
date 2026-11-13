@@ -15,6 +15,12 @@ const SERVICE_NAME = "kiro-remote-api";
 const METRICS_NAMESPACE = "KiroRemote";
 
 /**
+ * Shared Tracer for the API Lambdas. Outside Lambda (tests, local runs) it
+ * disables itself and `captureAWSv3Client` returns the client untouched.
+ */
+export const tracer = new Tracer({ serviceName: SERVICE_NAME });
+
+/**
  * Turn an unknown thrown value into a plain, loggable object. An `Error`'s
  * `name`/`message`/`stack` are non-enumerable, so `redact()` (which walks
  * enumerable keys) would otherwise drop them; we copy them onto a plain object
@@ -88,7 +94,7 @@ export class PowertoolsObservability implements Observability {
     this.logger = deps?.logger ?? new Logger({ serviceName: SERVICE_NAME });
     this.metrics =
       deps?.metrics ?? new Metrics({ namespace: METRICS_NAMESPACE, serviceName: SERVICE_NAME });
-    this.tracer = deps?.tracer ?? new Tracer({ serviceName: SERVICE_NAME });
+    this.tracer = deps?.tracer ?? tracer;
   }
 
   info(message: string, attributes: Record<string, unknown> = {}): void {

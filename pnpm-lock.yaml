@@ -197,13 +197,13 @@ importers:
   packages/api:
     dependencies:
       '@aws-lambda-powertools/logger':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-lambda-powertools/metrics':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-lambda-powertools/tracer':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-sdk/client-dynamodb':
         specifier: ^3.1163.0
@@ -256,16 +256,16 @@ importers:
   packages/bridge:
     dependencies:
       '@aws-lambda-powertools/logger':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-lambda-powertools/metrics':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-lambda-powertools/parameters':
         specifier: ^2.36.0
         version: 2.36.0(@aws-sdk/client-dynamodb@3.1163.0)(@aws-sdk/client-secrets-manager@3.1163.0)(@aws-sdk/util-dynamodb@3.996.9(@aws-sdk/client-dynamodb@3.1163.0))
       '@aws-lambda-powertools/tracer':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-sdk/client-dynamodb':
         specifier: ^3.1163.0
@@ -357,16 +357,16 @@ importers:
   packages/github:
     dependencies:
       '@aws-lambda-powertools/logger':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-lambda-powertools/metrics':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-lambda-powertools/parameters':
         specifier: ^2.36.0
         version: 2.36.0(@aws-sdk/client-dynamodb@3.1163.0)(@aws-sdk/client-secrets-manager@3.1163.0)(@aws-sdk/util-dynamodb@3.996.9(@aws-sdk/client-dynamodb@3.1163.0))
       '@aws-lambda-powertools/tracer':
-        specifier: ^2.30.0
+        specifier: ^2.36.0
         version: 2.36.0
       '@aws-sdk/client-dynamodb':
         specifier: ^3.1163.0

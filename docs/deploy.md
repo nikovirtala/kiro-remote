@@ -446,6 +446,16 @@ Every field passes through the shared `redact()` before it is written, so tokens
 and secrets never reach CloudWatch. Metrics are CloudWatch Embedded Metric
 Format records. Outside Lambda (tests, local runs) the Tracer disables itself.
 
+**Log schema change.** The bridge and GitHub Lambdas previously wrote `ts`,
+`msg` and a lower-case `level`. They now write `timestamp`, `message` and an
+upper-case `level`, and the GitHub `service` value changed from `github` to
+`kiro-remote-github`. The bridge's per-component label moved from `service` to
+`component` (`bridge-lambda`, `bridge-caps`), because `service` is reserved by
+Powertools. Update any CloudWatch Logs Insights queries, metric filters and
+alarms that match the old field names or values. A caller-supplied `message`
+field no longer overwrites the log text; use a different key (the transport
+uses `errorMessage`).
+
 ## Pointing `publicBaseUrl` at the API
 
 `publicBaseUrl` is the one canonical `https://<host>` the facade advertises

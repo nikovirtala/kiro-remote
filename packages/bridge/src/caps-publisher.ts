@@ -97,7 +97,8 @@ export async function publishCaps(
 export async function runCapsPublish(deps: CapsPublisherDeps): Promise<void> {
   const env = deps.env ?? process.env;
   const now = deps.now ?? (() => Date.now());
-  const logger = deps.logger ?? createLogger({ bindings: { service: "bridge-caps" } });
+  // The caps publisher emits no metrics (logs only), so there is nothing to flush.
+  const logger = deps.logger ?? createLogger({ bindings: { component: "bridge-caps" } });
 
   const region = deps.config.region ?? env.AWS_REGION ?? "us-east-1";
   const ddb = deps.ddb ?? DynamoDBDocumentClient.from(traced(new DynamoDBClient({ region })));
