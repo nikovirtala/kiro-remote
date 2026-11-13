@@ -254,7 +254,7 @@ export class StdioJsonRpcTransport {
       this.logger.debug("acp_rpc_response_error", {
         id,
         code: e.code,
-        message: e.message,
+        errorMessage: e.message,
         data: e.data,
       });
       pending.reject(

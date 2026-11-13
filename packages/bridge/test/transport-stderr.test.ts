@@ -25,7 +25,7 @@ function scriptedSpawn(script: string): SpawnFn {
 
 interface ExitLog {
   level: string;
-  msg: string;
+  message: string;
   // `code` is scrubbed by redact() (it is a sensitive key name for OAuth
   // codes), so the test asserts on `level`/`stderr`, not the code value.
   code?: unknown;
@@ -49,7 +49,7 @@ async function runToExit(script: string): Promise<ExitLog> {
   const exited = new Promise<void>((resolve) => {
     // Resolve once we observe the exit record.
     const check = setInterval(() => {
-      if (lines.some((l) => (JSON.parse(l) as { msg: string }).msg === "acp_child_exit")) {
+      if (lines.some((l) => (JSON.parse(l) as { message: string }).message === "acp_child_exit")) {
         clearInterval(check);
         resolve();
       }
@@ -59,7 +59,9 @@ async function runToExit(script: string): Promise<ExitLog> {
   transport.start();
   await exited;
 
-  const record = lines.map((l) => JSON.parse(l) as ExitLog).find((r) => r.msg === "acp_child_exit");
+  const record = lines
+    .map((l) => JSON.parse(l) as ExitLog)
+    .find((r) => r.message === "acp_child_exit");
   if (!record) {
     throw new Error("no acp_child_exit record");
   }
@@ -71,7 +73,7 @@ describe("transport child stderr surfacing", () => {
     const record = await runToExit(
       'process.stderr.write("kiro-cli: fatal: cannot init HOME\\n"); process.exit(1);',
     );
-    expect(record.level).toBe("error");
+    expect(record.level).toBe("ERROR");
     expect(record.stderr).toContain("kiro-cli: fatal: cannot init HOME");
   });
 
@@ -79,14 +81,14 @@ describe("transport child stderr surfacing", () => {
     const record = await runToExit(
       'process.stderr.write("auth failed with ksk_supersecretvalue\\n"); process.exit(1);',
     );
-    expect(record.level).toBe("error");
+    expect(record.level).toBe("ERROR");
     expect(record.stderr).not.toContain("ksk_supersecretvalue");
     expect(record.stderr).toContain("[REDACTED]");
   });
 
   test("a clean exit (code 0) stays a routine WARN with no stderr dump", async () => {
     const record = await runToExit('process.stderr.write("some noise\\n"); process.exit(0);');
-    expect(record.level).toBe("warn");
+    expect(record.level).toBe("WARN");
     expect(record.stderr).toBeUndefined();
   });
 });

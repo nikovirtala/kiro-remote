@@ -43,13 +43,13 @@ export function fakeAgentSpawner(scenarios: unknown[]): FakeAgentSpawner {
 export function echoed(logLines: string[], key: string): unknown[] {
   const out: unknown[] = [];
   for (const raw of logLines) {
-    let record: { msg?: string; line?: string };
+    let record: { message?: string; line?: string };
     try {
       record = JSON.parse(raw);
     } catch {
       continue;
     }
-    if (record.msg !== "acp_stderr" || typeof record.line !== "string") {
+    if (record.message !== "acp_stderr" || typeof record.line !== "string") {
       continue;
     }
     for (const line of record.line.split("\n")) {

@@ -21,6 +21,7 @@ import { KasEngine, kasSpawnSpec } from "./kas-engine.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { type PersistCapsOptions, persistCaps } from "./persist-caps.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
+import { traced } from "./tracer.ts";
 import type { SpawnFn } from "./transport.ts";
 
 /**
@@ -99,9 +100,9 @@ export async function runCapsPublish(deps: CapsPublisherDeps): Promise<void> {
   const logger = deps.logger ?? createLogger({ bindings: { service: "bridge-caps" } });
 
   const region = deps.config.region ?? env.AWS_REGION ?? "us-east-1";
-  const ddb = deps.ddb ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-  const s3 = deps.s3 ?? new S3Client({ region });
-  const secretsManager = deps.secretsManager ?? new SecretsManagerClient({ region });
+  const ddb = deps.ddb ?? DynamoDBDocumentClient.from(traced(new DynamoDBClient({ region })));
+  const s3 = deps.s3 ?? traced(new S3Client({ region }));
+  const secretsManager = deps.secretsManager ?? traced(new SecretsManagerClient({ region }));
 
   const repo = new Repository({
     ddb,

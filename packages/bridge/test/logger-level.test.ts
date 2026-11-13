@@ -23,7 +23,7 @@ function emittedMsgs(opts: { level?: LogLevel; env?: NodeJS.ProcessEnv }): strin
   logger.info("inf");
   logger.warn("wrn");
   logger.error("err");
-  return lines.map((l) => (JSON.parse(l) as { msg: string }).msg);
+  return lines.map((l) => (JSON.parse(l) as { message: string }).message);
 }
 
 describe("logger level resolution", () => {
@@ -60,7 +60,7 @@ describe("logger level resolution", () => {
     const lines: string[] = [];
     const parent = createLogger({ sink: (l) => lines.push(l), env: { BRIDGE_LOG_LEVEL: "debug" } });
     parent.child({ sub: "x" }).debug("child_dbg");
-    expect(lines.map((l) => (JSON.parse(l) as { msg: string }).msg)).toContain("child_dbg");
+    expect(lines.map((l) => (JSON.parse(l) as { message: string }).message)).toContain("child_dbg");
   });
 
   test("structured fields are still redacted", () => {
