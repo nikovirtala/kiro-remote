@@ -431,12 +431,12 @@ Every Lambda (API, OAuth callback and token, the three bridge functions, and the
 optional GitHub webhook and consumer) uses the same
 [Powertools for AWS Lambda](https://docs.powertools.aws.dev/lambda/typescript/latest/)
 Logger, Metrics and Tracer. Secrets are read with Powertools Parameters
-(`getSecret`, cached). The CDK construct configures them uniformly:
+(`SecretsProvider`, cached). The CDK construct configures them uniformly:
 
 | Setting                        | Value                                                                          |
 | ------------------------------ | ------------------------------------------------------------------------------ |
 | `POWERTOOLS_SERVICE_NAME`      | `kiro-remote-api`, `kiro-remote-bridge` or `kiro-remote-github`                |
-| `POWERTOOLS_METRICS_NAMESPACE` | `KiroRemote` (the GitHub Lambdas emit `KiroRemote/GitHub` from code)           |
+| `POWERTOOLS_METRICS_NAMESPACE` | `KiroRemote`; the GitHub Lambdas set `KiroRemote/GitHub` in code, which wins   |
 | `POWERTOOLS_LOG_LEVEL`         | `INFO`; `DEBUG` on the bridge, next to `BRIDGE_LOG_LEVEL` and `KIRO_LOG_LEVEL` |
 | Tracing                        | Active X-Ray tracing on every function                                         |
 
@@ -445,6 +445,9 @@ Logs are structured JSON in the Powertools shape (`level` in upper case such as
 Every field passes through the shared `redact()` before it is written, so tokens
 and secrets never reach CloudWatch. Metrics are CloudWatch Embedded Metric
 Format records. Outside Lambda (tests, local runs) the Tracer disables itself.
+The bridge Lambdas also set `TZ=UTC`: the container image's `TZ` is
+`:/etc/localtime`, which the Logger cannot resolve, so it would warn on every
+invocation.
 
 **Log schema change.** The bridge and GitHub Lambdas previously wrote `ts`,
 `msg` and a lower-case `level`. They now write `timestamp`, `message` and an
@@ -455,6 +458,13 @@ Powertools. Update any CloudWatch Logs Insights queries, metric filters and
 alarms that match the old field names or values. A caller-supplied `message`
 field no longer overwrites the log text; use a different key (the transport
 uses `errorMessage`).
+
+**Metric changes.** Every metric now carries a `service` dimension. The GitHub
+metrics stay in `KiroRemote/GitHub` (checked live), but a graph or alarm on the
+old series without the `service` dimension gets no new data. The bridge
+metrics (`TurnDetached`, `CatchUpCompleted`, `SessionsLaunched` and the rest)
+used to be `metric` log lines only; they are now real CloudWatch metrics in
+`KiroRemote`, with `service=kiro-remote-bridge`.
 
 ## Pointing `publicBaseUrl` at the API
 
