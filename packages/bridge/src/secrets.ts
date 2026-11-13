@@ -11,7 +11,8 @@
  * wins. The Secrets Manager client is injected so tests run offline.
  */
 
-import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SecretsProvider } from "@aws-lambda-powertools/parameters/secrets";
+import type { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Logger } from "./logger.ts";
 
 export const KIRO_API_KEY_ENV = "KIRO_API_KEY";
@@ -37,9 +38,10 @@ export async function resolveKiroApiKey(deps: SecretsDeps): Promise<string | nul
   }
   const arn = env.KIRO_API_KEY_SECRET_ARN;
   if (arn && deps.secretsManager) {
-    const res = await deps.secretsManager.send(new GetSecretValueCommand({ SecretId: arn }));
+    const provider = new SecretsProvider({ awsSdkV3Client: deps.secretsManager });
+    const secret = await provider.get(arn);
     deps.logger.info("kiro_api_key_from_secrets_manager");
-    return res.SecretString ?? null;
+    return typeof secret === "string" ? secret : null;
   }
   deps.logger.warn("kiro_api_key_missing");
   return null;

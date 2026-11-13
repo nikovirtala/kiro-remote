@@ -261,6 +261,9 @@ importers:
       '@aws-lambda-powertools/metrics':
         specifier: ^2.30.0
         version: 2.36.0
+      '@aws-lambda-powertools/parameters':
+        specifier: ^2.36.0
+        version: 2.36.0(@aws-sdk/client-dynamodb@3.1163.0)(@aws-sdk/client-secrets-manager@3.1163.0)(@aws-sdk/util-dynamodb@3.996.9(@aws-sdk/client-dynamodb@3.1163.0))
       '@aws-lambda-powertools/tracer':
         specifier: ^2.30.0
         version: 2.36.0
@@ -359,6 +362,9 @@ importers:
       '@aws-lambda-powertools/metrics':
         specifier: ^2.30.0
         version: 2.36.0
+      '@aws-lambda-powertools/parameters':
+        specifier: ^2.36.0
+        version: 2.36.0(@aws-sdk/client-dynamodb@3.1163.0)(@aws-sdk/client-secrets-manager@3.1163.0)(@aws-sdk/util-dynamodb@3.996.9(@aws-sdk/client-dynamodb@3.1163.0))
       '@aws-lambda-powertools/tracer':
         specifier: ^2.30.0
         version: 2.36.0
@@ -443,6 +449,29 @@ packages:
     peerDependencies:
       '@middy/core': 4.x || 5.x || 6.x || 7.x
     peerDependenciesMeta:
+      '@middy/core':
+        optional: true
+
+  '@aws-lambda-powertools/parameters@2.36.0':
+    resolution: {integrity: sha512-345x5em64yHy/7qFWqDa1aY5dESyNhz4xFOjfMcdXS3UIopNt7zSkfpzfszbp3kgLUeLtcYU6akkB9NBbYHRUQ==}
+    peerDependencies:
+      '@aws-sdk/client-appconfigdata': '>=3.x'
+      '@aws-sdk/client-dynamodb': '>=3.x'
+      '@aws-sdk/client-secrets-manager': '>=3.x'
+      '@aws-sdk/client-ssm': '>=3.x'
+      '@aws-sdk/util-dynamodb': '>=3.x'
+      '@middy/core': 4.x || 5.x || 6.x || 7.x
+    peerDependenciesMeta:
+      '@aws-sdk/client-appconfigdata':
+        optional: true
+      '@aws-sdk/client-dynamodb':
+        optional: true
+      '@aws-sdk/client-secrets-manager':
+        optional: true
+      '@aws-sdk/client-ssm':
+        optional: true
+      '@aws-sdk/util-dynamodb':
+        optional: true
       '@middy/core':
         optional: true
 
@@ -1978,6 +2007,14 @@ snapshots:
   '@aws-lambda-powertools/metrics@2.36.0':
     dependencies:
       '@aws-lambda-powertools/commons': 2.36.0
+
+  '@aws-lambda-powertools/parameters@2.36.0(@aws-sdk/client-dynamodb@3.1163.0)(@aws-sdk/client-secrets-manager@3.1163.0)(@aws-sdk/util-dynamodb@3.996.9(@aws-sdk/client-dynamodb@3.1163.0))':
+    dependencies:
+      '@aws-lambda-powertools/commons': 2.36.0
+    optionalDependencies:
+      '@aws-sdk/client-dynamodb': 3.1163.0
+      '@aws-sdk/client-secrets-manager': 3.1163.0
+      '@aws-sdk/util-dynamodb': 3.996.9(@aws-sdk/client-dynamodb@3.1163.0)
 
   '@aws-lambda-powertools/tracer@2.36.0':
     dependencies:
