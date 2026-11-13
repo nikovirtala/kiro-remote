@@ -67,9 +67,8 @@ mise exec -- pnpm exec cdk synth --quiet -o /tmp/kiro-remote-synth \
 
 `/tmp/kiro-remote-synth/KiroRemoteStack.template.json` then holds the
 durable catch-up function (`DurableConfig`), its retained `AWS::Lambda::Version`
-and the `live` `AWS::Lambda::Alias`, the legacy `CatchUpQueue` and two
-`AWS::Lambda::EventSourceMapping` resources (both on the consumer, none on the
-durable function), no `RecursiveLoop: Allow` on any function, and no
+and the `live` `AWS::Lambda::Alias`, one `AWS::Lambda::EventSourceMapping`
+(the command queue on the consumer, none on the durable function), no `RecursiveLoop: Allow` on any function, and no
 `AWS::ECS::*` or `AWS::EC2::*` resources.
 
 ## Building the bridge image and the engine smoke

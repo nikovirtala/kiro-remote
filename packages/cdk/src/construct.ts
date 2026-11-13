@@ -10,12 +10,12 @@
  *     dedup),
  *   - a KMS key used ONLY by the OAUTH#CODE callback/token handlers (its grants
  *     are scoped to exactly those two Lambda roles),
- *   - the Lambda bridge: two container-image functions (arm64) built from one
- *     image -- an SQS consumer that drives cloud sessions over ACP against
- *     kiro-cli's bundled engine, and a CONFIG#CAPS publisher run on deploy and
- *     every 6 h -- plus a standard catch-up queue for turns that outlive one
- *     invocation. Both roles are scoped to this construct's own resources and
- *     read the KIRO_API_KEY secret at runtime,
+ *   - the Lambda bridge: three container-image functions (arm64) built from
+ *     one image -- an SQS consumer that drives cloud sessions over ACP against
+ *     kiro-cli's bundled engine, a durable catch-up function for turns that
+ *     outlive one consumer invocation, and a CONFIG#CAPS publisher run on
+ *     deploy and every 6 h. Their roles are scoped to this construct's own
+ *     resources and read the KIRO_API_KEY secret at runtime,
  *   - the API Gateway HTTP API at base path /v1 fronting the api Lambdas,
  *   - a WAFv2 web ACL with rate-based rules on /oauth/* and /mcp, and
  *   - the Cognito facade via the reusable {@link KiroRemoteAuth} construct.
@@ -364,12 +364,6 @@ export class KiroRemote extends Construct {
   readonly catchUpAlias: Alias;
   /** The bridge's one-shot CONFIG#CAPS publisher (container-image Lambda). */
   readonly capsPublisherFn: DockerImageFunction;
-  /**
-   * The standard (non-FIFO) SQS queue the consumer uses to finish a turn it
-   * detached from near its deadline (delayed `session/load` catch-up
-   * messages).
-   */
-  readonly catchUpQueue: Queue;
   /** The HTTP API fronting the api Lambdas at base path /v1. */
   readonly httpApi: HttpApi;
   /**
@@ -728,7 +722,7 @@ export class KiroRemote extends Construct {
     // that publishes CONFIG#CAPS. Both start kiro-cli's bundled engine (KAS)
     // directly from /opt/kiro; the runtime image carries no kiro-cli (its
     // engine spawn calls prctl(PR_SET_PDEATHSIG), which Lambda rejects). A
-    // standard catch-up queue lets the consumer finish turns that outlive one
+    // durable catch-up function finishes turns that outlive one consumer
     // invocation.
     //
     // One image carries BOTH handlers; each function selects its handler via
@@ -760,19 +754,6 @@ export class KiroRemote extends Construct {
       BRIDGE_LOG_LEVEL: "debug",
     };
 
-    // LEGACY catch-up queue, kept for this release only. Catch-up now runs as
-    // a durable execution of the catch-up function (below); nothing sends to
-    // this queue any more. It stays, with its event-source mapping, so messages
-    // already in flight at deploy time are still delivered: the consumer hands
-    // each one to the durable function. Follow-up: remove the queue and the
-    // mapping. Visibility must be >= the consumer's 15-minute timeout, as the
-    // event-source mapping requires.
-    this.catchUpQueue = new Queue(this, "CatchUpQueue", {
-      retentionPeriod: Duration.days(1),
-      visibilityTimeout: Duration.minutes(15),
-      enforceSSL: true,
-    });
-
     // GitHub feature queues. Created only when githubAppSecretArn is set; the
     // bridge needs them to harvest and drain at turn settle.
     const githubEnabled = props.githubAppSecretArn !== undefined;
@@ -795,7 +776,7 @@ export class KiroRemote extends Construct {
     // The SQS FIFO command consumer. 15-minute timeout (the ceiling): a turn
     // is AWAITed in the invocation (holding the FIFO MessageGroupId =
     // sessionId) until it ends or the invocation nears its deadline, at which
-    // point it detaches and hands off to the catch-up queue
+    // point it detaches and starts a durable catch-up execution
     // (lambda-consumer.ts). arm64 to match the Graviton image.
     //
     // CONCURRENCY: maxCloudSessions maps to the function's RESERVED
@@ -838,15 +819,6 @@ export class KiroRemote extends Construct {
     // client-visible event rather than letting it sit on the queue and expire.
     this.consumerFn.addEventSource(
       new SqsEventSource(this.commandQueue, {
-        batchSize: 1,
-        reportBatchItemFailures: true,
-      }),
-    );
-
-    // Second mapping: the LEGACY catch-up queue feeds the SAME handler, which
-    // hands each message to the durable catch-up function (see CatchUpQueue).
-    this.consumerFn.addEventSource(
-      new SqsEventSource(this.catchUpQueue, {
         batchSize: 1,
         reportBatchItemFailures: true,
       }),
@@ -935,13 +907,12 @@ export class KiroRemote extends Construct {
     });
 
     // Scoped IAM grants: the consumer reads/writes the table + bucket,
-    // consumes the command queue, reads the secret, and sends to and consumes
-    // the catch-up queue. The publisher only needs table write + secret read
+    // consumes the command queue, reads the secret, and invokes the catch-up
+    // alias (granted above). The publisher only needs table write + secret read
     // (it writes CONFIG#CAPS and starts the engine).
     this.table.grantReadWriteData(this.consumerFn);
     this.bucket.grantReadWrite(this.consumerFn);
     this.commandQueue.grantConsumeMessages(this.consumerFn);
-    this.catchUpQueue.grantConsumeMessages(this.consumerFn);
     this.kiroApiKeySecret.grantRead(this.consumerFn);
     if (this.githubQueue) {
       this.commandQueue.grantSendMessages(this.consumerFn);
@@ -949,7 +920,7 @@ export class KiroRemote extends Construct {
     }
 
     // The durable catch-up function gets what the consumer needs to load and
-    // settle a turn (no command-queue consumption, no catch-up queue).
+    // settle a turn (no command-queue consumption).
     this.table.grantReadWriteData(this.catchUpFn);
     this.bucket.grantReadWrite(this.catchUpFn);
     this.kiroApiKeySecret.grantRead(this.catchUpFn);

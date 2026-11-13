@@ -33,8 +33,7 @@
  * loads the remote session, appends the replayed events the log does not hold
  * yet ({@link planCatchUp}), and either settles the turn (the replay reached
  * `turn_end`) or reports it pending. A turn still unfinished
- * {@link CATCH_UP_MAX_AGE_MS} after detaching is failed. A catch-up message
- * left on the legacy catch-up queue is handed to a durable execution too.
+ * {@link CATCH_UP_MAX_AGE_MS} after detaching is failed.
  * While META stays `running`, a mid-turn steer, cancel or `whenBusy=queue` is
  * rejected exactly as before.
  *
@@ -83,7 +82,6 @@ import {
   type CatchUpResult,
   type CatchUpScheduler,
   countTurnStarts,
-  isCatchUpMessage,
   planCatchUp,
 } from "./catch-up.ts";
 import { LambdaCatchUpScheduler } from "./catch-up-scheduler.ts";
@@ -250,9 +248,9 @@ type TurnOutcome =
 /**
  * The engine-driven cloud consumer. Owns the per-session runtime map, the
  * cloud->local id map, and the shared {@link CloudSession} primitives, and
- * dispatches a single {@link Command} or {@link CatchUpMessage}. Constructed
- * ONCE per warm Lambda container and invoked per SQS batch via
- * {@link handleEvent}.
+ * dispatches a single {@link Command}. Constructed ONCE per warm Lambda
+ * container and invoked per SQS batch via {@link handleEvent}; durable
+ * catch-up rounds call {@link catchUpOnce} directly.
  */
 export class LambdaConsumer {
   private readonly repo: Repository;
@@ -473,22 +471,6 @@ export class LambdaConsumer {
         error: String(err),
       });
       return false;
-    }
-    if (isCatchUpMessage(body)) {
-      try {
-        // A message left on the legacy catch-up queue: hand it to a durable
-        // execution instead of processing it and re-sending it.
-        await this.startCatchUp(body);
-        return false;
-      } catch (err) {
-        this.logger.error("catch_up_error", {
-          sessionId: body.sessionId,
-          turnId: body.turnId,
-          attempt: body.attempt,
-          error: String(err),
-        });
-        return true;
-      }
     }
     const command = body as Command;
     try {
@@ -1134,8 +1116,8 @@ export class LambdaConsumer {
 /**
  * The Lambda handler entry. The consumer is built ONCE per container (lazily,
  * on the first invocation) so the resolved API key and runtime map survive
- * across warm invocations. The command queue and the legacy catch-up queue
- * event-source mappings invoke this handler, with ReportBatchItemFailures.
+ * across warm invocations. The command queue's event-source mapping invokes
+ * this handler, with ReportBatchItemFailures.
  */
 let consumerPromise: Promise<LambdaConsumer> | null = null;
 
