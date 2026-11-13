@@ -425,6 +425,27 @@ against kiro-cli 3.1.0; bumping `KIRO_CLI_VERSION` needs the engine smoke in
 [testing.md](testing.md#building-the-bridge-image-and-the-engine-smoke) to
 pass again.
 
+## Observability
+
+Every Lambda (API, OAuth callback and token, the three bridge functions, and the
+optional GitHub webhook and consumer) uses the same
+[Powertools for AWS Lambda](https://docs.powertools.aws.dev/lambda/typescript/latest/)
+Logger, Metrics and Tracer. Secrets are read with Powertools Parameters
+(`getSecret`, cached). The CDK construct configures them uniformly:
+
+| Setting                        | Value                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| `POWERTOOLS_SERVICE_NAME`      | `kiro-remote-api`, `kiro-remote-bridge` or `kiro-remote-github`                |
+| `POWERTOOLS_METRICS_NAMESPACE` | `KiroRemote` (the GitHub Lambdas emit `KiroRemote/GitHub` from code)           |
+| `POWERTOOLS_LOG_LEVEL`         | `INFO`; `DEBUG` on the bridge, next to `BRIDGE_LOG_LEVEL` and `KIRO_LOG_LEVEL` |
+| Tracing                        | Active X-Ray tracing on every function                                         |
+
+Logs are structured JSON in the Powertools shape (`level` in upper case such as
+`INFO`, the text in `message`, plus `service`, `timestamp` and your fields).
+Every field passes through the shared `redact()` before it is written, so tokens
+and secrets never reach CloudWatch. Metrics are CloudWatch Embedded Metric
+Format records. Outside Lambda (tests, local runs) the Tracer disables itself.
+
 ## Pointing `publicBaseUrl` at the API
 
 `publicBaseUrl` is the one canonical `https://<host>` the facade advertises

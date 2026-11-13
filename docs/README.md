@@ -104,6 +104,10 @@ work through the guides in this order:
    pull request activity (merged, review, comment, failing checks) wakes the
    session that opened the PR.
 
+## Observability
+
+All Lambdas share one Powertools for AWS Lambda setup (structured redacted logs, EMF metrics, X-Ray tracing). See [deploy.md](./deploy.md#observability).
+
 ## Two different credentials (don't mix them up)
 
 kiro-remote involves two unrelated secrets. Keeping them straight avoids most of

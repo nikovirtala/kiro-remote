@@ -64,6 +64,14 @@ export function suppressIntentionalFindings(scope: IConstruct): void {
       reason:
         "GSI access is scoped to this construct's OWN table indexes (table-arn/index/*); required to query GSI1.",
     },
+    // IAM5: X-Ray write APIs (xray:PutTraceSegments, PutTelemetryRecords) do not
+    // support resource-level permissions; CDK adds them with Resource "*" for
+    // every function with active tracing (Powertools Tracer).
+    {
+      id: "AwsSolutions-IAM5[Resource::*]",
+      reason:
+        "X-Ray PutTraceSegments/PutTelemetryRecords have no resource-level permissions; granted for active tracing used by the Powertools Tracer.",
+    },
     // IAM5: the S3 action wildcards are the exact actions the CDK grantReadWrite
     // helper emits, bound to this construct's own bucket.
     {

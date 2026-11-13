@@ -773,3 +773,57 @@ describe("KiroRemote SES sender and passkey add route", () => {
     });
   });
 });
+
+describe("KiroRemote Powertools configuration", () => {
+  const t = synth().template;
+  const all = Object.values(t.findResources("AWS::Lambda::Function")).filter(
+    (r) => !JSON.stringify(r.Properties.Handler ?? "").includes("custom"),
+  ) as Array<{ Properties: Record<string, unknown> }>;
+  const withEnv = all.filter(
+    (fn) =>
+      (fn.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables
+        ?.POWERTOOLS_SERVICE_NAME !== undefined,
+  );
+  const vars = (fn: { Properties: Record<string, unknown> }) =>
+    (fn.Properties.Environment as { Variables: Record<string, string> }).Variables;
+
+  test("every application Lambda sets the Powertools env and active X-Ray tracing", () => {
+    // ApiFn, OAuthCallbackFn, OAuthTokenFn, bridge consumer, catch-up, caps publisher.
+    expect(withEnv.length).toBe(6);
+    for (const fn of withEnv) {
+      expect(vars(fn).POWERTOOLS_METRICS_NAMESPACE).toBe("KiroRemote");
+      expect(["INFO", "DEBUG"]).toContain(vars(fn).POWERTOOLS_LOG_LEVEL);
+      expect(fn.Properties.TracingConfig).toEqual({ Mode: "Active" });
+    }
+  });
+
+  test("the API and bridge Lambdas use their own service names", () => {
+    const services = withEnv.map((fn) => vars(fn).POWERTOOLS_SERVICE_NAME);
+    expect(services.filter((n) => n === "kiro-remote-api").length).toBe(3);
+    expect(services.filter((n) => n === "kiro-remote-bridge").length).toBe(3);
+  });
+
+  test("the bridge Lambdas align the Powertools log level with BRIDGE_LOG_LEVEL", () => {
+    for (const fn of withEnv.filter(
+      (f) => vars(f).POWERTOOLS_SERVICE_NAME === "kiro-remote-bridge",
+    )) {
+      expect(vars(fn).POWERTOOLS_LOG_LEVEL).toBe("DEBUG");
+      expect(vars(fn).BRIDGE_LOG_LEVEL).toBe("debug");
+    }
+  });
+
+  test("the explicit catch-up role may write X-Ray segments", () => {
+    t.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyName: Match.stringLikeRegexp("CatchUpFnRoleDefaultPolicy"),
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+            Effect: "Allow",
+            Resource: "*",
+          }),
+        ]),
+      },
+    });
+  });
+});

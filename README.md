@@ -37,6 +37,7 @@ The API and OAuth callback Lambdas run on the Node 26 runtime, which AWS lists a
 - **Bridge** (`packages/bridge`) three container-image Lambda functions (arm64) built from one image: an SQS consumer that launches and drives Kiro Web sessions over the Agent Client Protocol (ACP) against kiro-cli's bundled engine, a durable catch-up function that follows turns that outlive one consumer invocation, and a publisher that records the engine's capabilities. See the [direct-engine path](./docs/deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine) for detail.
 - **CDK app** (`packages/cdk`) one `KiroRemoteStack` wiring DynamoDB, S3, SQS, Cognito, the Lambda bridge, and the API (with native stage throttling).
 - **GitHub wake** (`packages/github`, optional) a read-only GitHub App's webhook ingress, the event router and the PR-link logic. Off unless you set `GITHUB_APP_SECRET_ARN`.
+- **Observability** every Lambda uses Powertools for AWS Lambda for logs, metrics, tracing and secrets, configured uniformly by the CDK construct. See [observability](./docs/deploy.md#observability).
 - **Auth facade** (`packages/auth`), shared schemas/domain (`packages/core`), and a live end-to-end harness (`e2e`).
 
 ## Documentation
