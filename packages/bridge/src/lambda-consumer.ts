@@ -95,9 +95,10 @@ import {
 } from "./cloud-session.ts";
 import { KasEngine, kasSpawnSpec } from "./kas-engine.ts";
 import { createLogger, type Logger } from "./logger.ts";
-import { loggerMetricSink, type MetricSink, Metrics } from "./metrics.ts";
+import { type MetricSink, Metrics, powertoolsMetricSink } from "./metrics.ts";
 import { resolveKiroApiKey } from "./secrets.ts";
 import { TurnSettler } from "./settle.ts";
+import { traced } from "./tracer.ts";
 import type { SpawnFn, SpawnSpec } from "./transport.ts";
 
 /**
@@ -313,12 +314,12 @@ export class LambdaConsumer {
     const env = deps.env ?? process.env;
     const now = deps.now ?? (() => Date.now());
     const logger = deps.logger ?? createLogger({ bindings: { service: "bridge-lambda" } });
-    const metrics = new Metrics(deps.metricSink ?? loggerMetricSink(logger));
+    const metrics = new Metrics(deps.metricSink ?? powertoolsMetricSink());
 
     const region = deps.config.region ?? env.AWS_REGION ?? "us-east-1";
-    const ddb = deps.ddb ?? DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
-    const s3 = deps.s3 ?? new S3Client({ region });
-    const secretsManager = deps.secretsManager ?? new SecretsManagerClient({ region });
+    const ddb = deps.ddb ?? DynamoDBDocumentClient.from(traced(new DynamoDBClient({ region })));
+    const s3 = deps.s3 ?? traced(new S3Client({ region }));
+    const secretsManager = deps.secretsManager ?? traced(new SecretsManagerClient({ region }));
 
     const repo = new Repository({
       ddb,
@@ -331,12 +332,12 @@ export class LambdaConsumer {
     const apiKey = await resolveKiroApiKey({ secretsManager, logger, env });
     const engineSpec = kasSpawnSpec({ env, apiKey });
 
-    const sqs = deps.sqs ?? new SQSClient({ region });
+    const sqs = deps.sqs ?? traced(new SQSClient({ region }));
     const scheduler =
       deps.catchUpScheduler ??
       (deps.config.catchUpFunctionArn
         ? new LambdaCatchUpScheduler({
-            lambda: new LambdaClient({ region }),
+            lambda: traced(new LambdaClient({ region })),
             functionArn: deps.config.catchUpFunctionArn,
             logger,
           })
@@ -446,11 +447,15 @@ export class LambdaConsumer {
    */
   async handleEvent(event: SQSEvent, opts: HandleOptions = {}): Promise<SQSBatchResponse> {
     const batchItemFailures: SQSBatchItemFailure[] = [];
-    for (const record of event.Records) {
-      const transient = await this.handleRecord(record, opts);
-      if (transient) {
-        batchItemFailures.push({ itemIdentifier: record.messageId });
+    try {
+      for (const record of event.Records) {
+        const transient = await this.handleRecord(record, opts);
+        if (transient) {
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+        }
       }
+    } finally {
+      this.metrics.flush();
     }
     return { batchItemFailures };
   }
@@ -956,6 +961,14 @@ export class LambdaConsumer {
    * happens next.
    */
   async catchUpOnce(msg: CatchUpMessage): Promise<CatchUpResult> {
+    try {
+      return await this.runCatchUpOnce(msg);
+    } finally {
+      this.metrics.flush();
+    }
+  }
+
+  private async runCatchUpOnce(msg: CatchUpMessage): Promise<CatchUpResult> {
     const id = msg.sessionId;
     const { rt, item } = await this.refresh(id);
     const fields = { sessionId: id, turnId: msg.turnId, attempt: msg.attempt };

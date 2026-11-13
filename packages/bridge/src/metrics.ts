@@ -3,11 +3,20 @@
  *
  * The bridge emits the operational metrics the control plane needs. The
  * {@link MetricSink} is injectable so tests assert the exact metrics wired
- * without touching CloudWatch; the default sink emits an EMF-style line to
- * stdout's sibling (stderr) via the logger.
+ * without touching CloudWatch; the default sink is backed by Powertools
+ * Metrics, which writes CloudWatch Embedded Metric Format to the Lambda's own
+ * stdout (the ACP JSON-RPC channel is the spawned engine's stdio, not this
+ * process's). The API owns the auth/CIMD/launch-facing metrics; the bridge
+ * owns the ACP-facing ones, so each lives in its own service dimension.
  */
 
-import type { Logger } from "./logger.ts";
+import {
+  Metrics as PowertoolsMetrics,
+  MetricUnit as PtMetricUnit,
+} from "@aws-lambda-powertools/metrics";
+
+const SERVICE_NAME = "kiro-remote-bridge";
+const METRICS_NAMESPACE = "KiroRemote";
 
 /** The complete set of metric names the bridge emits. */
 export const METRIC_NAMES = [
@@ -39,6 +48,8 @@ export interface MetricDatum {
 
 export interface MetricSink {
   emit(datum: MetricDatum): void;
+  /** Publish buffered metrics (call once per invocation). Optional for in-memory sinks. */
+  flush?(): void;
 }
 
 const UNIT_FOR: Record<MetricName, MetricUnit> = {
@@ -69,6 +80,11 @@ export class Metrics {
     this.sink.emit({ name, value, unit: UNIT_FOR[name], ...(dimensions ? { dimensions } : {}) });
   }
 
+  /** Publish any buffered metrics; a no-op for sinks that do not buffer. */
+  flush(): void {
+    this.sink.flush?.();
+  }
+
   duration(name: MetricName, ms: number, dimensions?: Record<string, string>): void {
     this.sink.emit({
       name,
@@ -79,16 +95,37 @@ export class Metrics {
   }
 }
 
-/** Default sink: structured log line (so metrics appear in CloudWatch Logs). */
-export function loggerMetricSink(logger: Logger): MetricSink {
+const PT_UNIT = {
+  Count: PtMetricUnit.Count,
+  Milliseconds: PtMetricUnit.Milliseconds,
+  None: PtMetricUnit.NoUnit,
+} as const;
+
+/**
+ * Default sink: Powertools Metrics (EMF). Datums without dimensions are
+ * buffered until {@link MetricSink.flush}; dimensioned datums go through a
+ * single-metric so each keeps its own dimension set.
+ */
+export function powertoolsMetricSink(
+  metrics: PowertoolsMetrics = new PowertoolsMetrics({
+    namespace: METRICS_NAMESPACE,
+    serviceName: SERVICE_NAME,
+  }),
+): MetricSink {
   return {
     emit(datum) {
-      logger.info("metric", {
-        metric: datum.name,
-        value: datum.value,
-        unit: datum.unit,
-        ...(datum.dimensions ?? {}),
-      });
+      if (datum.dimensions && Object.keys(datum.dimensions).length > 0) {
+        const single = metrics.singleMetric();
+        single.addDimensions(datum.dimensions);
+        single.addMetric(datum.name, PT_UNIT[datum.unit], datum.value);
+        return;
+      }
+      metrics.addMetric(datum.name, PT_UNIT[datum.unit], datum.value);
+    },
+    flush() {
+      if (metrics.hasStoredMetrics()) {
+        metrics.publishStoredMetrics();
+      }
     },
   };
 }

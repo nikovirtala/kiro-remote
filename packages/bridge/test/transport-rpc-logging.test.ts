@@ -55,11 +55,11 @@ function echoingSpawn(): SpawnFn {
 
 interface RpcLog {
   level: string;
-  msg: string;
+  message: string;
+  errorMessage?: string;
   id?: unknown;
   method?: string;
   code?: unknown;
-  message?: string;
 }
 
 /** Build a transport over the echoing child, collecting debug log lines. */
@@ -87,15 +87,15 @@ describe("transport raw JSON-RPC logging", () => {
       await transport.request("ok/session/new", { cwd: "/workspace" });
 
       const recs = records(lines);
-      const req = recs.find((r) => r.msg === "acp_rpc_request");
+      const req = recs.find((r) => r.message === "acp_rpc_request");
       expect(req).toBeDefined();
-      expect(req?.level).toBe("debug");
+      expect(req?.level).toBe("DEBUG");
       expect(req?.method).toBe("ok/session/new");
       expect(req?.id).toBe(1);
 
-      const resp = recs.find((r) => r.msg === "acp_rpc_response");
+      const resp = recs.find((r) => r.message === "acp_rpc_response");
       expect(resp).toBeDefined();
-      expect(resp?.level).toBe("debug");
+      expect(resp?.level).toBe("DEBUG");
       expect(resp?.id).toBe(1);
     } finally {
       await transport.stop();
@@ -107,9 +107,9 @@ describe("transport raw JSON-RPC logging", () => {
     try {
       transport.notify("session/cancel", { sessionId: "s1" });
       const recs = records(lines);
-      const note = recs.find((r) => r.msg === "acp_rpc_notify");
+      const note = recs.find((r) => r.message === "acp_rpc_notify");
       expect(note).toBeDefined();
-      expect(note?.level).toBe("debug");
+      expect(note?.level).toBe("DEBUG");
       expect(note?.method).toBe("session/cancel");
     } finally {
       await transport.stop();
@@ -124,15 +124,15 @@ describe("transport raw JSON-RPC logging", () => {
       );
 
       const recs = records(lines);
-      const err = recs.find((r) => r.msg === "acp_rpc_response_error");
+      const err = recs.find((r) => r.message === "acp_rpc_response_error");
       expect(err).toBeDefined();
-      expect(err?.level).toBe("debug");
+      expect(err?.level).toBe("DEBUG");
       expect(err?.id).toBe(1);
       // `code` is logged as a structured field, but redact() scrubs the key
       // name "code" (it is the OAuth authorization-code key), so the value is
       // the placeholder -- the field is present, which is what matters here.
       expect(err?.code).toBe("[REDACTED]");
-      expect(err?.message).toBe("Invalid params");
+      expect(err?.errorMessage).toBe("Invalid params");
     } finally {
       await transport.stop();
     }
