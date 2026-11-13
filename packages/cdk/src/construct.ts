@@ -30,7 +30,7 @@
  */
 
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
-import { Annotations, Duration, RemovalPolicy } from "aws-cdk-lib";
+import { Annotations, Duration, RemovalPolicy, Validations } from "aws-cdk-lib";
 import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import {
@@ -81,7 +81,7 @@ import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3"
 import { type ISecret, Secret } from "aws-cdk-lib/aws-secretsmanager";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import { Trigger } from "aws-cdk-lib/triggers";
-import { Construct } from "constructs";
+import { Construct, type IConstruct } from "constructs";
 
 /**
  * The Node.js 26 managed Lambda runtime.
@@ -331,6 +331,23 @@ function placeholderLambdaCode(): Code {
  * metrics namespace defaults to KiroRemote (the GitHub Lambdas override it in
  * code to KiroRemote/GitHub). Active X-Ray tracing is enabled per function.
  */
+/**
+ * Active tracing puts xray:PutTraceSegments and xray:PutTelemetryRecords on
+ * Resource "*" into the function's role, because the X-Ray write APIs have no
+ * resource-level permissions. Acknowledge AwsSolutions-IAM5[Resource::*] on that
+ * role only, so a "*" resource anywhere else still fails the nag gate.
+ */
+function acknowledgeXrayWrite(fn: { role?: IConstruct }): void {
+  if (!fn.role) {
+    return;
+  }
+  Validations.of(fn.role).acknowledge({
+    id: "AwsSolutions-IAM5[Resource::*]",
+    reason:
+      "X-Ray PutTraceSegments/PutTelemetryRecords have no resource-level permissions; granted for the active tracing the Powertools Tracer uses.",
+  });
+}
+
 function powertoolsEnv(service: string, logLevel: "INFO" | "DEBUG"): Record<string, string> {
   return {
     POWERTOOLS_SERVICE_NAME: service,
@@ -961,6 +978,17 @@ export class KiroRemote extends Construct {
       this.githubQueue.grantSendMessages(this.catchUpFn);
     }
 
+    for (const fn of [
+      this.apiFn,
+      this.callbackFn,
+      this.tokenFn,
+      this.consumerFn,
+      this.catchUpFn,
+      this.capsPublisherFn,
+    ]) {
+      acknowledgeXrayWrite(fn);
+    }
+
     this.table.grantReadWriteData(this.capsPublisherFn);
     this.kiroApiKeySecret.grantRead(this.capsPublisherFn);
 
@@ -1011,6 +1039,7 @@ export class KiroRemote extends Construct {
         environment: githubEnv,
       });
       this.githubWebhookFn = webhookFn;
+      acknowledgeXrayWrite(webhookFn);
       this.table.grantReadWriteData(webhookFn);
       this.bucket.grantReadWrite(webhookFn);
       this.githubQueue.grantSendMessages(webhookFn);
@@ -1042,6 +1071,7 @@ export class KiroRemote extends Construct {
         },
       });
       this.githubConsumerFn = consumerFn;
+      acknowledgeXrayWrite(consumerFn);
       this.table.grantReadWriteData(consumerFn);
       this.bucket.grantRead(consumerFn);
       this.commandQueue.grantSendMessages(consumerFn);
