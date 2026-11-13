@@ -313,7 +313,7 @@ export class LambdaConsumer {
   static async create(deps: ConsumerDeps): Promise<LambdaConsumer> {
     const env = deps.env ?? process.env;
     const now = deps.now ?? (() => Date.now());
-    const logger = deps.logger ?? createLogger({ bindings: { service: "bridge-lambda" } });
+    const logger = deps.logger ?? createLogger({ bindings: { component: "bridge-lambda" } });
     const metrics = new Metrics(deps.metricSink ?? powertoolsMetricSink());
 
     const region = deps.config.region ?? env.AWS_REGION ?? "us-east-1";

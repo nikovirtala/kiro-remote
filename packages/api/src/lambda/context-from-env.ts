@@ -43,7 +43,7 @@ import {
 } from "@nikovirtala/kiro-remote-core";
 import type { ApiContext, FacadeDeps } from "../context.ts";
 import type { McpTransportHandler } from "../mcp-seam.ts";
-import { PowertoolsObservability } from "../observability.ts";
+import { PowertoolsObservability, tracer } from "../observability.ts";
 
 /** The scopes exposed by the MCP resource server (fixed by the auth construct). */
 const SCOPES_SUPPORTED = ["sessions:read", "sessions:write", "sessions:delete"] as const;
@@ -156,10 +156,12 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
   const kmsKeyId = required(env, "OAUTH_CODE_KMS_KEY_ID");
   const cognitoDomain = required(env, "COGNITO_DOMAIN").replace(/\/+$/, "");
 
-  const ddb = options.clients?.ddb ?? DynamoDBDocumentClient.from(new DynamoDBClient({}));
-  const s3 = options.clients?.s3 ?? new S3Client({});
-  const sqs = options.clients?.sqs ?? new SQSClient({});
-  const kms = options.clients?.kms ?? new KMSClient({});
+  const ddb =
+    options.clients?.ddb ??
+    DynamoDBDocumentClient.from(tracer.captureAWSv3Client(new DynamoDBClient({})));
+  const s3 = options.clients?.s3 ?? tracer.captureAWSv3Client(new S3Client({}));
+  const sqs = options.clients?.sqs ?? tracer.captureAWSv3Client(new SQSClient({}));
+  const kms = options.clients?.kms ?? tracer.captureAWSv3Client(new KMSClient({}));
 
   const repo = new Repository({ ddb, s3, tableName, bucketName });
   const queue = new SqsCommandQueue({ sqs, queueUrl: commandQueueUrl });

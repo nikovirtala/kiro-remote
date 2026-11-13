@@ -71,3 +71,24 @@ describe("logger level resolution", () => {
     expect(lines[0]).toContain("[REDACTED]");
   });
 });
+
+describe("logger bindings and field collisions", () => {
+  test("a reserved `service` binding does not break logging and the service name wins", () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), bindings: { service: "x" } });
+    logger.info("hello");
+    const records = lines.map((l) => JSON.parse(l) as { message: string; service: string });
+    const hello = records.find((r) => r.message === "hello");
+    expect(hello?.service).toBe("kiro-remote-bridge");
+  });
+
+  test("a `component` binding is carried on every record", () => {
+    const lines: string[] = [];
+    createLogger({ sink: (l) => lines.push(l), bindings: { component: "bridge-caps" } }).info("hi");
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      message: "hi",
+      component: "bridge-caps",
+      service: "kiro-remote-bridge",
+    });
+  });
+});

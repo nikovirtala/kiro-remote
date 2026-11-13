@@ -54,7 +54,9 @@ const SERVICE_NAME = "kiro-remote-bridge";
  * {@link redact} right before it is written.
  */
 class RedactingLogger extends PowertoolsLogger {
-  private readonly sink: LogSink;
+  // Powertools may log from inside super() (e.g. reserved-key warnings), before
+  // this field is assigned, so printLog falls back to the default sink.
+  private readonly sink?: LogSink;
 
   constructor(sink: LogSink, level: LogLevel, bindings: Record<string, unknown>) {
     super({
@@ -67,7 +69,7 @@ class RedactingLogger extends PowertoolsLogger {
 
   protected override printLog(_logLevel: number, log: LogItem): void {
     log.prepareForPrint();
-    this.sink(JSON.stringify(redact(log.getAttributes()), this.getJsonReplacer()));
+    (this.sink ?? defaultSink)(JSON.stringify(redact(log.getAttributes()), this.getJsonReplacer()));
   }
 }
 
