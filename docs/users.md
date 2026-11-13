@@ -34,6 +34,20 @@ How it works, and what Cognito does and does not enforce:
   without a custom domain. Passkeys are bound to it: changing the prefix or
   region invalidates existing passkeys.
 
+The steps below take a user from invitation to passkey sign-in:
+
+```mermaid
+flowchart TD
+    invite["Operator runs scripts/invite-user.sh"] --> created["Cognito creates the user;<br/>the script sets a random password and discards it"]
+    created --> email["The user gets the invitation email"]
+    email --> login["The user runs kiro-remote login<br/>or connects an MCP client"]
+    login --> otp["Managed login: sign in with an email code"]
+    otp --> add["Open /passkeys/add and register a passkey"]
+    add --> added["/passkeys/added confirms it"]
+    added --> later["Later sign-ins use the passkey"]
+    later -.->|"lost passkey or new device"| otp
+```
+
 ## 1. Find the user pool id
 
 The easiest way is to read the stack's named CloudFormation outputs (see
@@ -104,7 +118,8 @@ Sign in with your passkey through managed login (the Cognito hosted UI). You do
 not open the managed-login domain directly; the login flow (via
 `kiro-remote login`, see the next step) redirects you to the hosted UI with the
 full OAuth parameters, and you are redirected back with a code that is exchanged
-for tokens.
+for tokens (the requests are shown in
+[the sign-in flow](./mcp.md#the-sign-in-flow)).
 
 Managed login is served from:
 

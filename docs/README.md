@@ -19,6 +19,66 @@ turns that outlive one consumer invocation, and a publisher records the
 engine's capabilities (see
 [deploy.md](./deploy.md#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
 
+## How the pieces fit together
+
+```mermaid
+flowchart LR
+    subgraph clients["Clients"]
+        remote["Remote MCP client<br/>(e.g. Claude)"]
+        stdio["kiro-remote mcp<br/>(local stdio)"]
+        rest["REST client"]
+        browser["Browser sign-in"]
+    end
+    subgraph stack["KiroRemoteStack (your AWS account)"]
+        apigw["API Gateway HTTP API"]
+        api["API Lambda<br/>/v1 · /mcp · /.well-known · /oauth/*"]
+        oauth["OAuth callback and<br/>token Lambdas"]
+        cognito["Cognito user pool<br/>(managed login)"]
+        table[("DynamoDB table")]
+        bucket[("S3 payload bucket")]
+        fifo[["SQS FIFO command queue"]]
+        secret[("Secrets Manager<br/>KIRO_API_KEY")]
+        subgraph bridge["Bridge (one container image)"]
+            consumer["Consumer"]
+            catchup["Catch-up<br/>(durable function)"]
+            caps["Caps publisher"]
+        end
+        github_fns["GitHub webhook and<br/>consumer Lambdas"]
+    end
+    kiro["Kiro cloud<br/>(app.kiro.dev sandboxes)"]
+    github["GitHub"]
+
+    remote -->|"/mcp"| apigw
+    stdio -->|"/v1"| apigw
+    rest -->|"/v1"| apigw
+    browser --> cognito
+    apigw --> api
+    apigw --> oauth
+    oauth <--> cognito
+    api --> table
+    api --> bucket
+    api -->|"commands"| fifo
+    fifo --> consumer
+    consumer -->|"async invoke<br/>on detach"| catchup
+    bridge -->|"events and<br/>session state"| table
+    bridge -->|"reads at runtime"| secret
+    bridge <-->|"ACP through the<br/>bundled engine"| kiro
+    github -.->|"webhook"| apigw
+    apigw -.-> github_fns
+    github_fns -.-> fifo
+    github_fns -.-> table
+```
+
+Every client reaches the stack through one API Gateway HTTP API. The API
+Lambda serves `/v1`, `/mcp`, the discovery documents and most of `/oauth/*`;
+two small Lambdas handle the OAuth callback and the token exchange with
+Cognito. Requests to `/v1` and `/mcp` carry a Cognito access token, which the
+API Lambda verifies itself. Writes become commands on the FIFO queue, and the
+bridge consumer runs them against Kiro cloud through the engine bundled in its
+image. A turn that outlives one consumer invocation is finished by the durable
+catch-up function. The caps publisher runs after each deploy and every 6 hours.
+The dashed path is the optional [GitHub wake](./github.md).
+
 ## What to do next
 
 If you have just merged or checked out this project and want to get it running,

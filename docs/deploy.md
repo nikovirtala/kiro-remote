@@ -340,6 +340,44 @@ between invocations. Streamed `session/update` notifications are normalized and
 written to the DynamoDB event log as they arrive. There are no permission
 requests on the cloud path.
 
+The diagram shows one turn from its command to its settle, including the
+detach path described next.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Q as FIFO command queue
+    participant C as Consumer Lambda
+    participant E as Engine (child process)
+    participant K as Kiro cloud
+    participant D as DynamoDB
+    participant F as Catch-up function (live alias)
+    Q->>C: launch or prompt command
+    C->>E: start engine, initialize
+    C->>E: session/new or session/load, then session/prompt
+    E->>K: run the turn in the cloud sandbox
+    loop while the turn runs
+        K-->>E: session/update
+        E-->>C: notifications
+        C->>D: append normalized events
+    end
+    alt the turn ends in time
+        E-->>C: prompt response
+        C->>D: settle the turn, session idle
+    else 90 s left before the 15-minute timeout
+        C->>D: flush events, META stays running
+        C->>E: stop the engine (the cloud turn keeps running)
+        C-)F: async invoke, execution name cu- plus a hash of the turn
+        loop catch-up-N, then wait-N (60 s), until turn_end
+            F->>E: start a fresh engine
+            E->>K: session/load replays the session
+            F->>D: append the events the log is missing
+        end
+        F->>D: settle the turn, session idle
+    end
+    Note over C,F: Every settle runs one helper: close the turn row, harvest<br/>PR links (GitHub wake only) and drain the wake inbox.
+```
+
 **Detach and catch-up.** The turn runs in Kiro's cloud sandbox, so the
 invocation does not have to wait for it. When the turn is still running with
 90 s left before the 15-minute deadline (the consumer's `DETACH_MARGIN_MS` env
@@ -392,7 +430,20 @@ pass again.
 `publicBaseUrl` is the one canonical `https://<host>` the facade advertises
 everywhere (RFC 9728 PRM, RFC 8414 AS-metadata issuer, the Cognito resource
 identifier `<host>/mcp`, and the CIMD allow-list). It has to be the real,
-reachable host. There are two ways to get there.
+reachable host. There are two ways to get there, and the custom-domain way has two DNS
+flavours:
+
+```mermaid
+flowchart TD
+    start{"Use a custom domain?"}
+    start -->|"no"| a["Option A: the API Gateway default domain"]
+    start -->|"yes"| zone{"Delegate the subdomain<br/>to Route 53?"}
+    zone -->|"no, keep DNS at Cloudflare"| b["Option B: manual Cloudflare CNAMEs<br/>DNS_ZONE_NAME set to empty"]
+    zone -->|"yes (the deploy.sh defaults)"| r53["The Route 53 alternative"]
+    a --> a1["1. deploy with a placeholder PUBLIC_BASE_URL"] --> a2["2. read the ApiUrl output"] --> a3["3. redeploy with publicBaseUrl set to that host"]
+    b --> b1["1. deploy, add the ACM validation CNAME"] --> b2["2. add the service CNAME to CustomDomainTarget"]
+    r53 --> r1["1. deploy KiroRemoteDnsStack"] --> r2["2. add its NS records at Cloudflare"] --> r3["3. set HOSTED_ZONE_ID, deploy the app stack"]
+```
 
 ### Option A — the API Gateway default domain
 
@@ -587,6 +638,21 @@ The bridge image
 ([`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)) is
 `linux/arm64` (the Lambda functions run on Graviton) and is built on the AWS
 Lambda Node base image. It has three stages:
+
+```mermaid
+flowchart LR
+    subgraph deps["deps (node:26-bookworm-slim)"]
+        install["pnpm install"] --> bundle["esbuild: three .cjs bundles"]
+    end
+    subgraph kiro["kiro (lambda/nodejs:26)"]
+        cli["install kiro-cli<br/>KIRO_CLI_VERSION"] --> unpack["kiro-cli acp --agent-engine=v3<br/>once, to unpack the engine"] --> opt["/opt/kiro: node + KAS release"]
+    end
+    subgraph runtime["runtime (lambda/nodejs:26)"]
+        final["/opt/kiro + the three bundles<br/>CMD lambda-consumer.handler"]
+    end
+    bundle --> final
+    opt --> final
+```
 
 - **deps** installs the workspace with pnpm and esbuild-bundles the three Lambda
   entries, [`lambda-consumer.ts`](../packages/bridge/src/lambda-consumer.ts),

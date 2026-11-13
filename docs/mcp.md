@@ -113,6 +113,50 @@ requests, the token the client receives always carries the MCP resource scopes
 (`openid` plus `sessions:read` / `sessions:write` / `sessions:delete`), because the
 facade forwards the resource scopes to Cognito.
 
+### The sign-in flow
+
+A remote client that registers itself goes through these requests. The facade
+runs its own PKCE exchange with Cognito, so the client never talks to Cognito
+directly, and it returns Cognito's tokens unchanged (Cognito is the only
+issuer).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cl as MCP client
+    participant B as Browser
+    participant A as API Lambda (facade)
+    participant Co as Cognito managed login
+    participant CB as Callback Lambda
+    participant T as Token Lambda
+    Cl->>A: POST /mcp without a token
+    A-->>Cl: 401 with resource_metadata
+    Cl->>A: GET /.well-known/oauth-protected-resource/mcp
+    Cl->>A: GET /.well-known/oauth-authorization-server
+    Cl->>A: POST /oauth/register
+    A-->>Cl: public client_id mcp_...
+    Cl->>B: open /oauth/authorize (PKCE S256, state)
+    B->>A: GET /oauth/authorize
+    A->>A: check client and redirect_uri, store the transaction
+    A-->>B: redirect to Cognito with the facade's own PKCE
+    B->>Co: sign in with a passkey or an email code
+    Co-->>B: redirect to /oauth/callback with a Cognito code
+    B->>CB: GET /oauth/callback
+    CB->>Co: exchange the Cognito code
+    CB->>CB: KMS-encrypt the tokens into a one-time code (60 s)
+    CB-->>B: redirect to the client's redirect_uri with that code
+    B-->>Cl: code and state
+    Cl->>T: POST /oauth/token with code_verifier
+    T-->>Cl: Cognito access and refresh tokens
+    Cl->>A: POST /mcp with Authorization Bearer
+```
+
+`kiro-remote login` runs the same flow with two differences: its `client_id` is
+the CIMD URL `<host>/oauth/clients/cli.json` (no registration step), and its
+`redirect_uri` is a loopback address on an ephemeral port. A refresh
+(`grant_type=refresh_token`) goes from the client to `/oauth/token`, which
+passes it straight to Cognito.
+
 ### Trying it in the MCP Inspector
 
 The [MCP Inspector](https://modelcontextprotocol.io/docs/2026-07-28/tools/inspector#remote-http-server)
