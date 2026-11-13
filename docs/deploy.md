@@ -78,14 +78,14 @@ toolchain pinned in [`.mise.toml`](../.mise.toml):
 > [AWS Lambda runtimes docs](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html)).
 > Node 26 is the default here because the repo pins 26.13.0 and is built to run
 > on Node 26, but a production operator should weigh the preview status before
-> deploying. There is no Docker in CI here, so a Docker host
-> must confirm the `public.ecr.aws/lambda/nodejs:26` tag resolves before a real
-> `-c kiroCliVersion` deploy.
+> deploying.
 
 ## 3. Choose your deploy context
 
-The CDK app ([`packages/cdk/bin/app.ts`](../packages/cdk/bin/app.ts)) reads three
-context values, passed with `-c key=value`:
+The CDK app ([`packages/cdk/bin/app.ts`](../packages/cdk/bin/app.ts)) reads its
+deploy context from `-c key=value` flags. Five keys are required:
+`publicBaseUrl`, `cognitoDomainPrefix`, `allowedRepos`, `kiroApiKeySecretArn`
+and `kiroCliVersion`. The rest are optional:
 
 > **Real assets, `-c kiroCliVersion=<ver>` (required).** This flag drives BOTH
 > real production assets: the bridge Dockerfile's `KIRO_CLI_VERSION` build arg
@@ -197,7 +197,7 @@ feature. Leave `GITHUB_APP_SECRET_ARN` blank and nothing is deployed for it.
 
 Additional options exist on `KiroRemoteProps`
 ([`packages/cdk/src/construct.ts`](../packages/cdk/src/construct.ts)). The app
-entrypoint only wires the three context keys above; to set the rest you edit
+entrypoint wires only the context keys above; to set the props below you edit
 `bin/app.ts` (or your own thin app) and pass them to the stack. The most useful:
 
 | Prop                   | Default                                   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -209,7 +209,7 @@ entrypoint only wires the three context keys above; to set the rest you edit
 | `preRegisteredClients` | —                                         | A list of `{ name, callbackUrls }` public OAuth clients (e.g. Claude Code, VS Code) that authorize through the facade without a CIMD document. Each client presents its `name` as the `client_id` at `/oauth/authorize` and may only use the listed `callbackUrls` as `redirect_uri`. The stack provisions a Cognito app client for each and propagates the id + redirect URIs into the API Lambda so the facade accepts them at runtime.                                                                                                      |
 | `kiroApiKeySecretArn`  | — (construct creates an empty secret)     | Full ARN of a **pre-existing** Secrets Manager secret holding the `ksk_` key. **Recommended for real deploys:** the construct imports it and grants the bridge functions read; they resolve it at runtime via `KIRO_API_KEY_SECRET_ARN`. Because it is external it **survives a stack rollback**. Omit it and the construct creates an empty secret (synth/dev only) that you must populate and that is destroyed on rollback. Also wired from the `kiroApiKeySecretArn` context key. See [Store the Kiro API key](#4-store-the-kiro-api-key). |
 | `customDomain`         | — (default execute-api domain only)       | `{ domainName, certificateArn?, hostedZoneId?, zoneName? }`. When set, the stack creates (or imports) a regional ACM cert and an API Gateway v2 custom domain mapped to the HTTP API. Supply `hostedZoneId` + `zoneName` to validate the cert against a Route 53 zone and create alias `A`/`AAAA` records in it (no manual DNS); omit them for the zone-less manual-CNAME path. See [Pointing `publicBaseUrl` at the API](#pointing-publicbaseurl-at-the-api).                                                                                 |
-| `lambdaImage`          | placeholder ECR image                     | Override the bridge Lambda container image. A factory `(cmd) => DockerImageCode` called once per function (consumer + caps-publisher) so each runs its own handler from the one image. Production deploys pass a factory wrapping `DockerImageCode.fromImageAsset(repoRoot, { file: "packages/bridge/Dockerfile.lambda", buildArgs: { KIRO_CLI_VERSION }, platform: linux/arm64, cmd })`. Gated behind `-c kiroCliVersion`.                                                                                                                    |
+| `lambdaImage`          | placeholder ECR image                     | Override the bridge Lambda container image. A factory `(cmd) => DockerImageCode` called once per function (consumer, catch-up, caps publisher) so each runs its own handler from the one image. Production deploys pass a factory wrapping `DockerImageCode.fromImageAsset(repoRoot, { file: "packages/bridge/Dockerfile.lambda", buildArgs: { KIRO_CLI_VERSION }, platform: linux/arm64, cmd })`. Gated behind `-c kiroCliVersion`.                                                                                                           |
 | `apiLambdaCode`        | inline placeholder                        | Override the API Lambda code with your bundled asset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 > The defaults for `lambdaImage` and `apiLambdaCode` are
@@ -226,17 +226,17 @@ The bridge is serverless. Every deploy provisions:
   SQS FIFO command queue and launches and drives cloud sessions;
 - the **catch-up function**, a durable function from the same image
   (`catch-up-durable.handler`) that follows detached turns to their end;
-- the **caps publisher**, a second function from the same image that writes
+- the **caps publisher**, a third function from the same image that writes
   `CONFIG#CAPS`, invoked once right after deploy (a CDK Trigger custom
   resource) and then on a 6-hour schedule.
 
-Both functions talk ACP directly to kiro-cli's bundled engine (see
+All three talk ACP directly to kiro-cli's bundled engine (see
 [direct engine](#how-the-lambda-path-drives-cloud-sessions-direct-engine)).
 There is no VPC and no long-running task. Operational details:
 
-- **Image.** Both functions run the container image built from
+- **Image.** All three functions run the container image built from
   [`packages/bridge/Dockerfile.lambda`](../packages/bridge/Dockerfile.lambda)
-  (arm64, both the consumer and caps-publisher handler bundles). It is built
+  (arm64, with the consumer, catch-up and caps-publisher handler bundles). It is built
   from the required `-c kiroCliVersion=<ver>`, so deploy needs Docker. A build
   stage installs that kiro-cli version and runs `kiro-cli acp --agent-engine=v3`
   once to unpack its bundled engine: the `node` binary goes to `/opt/kiro/node`
@@ -304,7 +304,7 @@ visibility timeout and block every later command for that session.
 
 ### How the Lambda path drives cloud sessions (direct engine)
 
-The Lambda consumer and the caps publisher do not run kiro-cli. kiro-cli 3.1.0
+None of the bridge functions runs kiro-cli. kiro-cli 3.1.0
 starts its engine (KAS, a Node program) with `prctl(PR_SET_PDEATHSIG)`, and
 Lambda rejects that call with `EPERM`, so `kiro-cli acp` cannot start there.
 Instead the handlers start the engine kiro-cli would have started, from the
@@ -427,15 +427,15 @@ construct can create the custom domain for you: set the `customDomain` prop
 There are two DNS flavours of this, both selected by the same `customDomain`
 prop:
 
-- **Manual Cloudflare CNAMEs (the path this repo uses).** The cert is validated
-  with no Route 53 hosted zone — ACM emits a validation `CNAME` you add at
-  Cloudflare, and you point a service `CNAME` at the regional target yourself.
-  No Route 53 resources are created. This is the default for `kiro-remote` — a
-  **scoped subdomain** (`kiro-remote.nikovirtala.dev`) whose parent zone
-  (`nikovirtala.dev`) lives on Cloudflare — and the steps below describe it.
-- **Automated Route 53 (optional alternative).** If you would rather have ACM
-  validation and the alias record fully CDK-managed, delegate the scoped
-  subdomain to a Route 53 zone once; see
+- **Manual Cloudflare CNAMEs.** The cert is validated with no Route 53 hosted
+  zone — ACM emits a validation `CNAME` you add at Cloudflare, and you point a
+  service `CNAME` at the regional target yourself. No Route 53 resources are
+  created. It suits a **scoped subdomain** (`kiro-remote.nikovirtala.dev`) whose
+  parent zone (`nikovirtala.dev`) lives on Cloudflare, and the steps below
+  describe it.
+- **Automated Route 53 (what this repo's deployment and the `scripts/deploy.sh`
+  defaults use).** ACM validation and the alias records are fully CDK-managed
+  once the scoped subdomain is delegated to a Route 53 zone; see
   [the Route 53 alternative](#automated-alternative--route-53-delegated-subdomain)
   at the end of this section.
 
@@ -445,10 +445,12 @@ prop:
 > the region you want — for this deploy that is `eu-north-1` (see
 > [the region note](#5-bootstrap-and-deploy)).
 
-[`scripts/deploy.sh`](../scripts/deploy.sh) defaults both `PUBLIC_BASE_URL`
-**and** `CUSTOM_DOMAIN_NAME` to `kiro-remote.nikovirtala.dev`, so a plain
-`./scripts/deploy.sh` creates the custom domain. The app also accepts them as
-context flags:
+[`scripts/deploy.sh`](../scripts/deploy.sh) defaults `PUBLIC_BASE_URL`,
+`CUSTOM_DOMAIN_NAME` **and** `DNS_ZONE_NAME` to `kiro-remote.nikovirtala.dev`, and
+refuses to run when `DNS_ZONE_NAME` is set without `HOSTED_ZONE_ID`. For the
+manual-CNAME path, set `DNS_ZONE_NAME=` (empty) in `deploy.env`; a plain
+`./scripts/deploy.sh` then creates the custom domain with no Route 53 zone. The
+app also accepts the values as context flags:
 
 ```bash
 mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk deploy -- \
@@ -586,11 +588,12 @@ The bridge image
 `linux/arm64` (the Lambda functions run on Graviton) and is built on the AWS
 Lambda Node base image. It has three stages:
 
-- **deps** installs the workspace with pnpm and esbuild-bundles both Lambda
-  entries, [`lambda-consumer.ts`](../packages/bridge/src/lambda-consumer.ts) and
+- **deps** installs the workspace with pnpm and esbuild-bundles the three Lambda
+  entries, [`lambda-consumer.ts`](../packages/bridge/src/lambda-consumer.ts),
+  [`catch-up-durable.ts`](../packages/bridge/src/catch-up-durable.ts) and
   [`caps-publisher.ts`](../packages/bridge/src/caps-publisher.ts), into
   self-contained CommonJS files (`dist/lambda-consumer.cjs`,
-  `dist/caps-publisher.cjs`). The bundles inline the `@nikovirtala/*`
+  `dist/catch-up-durable.cjs`, `dist/caps-publisher.cjs`). The bundles inline the `@nikovirtala/*`
   workspace code **and** `@aws-sdk/*`, so the runtime image carries no
   `node_modules` and no raw `.ts` source.
 - **kiro** installs `kiro-cli` with the official install script, pinned by the
@@ -599,10 +602,10 @@ Lambda Node base image. It has three stages:
   engine's `node` binary and KAS release are copied to `/opt/kiro`, with
   `/opt/kiro/kas/current` pointing at the release. The build fails loudly if
   that layout changes.
-- **runtime** copies only `/opt/kiro` and the two bundles. kiro-cli itself is
+- **runtime** copies only `/opt/kiro` and the three bundles. kiro-cli itself is
   not in the runtime image. The default `CMD` is the consumer handler; the
-  construct overrides it for the caps publisher, so one image serves both
-  functions.
+  construct overrides it for the catch-up function and the caps publisher, so
+  one image serves all three functions.
 
 Why bundle instead of running the TypeScript source directly? Node refuses to
 type-strip `.ts` files that resolve under a `node_modules` path (see the Node
@@ -633,7 +636,7 @@ DockerImageCode.fromImageAsset(repoRoot, {
   file: "packages/bridge/Dockerfile.lambda",
   platform: Platform.LINUX_ARM64,
   buildArgs: { KIRO_CLI_VERSION: "<version>" },
-  cmd, // ["lambda-consumer.handler"] or ["caps-publisher.handler"]
+  cmd, // ["lambda-consumer.handler"], ["catch-up-durable.handler"] or ["caps-publisher.handler"]
   exclude: [...BRIDGE_IMAGE_EXCLUDES],
 });
 ```

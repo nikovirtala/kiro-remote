@@ -26,7 +26,7 @@ delete needs `sessions:delete`. A session is visible only to its creator's sub.
 | GET    | `/v1/capabilities`                           | Advertised capabilities, `kiro-cli` version (`kiroCliVersion`, `null` until the caps publisher has run; see below), active session count.                                                                            |
 | GET    | `/v1/models`                                 | Model ids the agent advertises.                                                                                                                                                                                      |
 | GET    | `/v1/sessions`                               | List your sessions. Query: `status`, `limit` (default 20, max 100), `cursor`.                                                                                                                                        |
-| POST   | `/v1/sessions`                               | Launch a session. Returns **202** `{ sessionId, turnId }`.                                                                                                                                                           |
+| POST   | `/v1/sessions`                               | Launch a session. Returns **202** `{ sessionId, turnId }`; `turnId` is `null` until the bridge starts the first turn.                                                                                                |
 | POST   | `/v1/sessions/adopt`                         | Adopt an existing Kiro session. Body `{ kiroSessionId }`.                                                                                                                                                            |
 | GET    | `/v1/sessions/{id}`                          | Fetch one session.                                                                                                                                                                                                   |
 | DELETE | `/v1/sessions/{id}`                          | Delete a session (needs `sessions:delete`).                                                                                                                                                                          |
@@ -142,7 +142,7 @@ TOKEN=<token>
 # 1. Confirm the token works and see capabilities.
 curl -sS -H "Authorization: Bearer $TOKEN" "$HOST/v1/capabilities"
 
-# 2. Launch a session (202 with { sessionId, turnId }). Idempotency-Key is optional.
+# 2. Launch a session (202 with { sessionId, turnId: null }). Idempotency-Key is optional.
 curl -sS -X POST "$HOST/v1/sessions" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -156,10 +156,8 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 ```
 
 Repeat step 3 with the `nextCursor` value to keep long-polling. Check
-`turnStatus` in the response to know when the turn has completed. If the session
-reports a pending permission, list it with
-`GET /v1/sessions/<sessionId>/permissions?status=pending` and answer it with
-`POST /v1/sessions/<sessionId>/permissions/<requestId>`.
+`turnStatus` in the response to know when the turn has completed. Cloud turns
+never ask for permission, so there is no pending request to answer.
 
 Keep real secrets out of commands and notes: use placeholders like `owner/repo`
 and `ksk_xxxxxxxx`.

@@ -70,8 +70,9 @@ If discarding fails it deletes the user again, so a user is never left with the
 emailed temporary password. Until the discard step finishes (seconds) the emailed
 temporary password is valid; Ctrl-C or SIGTERM also triggers the delete. **Email
 codes need SES**: Cognito does not deliver email OTP through its default sender,
-so pass `email: UserPoolEmail.withSES(...)` to `KiroRemoteAuth` (verified SES
-identity) or the email-code bootstrap will not work. The app clients enable
+so set `SES_FROM_EMAIL` in `deploy.env` (`-c sesFromEmail`, an address verified
+in SES in the stack region; see [deploy.md](./deploy.md#3-choose-your-deploy-context))
+or the email-code bootstrap will not work. The app clients enable
 `ALLOW_USER_AUTH` (choice-based sign-in), which email code and passkey need.
 
 The invitation email says to ignore the legacy temporary password (Cognito
