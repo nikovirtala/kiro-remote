@@ -37,7 +37,33 @@ export interface DrainMessage {
   sessionId: string;
 }
 
-export type GithubQueueMessage = DeliveryMessage | HarvestMessage | DrainMessage;
+/**
+ * Check whether one linked PR still merges into its base branch after that
+ * branch moved. Sent delayed to ask GitHub again when it had not computed
+ * mergeability yet (`mergeable: null`).
+ */
+export interface ConflictCheckMessage {
+  kind: "conflict_check";
+  repo: string;
+  number: number;
+  /** The base branch that moved. */
+  base: string;
+  /** The base branch's tip after the move, or "unknown". */
+  baseSha: string;
+  /** The PR whose merge moved the base; null for a push. */
+  afterPr: number | null;
+  deliveryId: string;
+  /** Which try this is, starting at 1. */
+  attempt: number;
+  /** The PR's head sha at the first try; a different head later means the agent pushed. */
+  headSha: string | null;
+}
+
+export type GithubQueueMessage =
+  | DeliveryMessage
+  | HarvestMessage
+  | DrainMessage
+  | ConflictCheckMessage;
 
 export function isGithubQueueMessage(value: unknown): value is GithubQueueMessage {
   if (typeof value !== "object" || value === null) {
@@ -55,6 +81,17 @@ export function isGithubQueueMessage(value: unknown): value is GithubQueueMessag
       );
     case "drain":
       return typeof v.sessionId === "string";
+    case "conflict_check":
+      return (
+        typeof v.repo === "string" &&
+        typeof v.number === "number" &&
+        typeof v.base === "string" &&
+        typeof v.baseSha === "string" &&
+        (v.afterPr === null || typeof v.afterPr === "number") &&
+        typeof v.deliveryId === "string" &&
+        typeof v.attempt === "number" &&
+        (v.headSha === null || typeof v.headSha === "string")
+      );
     default:
       return false;
   }

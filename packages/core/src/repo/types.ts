@@ -78,6 +78,11 @@ export interface PrLinkItem {
   linkedAt: string;
   prState: PrState;
   headSha: string | null;
+  /** The PR's base branch, when known (refreshed from pull_request payloads). */
+  baseRef?: string | null;
+  /** GSI1: all links of a repo (see ghRepoGsi1Pk). Absent on links written before the index existed. */
+  GSI1PK?: string;
+  GSI1SK?: string;
 }
 
 /** PK SESSION#<id>, SK LINK#<owner>/<repo>#<n>: the reverse lookup. */

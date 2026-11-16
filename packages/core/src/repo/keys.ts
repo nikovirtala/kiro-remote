@@ -20,6 +20,15 @@ export const ghPrPk = (key: string): string => `GHPR#${key}`;
 export const GH_LINK_SK = "LINK";
 export const sessionLinkSk = (key: string): string => `LINK#${key}`;
 export const SESSION_LINK_PREFIX = "LINK#";
+/**
+ * GSI1 key of a PR link: every link of a repo shares one partition, and the sort
+ * key puts open (or not yet known) PRs under `OPEN#`, so "the open linked PRs of
+ * this repo" is one cheap query. A merged or closed PR moves to `DONE#`.
+ */
+export const GH_LINK_OPEN_PREFIX = "OPEN#";
+export const ghRepoGsi1Pk = (repo: string): string => `GHREPO#${repo.toLowerCase()}`;
+export const ghLinkGsi1Sk = (open: boolean, number: number): string =>
+  `${open ? GH_LINK_OPEN_PREFIX : "DONE#"}${number}`;
 /** Webhook delivery record + dedupe marker (GHDLV#<X-GitHub-Delivery>). */
 export const ghDeliveryPk = (deliveryId: string): string => `GHDLV#${deliveryId}`;
 /** Per-session inbox of typed wake items (SESSION#<id>, INBOX#<ulid>). */

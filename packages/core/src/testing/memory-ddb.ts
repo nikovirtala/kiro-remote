@@ -164,7 +164,7 @@ export class MemoryDdb {
     const expr = input.KeyConditionExpression as string;
     const pk = values[":pk"];
     let rows = this.items().filter((i) => i[pkAttr] === pk);
-    const begins = /begins_with\(SK, (:\w+)\)/.exec(expr);
+    const begins = /begins_with\((?:GSI1)?SK, (:\w+)\)/.exec(expr);
     const between = /SK BETWEEN (:\w+) AND (:\w+)/.exec(expr);
     if (begins) {
       const prefix = String(values[begins[1]]);

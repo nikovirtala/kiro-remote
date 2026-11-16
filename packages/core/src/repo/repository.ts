@@ -35,10 +35,13 @@ import {
   clientPk,
   EVENT_SK_MAX,
   eventSk,
+  GH_LINK_OPEN_PREFIX,
   GH_LINK_SK,
   GH_UNMATCHED_PK,
   ghDeliveryPk,
+  ghLinkGsi1Sk,
   ghPrPk,
+  ghRepoGsi1Pk,
   INBOX_PREFIX,
   idempotencyPk,
   META_SK,
@@ -95,6 +98,11 @@ export interface RepositoryDeps {
   bucketName: string;
   /** Injectable clock for deterministic TTLs/timestamps in tests. */
   now?: () => number;
+}
+
+/** A PR whose base branch can still move under it: open, or not known yet (a manual link). */
+function isOpenState(state: PrState): boolean {
+  return state === "open" || state === "unknown";
 }
 
 function byteLength(value: string): number {
@@ -618,6 +626,7 @@ export class Repository {
     linkedBy: LinkMethod;
     prState: PrState;
     headSha: string | null;
+    baseRef?: string | null;
   }): Promise<{ created: true; link: PrLinkItem } | { created: false; existing: PrLinkItem }> {
     const pr = `${args.repo}#${args.number}`;
     const linkedAt = this.nowIso();
@@ -632,6 +641,9 @@ export class Repository {
       linkedAt,
       prState: args.prState,
       headSha: args.headSha,
+      baseRef: args.baseRef ?? null,
+      GSI1PK: ghRepoGsi1Pk(args.repo),
+      GSI1SK: ghLinkGsi1Sk(isOpenState(args.prState), args.number),
     };
     const reverse: SessionLinkItem = {
       PK: sessionPk(args.sessionId),
@@ -685,6 +697,30 @@ export class Repository {
     return links.filter((l): l is PrLinkItem => l !== null && l.sessionId === sessionId);
   }
 
+  /**
+   * The links of a repo whose PR is open (or of unknown state), via GSI1. Links
+   * written before the index existed are not found until their PR state is next
+   * refreshed (see {@link updateLinkState}).
+   */
+  async queryOpenLinks(repo: string): Promise<PrLinkItem[]> {
+    const items: PrLinkItem[] = [];
+    let cursor: Record<string, unknown> | undefined;
+    do {
+      const res = await this.ddb.send(
+        new QueryCommand({
+          TableName: this.table,
+          IndexName: "GSI1",
+          KeyConditionExpression: "GSI1PK = :pk AND begins_with(GSI1SK, :p)",
+          ExpressionAttributeValues: { ":pk": ghRepoGsi1Pk(repo), ":p": GH_LINK_OPEN_PREFIX },
+          ExclusiveStartKey: cursor,
+        }),
+      );
+      items.push(...((res.Items as PrLinkItem[] | undefined) ?? []));
+      cursor = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (cursor);
+    return items.filter((l) => isOpenState(l.prState));
+  }
+
   /** Remove a link. Only the owning session can remove it. Returns false when there was none. */
   async deleteLink(key: string, sessionId: string): Promise<boolean> {
     try {
@@ -720,13 +756,25 @@ export class Repository {
   /** Refresh the PR-side state of an existing link (from webhook payloads). */
   async updateLinkState(
     key: string,
-    patch: { prState?: PrState; headSha?: string | null },
+    patch: { prState?: PrState; headSha?: string | null; baseRef?: string | null },
   ): Promise<void> {
     const sets: string[] = [];
     const values: Record<string, unknown> = {};
     if (patch.prState !== undefined) {
       sets.push("prState = :prState");
       values[":prState"] = patch.prState;
+      // Keep GSI1 in step with the state (this also indexes links that predate it).
+      const hash = key.lastIndexOf("#");
+      const number = Number(key.slice(hash + 1));
+      if (hash > 0 && Number.isInteger(number)) {
+        sets.push("GSI1PK = :gsi1pk", "GSI1SK = :gsi1sk");
+        values[":gsi1pk"] = ghRepoGsi1Pk(key.slice(0, hash));
+        values[":gsi1sk"] = ghLinkGsi1Sk(isOpenState(patch.prState), number);
+      }
+    }
+    if (patch.baseRef !== undefined) {
+      sets.push("baseRef = :baseRef");
+      values[":baseRef"] = patch.baseRef;
     }
     if (patch.headSha !== undefined) {
       sets.push("headSha = :headSha");
