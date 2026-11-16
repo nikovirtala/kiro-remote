@@ -208,6 +208,108 @@ describe("gh-conflict-prs", () => {
   });
 });
 
+describe("gh-conflict-wake", () => {
+  const step = GITHUB_STEPS.find((s) => s.id === "gh-conflict-wake");
+  const MERGE_SHA = "m".repeat(40);
+  const NEW_HEAD = "n".repeat(40);
+  const prompts: Record<string, string> = {
+    "t-merge":
+      "[GitHub webhook] This turn was started by GitHub, not by the user: pull_request.closed (merged) on o/r#5 (delivery d-merge).\nPR #5 was merged into `main`.",
+    "t-conflict":
+      "[GitHub webhook] This turn was started by GitHub, not by the user: mergeability check after the base branch moved on o/r#6 (delivery d-merge).\nPR #6 no longer merges into `main`: it conflicts with `main` at `abc` (after #5 was merged).",
+  };
+  /** The merge wake at 10 s, the conflict wake at 150 s; both carry the merge's delivery. */
+  function ctxWith(conflictDeliveries: string[], seenBefore: string[] = []) {
+    let clock = 0;
+    const at = (s: number) => new Date(s * 1000).toISOString();
+    const timeline = [
+      { visibleAt: 10_000, seq: 11, turnId: "t-merge", deliveryIds: ["d-merge"], ts: at(10) },
+      {
+        visibleAt: 150_000,
+        seq: 13,
+        turnId: "t-conflict",
+        deliveryIds: conflictDeliveries,
+        ts: at(150),
+      },
+    ];
+    const visible = () =>
+      timeline
+        .filter((w) => clock >= w.visibleAt)
+        .flatMap((w) => [
+          {
+            seq: w.seq,
+            turnId: w.turnId,
+            type: "session.info",
+            ts: w.ts,
+            payload: { payload: { trigger: { source: "github", deliveryIds: w.deliveryIds } } },
+          },
+          { seq: w.seq + 1, turnId: w.turnId, type: "turn.completed", ts: w.ts, payload: {} },
+        ]);
+    const gh = async (args: string[]) => {
+      const path = args.find((a) => a.startsWith("repos/")) ?? "";
+      if (path.endsWith("/merge")) return JSON.stringify({ merged: true, sha: MERGE_SHA });
+      if (path.includes("/compare/")) return JSON.stringify({ behind_by: 0 });
+      return JSON.stringify({ mergeable: true, mergeable_state: "clean", head: { sha: NEW_HEAD } });
+    };
+    const ctx = {
+      baseUrl: "https://kr.test",
+      deps: {
+        now: () => clock,
+        sleep: async (ms: number) => {
+          clock += ms;
+        },
+        turnTimeoutMs: 60_000,
+        gh,
+        fetch: async (url: string) => {
+          const turnId = decodeURIComponent(url.split("/").pop() ?? "");
+          return new Response(JSON.stringify({ prompt: prompts[turnId] }), { status: 200 });
+        },
+      },
+      state: {
+        created: new Set<string>(),
+        tokens: { accessToken: async () => "tok" },
+        ghWakeDeliveries: seenBefore,
+        ghConflict: {
+          session: { id: "S", cursor: 10 },
+          launchedAt: 0,
+          prs: [
+            { repo: "o/r", number: 5, headRef: "b5", headSha: "5".repeat(40), base: "main" },
+            { repo: "o/r", number: 6, headRef: "b6", headSha: "6".repeat(40), base: "main" },
+          ],
+        },
+        rest: {
+          getEvents: async (_p: unknown, _id: string, q: { after: number; types?: string[] }) => {
+            const evs = visible().filter(
+              (e) => e.seq > q.after && (!q.types || q.types.includes(e.type)),
+            );
+            return {
+              events: evs,
+              nextCursor: evs.length > 0 ? evs[evs.length - 1].seq : q.after,
+              turnStatus: "idle",
+            };
+          },
+        },
+      },
+    };
+    return ctx as never;
+  }
+
+  it("accepts the conflict wake carrying the merge's delivery again (seen live)", async () => {
+    await expect(step?.run(ctxWith(["d-merge"]))).resolves.toMatchObject({
+      first: 5,
+      second: 6,
+      mergeWakeTurnId: "t-merge",
+      conflictWakeTurnId: "t-conflict",
+    });
+  });
+
+  it("still rejects a conflict wake that re-uses a delivery from an earlier step", async () => {
+    await expect(step?.run(ctxWith(["d-merge", "d-old"], ["d-old"]))).rejects.toThrow(
+      /wake turn t-conflict has no new GitHub delivery \(deliveries: d-merge, d-old\)/,
+    );
+  });
+});
+
 describe("gh-checks-wake", () => {
   const step = GITHUB_STEPS.find((s) => s.id === "gh-checks-wake");
   /** The GitHub Actions suite with this conclusion (null = still running), plus other apps' suites. */

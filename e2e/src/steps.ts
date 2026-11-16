@@ -854,7 +854,12 @@ async function waitForWake(
   ctx: HarnessContext,
   s: SessionCursor,
   startedAt: number,
-  opts: { timeoutMs?: number; closeExpected?: boolean } = {},
+  opts: {
+    timeoutMs?: number;
+    closeExpected?: boolean;
+    /** Deliveries an earlier wake saw that this wake may carry again, because it follows from them. */
+    reusable?: readonly string[];
+  } = {},
 ) {
   const client = restOf(ctx);
   const wake = await pollUntil(
@@ -872,9 +877,10 @@ async function waitForWake(
     },
   );
   // A wake that re-uses a delivery an earlier wake step already saw is not
-  // caused by this step's action.
+  // caused by this step's action, unless the caller expects it to.
   const seen = new Set(ctx.state.ghWakeDeliveries ?? []);
-  const reused = wake.deliveryIds.filter((d) => seen.has(d));
+  const reusable = new Set(opts.reusable ?? []);
+  const reused = wake.deliveryIds.filter((d) => seen.has(d) && !reusable.has(d));
   if (wake.deliveryIds.length === 0 || reused.length > 0) {
     throw new Error(
       `wake turn ${wake.turnId} has no new GitHub delivery (deliveries: ${wake.deliveryIds.join(", ") || "none"})`,
@@ -1798,8 +1804,11 @@ const ghConflictWake: Step<HarnessContext> = {
       throw new Error(`the first wake turn is not PR #${first.number}'s merge wake`);
     }
 
+    // The conflict check runs because of the merge, so its wake names the
+    // merge's delivery again (seen live); it may carry no other old delivery.
     const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt, {
       timeoutMs: GH_CONFLICT_WAKE_TIMEOUT_MS,
+      reusable: mergeWake.wake.deliveryIds,
     });
     const prompt = await turnPrompt(ctx, s.id, wake.turnId);
     const lines = prompt.split("\n");
