@@ -380,6 +380,7 @@ describe("fixtures", () => {
       "issue_comment.created.trusted",
       "check_suite.completed.failure",
       "workflow_run.completed.failure",
+      "push",
     ]) {
       expect(fixture(f).repository).toBeTruthy();
     }

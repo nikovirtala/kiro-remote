@@ -53,6 +53,12 @@ export const METRIC_NAMES = [
   "Redelivered",
   "AutoClosed",
   "AutoCloseSkipped",
+  "ConflictChecks",
+  "ConflictRechecks",
+  "ConflictsFound",
+  "ConflictChecksSkipped",
+  "ConflictChecksGaveUp",
+  "ConflictWakes",
 ] as const;
 export type MetricName = (typeof METRIC_NAMES)[number];
 

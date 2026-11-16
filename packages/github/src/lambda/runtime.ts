@@ -47,6 +47,9 @@ export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Con
     agentApps: KIRO_AGENT_APP_SLUGS,
     autoCloseOnMerge: env.GITHUB_AUTO_CLOSE_ON_MERGE === "after_turn" ? "after_turn" : "off",
     checksDebounceMs: GITHUB_CHECKS_DEBOUNCE_MS,
+    conflictDebounceMs: GITHUB_CHECKS_DEBOUNCE_MS,
+    // Tries at 0 s, 40 s and 120 s after the base moved, then give up.
+    conflictRecheckDelaysSec: [40, 80],
   };
 }
 

@@ -36,6 +36,7 @@ describe("route(): every default action", () => {
       pr: "octo/repo#7",
       prState: "merged",
       headSha: expect.any(String),
+      baseRef: "main",
     });
   });
 
@@ -69,6 +70,7 @@ describe("route(): every default action", () => {
       pr: "octo/repo#7",
       prState: "open",
       headSha: "3333333333333333333333333333333333333333",
+      baseRef: "main",
     });
   });
 

@@ -9,6 +9,8 @@ export const HANDLED_EVENTS = [
   "issue_comment",
   "check_suite",
   "workflow_run",
+  // Optional App subscription: only used to notice a base branch moving by a direct push.
+  "push",
 ] as const;
 export type HandledEvent = (typeof HANDLED_EVENTS)[number];
 
@@ -43,6 +45,8 @@ export interface RouteLink {
   linkedBy: LinkMethod;
   prState: PrState;
   headSha: string | null;
+  /** The PR's base branch, when known. */
+  baseRef?: string | null;
 }
 
 export interface RouteConfig {
@@ -62,12 +66,37 @@ export interface RouteConfig {
   checksDebounceMs: number;
 }
 
-export type WakeKind = "pr_merged" | "pr_closed" | "review" | "comment" | "checks_failed";
+export type WakeKind =
+  | "pr_merged"
+  | "pr_closed"
+  | "review"
+  | "comment"
+  | "checks_failed"
+  | "pr_conflict";
 
 export interface FailedCheck {
   name: string;
   url: string;
   conclusion: string;
+}
+
+/** What the conflict wake says, kept on the inbox item so a debounce merge can re-render the prompt. */
+export interface ConflictData {
+  base: string;
+  /** The base branch's latest tip seen, hex, or "unknown". */
+  baseSha: string;
+  /** PRs whose merge moved the base, oldest first. */
+  afterPrs: number[];
+  afterPush: boolean;
+}
+
+/** Why a base branch moved: a PR merged into it, or something was pushed to it. */
+export interface BaseMove {
+  repo: string;
+  base: string;
+  baseSha: string;
+  /** The PR that was merged, or null for a push. */
+  afterPr: number | null;
 }
 
 export type Action =
@@ -81,11 +110,13 @@ export type Action =
       number: number;
       deliveryId: string;
       prompt: string;
-      data: { checks?: FailedCheck[] } | null;
+      data: { checks?: FailedCheck[]; conflict?: ConflictData } | null;
       debounceMs: number;
       autoClose: boolean;
     }
-  | { type: "updateLink"; pr: string; prState?: PrState; headSha?: string }
+  | { type: "updateLink"; pr: string; prState?: PrState; headSha?: string; baseRef?: string }
+  /** A base branch moved: the consumer checks the open linked PRs on it for conflicts. */
+  | ({ type: "checkBase"; deliveryId: string } & BaseMove)
   | {
       type: "unmatched";
       repo: string;

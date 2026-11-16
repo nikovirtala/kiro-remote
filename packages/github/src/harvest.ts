@@ -186,6 +186,7 @@ export async function harvestTurn(
       linkedBy: "harvest",
       prState: pull.merged ? "merged" : pull.state,
       headSha: pull.headSha,
+      baseRef: pull.baseRef,
     });
     if (created.created) {
       result.linked.push(key);

@@ -9,7 +9,7 @@
  */
 
 import { GITHUB_QUOTE_MAX_CHARS } from "@nikovirtala/kiro-remote-core";
-import type { FailedCheck } from "./types.ts";
+import type { ConflictData, FailedCheck } from "./types.ts";
 
 export const WAKE_HEADER_PREFIX = "[GitHub webhook]";
 export const QUOTE_BEGIN = "<<<BEGIN GITHUB QUOTE>>>";
@@ -118,4 +118,40 @@ export function checksPrompt(args: {
 export function safeLabel(value: unknown, max = 100): string {
   const text = typeof value === "string" ? value : "unnamed";
   return clean(text).replace(/\s+/g, " ").trim().slice(0, max) || "unnamed";
+}
+
+/** "after #5 was merged", "after #5, #6 were merged" or "after a push". */
+function conflictCause(data: ConflictData): string {
+  const prs = [...new Set(data.afterPrs)].sort((a, b) => a - b);
+  if (prs.length === 1) {
+    return `after #${prs[0]} was merged`;
+  }
+  if (prs.length > 1) {
+    return `after ${prs.map((n) => `#${n}`).join(", ")} were merged`;
+  }
+  return data.afterPush ? "after a push" : "after the base branch moved";
+}
+
+/**
+ * The prompt for a linked PR that no longer merges into its base branch. Also
+ * used to re-render after a debounce merge, so it takes everything from `data`.
+ */
+export function conflictPrompt(args: {
+  repo: string;
+  number: number;
+  data: ConflictData;
+  deliveryIds: string[];
+}): string {
+  // A branch name is chosen by whoever can push: keep it to one safe line and no backticks.
+  const base = safeLabel(args.data.base, 100).replace(/`/g, "'");
+  const sha = args.data.baseSha.replace(/[^0-9a-f]/gi, "") || "unknown";
+  return [
+    header({
+      event: "mergeability check after the base branch moved",
+      repo: args.repo,
+      number: args.number,
+      deliveryIds: args.deliveryIds,
+    }),
+    `PR #${args.number} no longer merges into \`${base}\`: it conflicts with \`${base}\` at ${sha} (${conflictCause(args.data)}). Rebase onto \`${base}\` (never merge it in), resolve the conflicts, push with --force-with-lease and say what changed.`,
+  ].join("\n");
 }

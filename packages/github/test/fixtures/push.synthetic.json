@@ -1,0 +1,25 @@
+{
+  "ref": "refs/heads/main",
+  "before": "1111111111111111111111111111111111111111",
+  "after": "4444444444444444444444444444444444444444",
+  "created": false,
+  "deleted": false,
+  "forced": false,
+  "repository": {
+    "id": 1001,
+    "full_name": "octo/repo",
+    "name": "repo",
+    "owner": {
+      "login": "octo",
+      "type": "User"
+    },
+    "html_url": "https://github.com/octo/repo"
+  },
+  "pusher": {
+    "name": "octocat"
+  },
+  "sender": {
+    "login": "octocat",
+    "type": "User"
+  }
+}
