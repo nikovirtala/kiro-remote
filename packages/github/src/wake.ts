@@ -43,10 +43,10 @@ export async function enqueueWake(
     const target = pending.find(
       (i) => i.key === a.key && i.kind === a.kind && nowMs - Date.parse(i.createdAt) < a.debounceMs,
     );
-    if (target && a.kind === "pr_conflict") {
-      const merged = await mergeConflictItem(deps, target, a);
-      if (merged) {
-        return { merged: true, id: target.id };
+    if (a.kind === "pr_conflict" || a.kind === "pr_behind") {
+      const folded = await foldBaseMoveWake(deps, a, pending, target);
+      if (folded) {
+        return folded;
       }
     } else if (target) {
       const checks = unionChecks(
@@ -105,7 +105,59 @@ export async function enqueueWake(
 }
 
 /**
- * Fold another base move into a pending conflict item: keep the newest base sha,
+ * A conflict and a behind wake for the same PR never both go out: both ask for
+ * a rebase. A pending conflict item absorbs a behind wake (at any age), and a
+ * conflict wake replaces a pending behind item, keeping the PRs it named.
+ * Otherwise a wake folds into a pending item of its own kind inside the window.
+ * Returns null when the caller should write a new item.
+ */
+async function foldBaseMoveWake(
+  deps: WakeDeps,
+  a: WakeAction,
+  pending: readonly InboxItem[],
+  sameKind: InboxItem | undefined,
+): Promise<{ merged: true; id: string } | null> {
+  const forKey = pending.filter((i) => i.key === a.key);
+  if (a.kind === "pr_behind") {
+    const conflict = forKey.find((i) => i.kind === "pr_conflict");
+    if (conflict && (await mergeConflictItem(deps, conflict, a))) {
+      return { merged: true, id: conflict.id };
+    }
+  } else {
+    const behind = forKey.filter((i) => i.kind === "pr_behind");
+    if (behind.length > 0) {
+      const dropped = await deps.repo.dropInbox(
+        a.sessionId,
+        behind.map((i) => i.id),
+        "superseded_by_conflict",
+      );
+      if (dropped > 0) {
+        deps.metrics.count("WakesDropped", dropped, { reason: "superseded_by_conflict" });
+      }
+      const carried = behind.flatMap(
+        (i) => (i.data as { conflict?: ConflictData } | null)?.conflict?.afterPrs ?? [],
+      );
+      const own = a.data?.conflict;
+      if (own) {
+        own.afterPrs = [...new Set([...carried, ...own.afterPrs])];
+        a.prompt = conflictPrompt({
+          repo: a.repo,
+          number: a.number,
+          data: own,
+          deliveryIds: [a.deliveryId],
+          kind: "pr_conflict",
+        });
+      }
+    }
+  }
+  if (sameKind && (await mergeConflictItem(deps, sameKind, a))) {
+    return { merged: true, id: sameKind.id };
+  }
+  return null;
+}
+
+/**
+ * Fold another base move into a pending conflict (or behind) item: keep the newest base sha,
  * list every PR whose merge moved the base, and re-render the prompt.
  */
 async function mergeConflictItem(
@@ -128,7 +180,13 @@ async function mergeConflictItem(
   return deps.repo.mergeInboxItem(a.sessionId, target.id, {
     deliveryIds,
     data: { conflict },
-    prompt: conflictPrompt({ repo: a.repo, number: a.number, data: conflict, deliveryIds }),
+    prompt: conflictPrompt({
+      repo: a.repo,
+      number: a.number,
+      data: conflict,
+      deliveryIds,
+      kind: target.kind === "pr_behind" ? "pr_behind" : "pr_conflict",
+    }),
   });
 }
 

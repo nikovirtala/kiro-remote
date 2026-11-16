@@ -311,6 +311,13 @@ export interface KiroRemoteProps {
   /** "after_turn" deletes the session once the post-merge wake turn completes. Defaults to "off". */
   githubAutoCloseOnMerge?: "off" | "after_turn";
 
+  /**
+   * "on" also wakes a session when its linked PR merges but is behind a base
+   * branch that requires up-to-date branches (GitHub's `mergeable_state:
+   * "behind"`). Defaults to "off" (see docs/github.md).
+   */
+  githubWakeOnBehind?: "off" | "on";
+
   /** Bundled code for the webhook ingress function. Defaults to an inline placeholder (synth only). */
   githubWebhookCode?: Code;
 
@@ -1072,6 +1079,7 @@ export class KiroRemote extends Construct {
           GITHUB_TRUSTED_LOGINS: (props.githubTrustedLogins ?? []).join(","),
           GITHUB_AGENT_LOGINS: (props.githubAgentLogins ?? []).join(","),
           GITHUB_AUTO_CLOSE_ON_MERGE: props.githubAutoCloseOnMerge ?? "off",
+          GITHUB_WAKE_ON_BEHIND: props.githubWakeOnBehind ?? "off",
         },
       });
       this.githubConsumerFn = consumerFn;

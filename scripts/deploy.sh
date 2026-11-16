@@ -172,6 +172,7 @@ GITHUB_TRUSTED_LOGINS="${GITHUB_TRUSTED_LOGINS:-}"
 GITHUB_AGENT_LOGINS="${GITHUB_AGENT_LOGINS:-}"
 GITHUB_PR_TRAILER="${GITHUB_PR_TRAILER:-}"
 GITHUB_AUTO_CLOSE_ON_MERGE="${GITHUB_AUTO_CLOSE_ON_MERGE:-}"
+GITHUB_WAKE_ON_BEHIND="${GITHUB_WAKE_ON_BEHIND:-}"
 
 if [ -n "${BRIDGE_MODE:-}" ]; then
   printf 'WARNING: BRIDGE_MODE in %s is obsolete and ignored (the Lambda bridge is the only bridge); remove the line.\n' "$CONFIG_FILE" >&2
@@ -217,6 +218,7 @@ add_opt githubTrustedLogins  "$GITHUB_TRUSTED_LOGINS"
 add_opt githubAgentLogins    "$GITHUB_AGENT_LOGINS"
 add_opt githubPrTrailer      "$GITHUB_PR_TRAILER"
 add_opt githubAutoCloseOnMerge "$GITHUB_AUTO_CLOSE_ON_MERGE"
+add_opt githubWakeOnBehind   "$GITHUB_WAKE_ON_BEHIND"
 
 # synth and diff cover every stack by default (synth rejects --all); deploy
 # needs --all.

@@ -131,6 +131,7 @@ export function world(config: Partial<ConsumerDeps["config"]> = {}): World {
       trustedLogins: ["octocat"],
       conflictDebounceMs: 120_000,
       conflictRecheckDelaysSec: [40, 80],
+      wakeOnBehind: false,
       ...config,
     },
     metrics,

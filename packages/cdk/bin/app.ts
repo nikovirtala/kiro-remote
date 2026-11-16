@@ -163,6 +163,7 @@ const githubAutoCloseOnMerge = app.node.tryGetContext("githubAutoCloseOnMerge") 
   | "off"
   | "after_turn"
   | undefined;
+const githubWakeOnBehind = app.node.tryGetContext("githubWakeOnBehind") as "off" | "on" | undefined;
 const github = githubAppSecretArn
   ? {
       githubAppSecretArn,
@@ -170,6 +171,7 @@ const github = githubAppSecretArn
       githubAgentLogins: list("githubAgentLogins"),
       ...(githubPrTrailer ? { githubPrTrailer } : {}),
       ...(githubAutoCloseOnMerge ? { githubAutoCloseOnMerge } : {}),
+      ...(githubWakeOnBehind ? { githubWakeOnBehind } : {}),
       githubWebhookCode: buildGithubLambdaCode("webhook"),
       githubConsumerCode: buildGithubLambdaCode("consumer"),
     }

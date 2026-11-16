@@ -4,7 +4,8 @@
  * GitHub sends no webhook when a pull request starts to conflict, and a
  * conflicting PR gets no CI run. What does change is the PR's base branch, so
  * when one moves (see route.ts, baseMoveOf) the consumer reads each open linked
- * PR on it and calls {@link decideConflict} with the result. Nothing here does
+ * PR on it and calls {@link decideConflict} with the result. A `behind` PR
+ * also wakes when the stack turns that on (GITHUB_WAKE_ON_BEHIND). Nothing here does
  * I/O; the consumer applies the decision.
  *
  * GitHub computes `mergeable` lazily: right after the base moved a read returns
@@ -49,11 +50,11 @@ export type SkipReason = "not_found" | "closed" | "other_base" | "head_changed";
 export type GiveUpReason = "still_unknown" | "read_failed";
 
 export type ConflictDecision =
-  /** The PR conflicts with its base: write a wake. */
-  | { type: "wake"; headSha: string }
+  /** The PR conflicts with its base, or is behind it and behind wakes are on: write a wake. */
+  | { type: "wake"; state: "conflicting" | "behind"; headSha: string }
   /** GitHub has not computed it yet: ask again later, comparing against this head. */
   | { type: "recheck"; headSha: string }
-  /** Computed, and no conflict (`behind` is reported but does not wake). */
+  /** Computed, and nothing to wake for (`behind` wakes only with `wakeOnBehind`). */
   | { type: "done"; state: "clean" | "behind"; headSha: string }
   | { type: "skip"; reason: SkipReason }
   | { type: "gave_up"; reason: GiveUpReason };
@@ -68,6 +69,12 @@ export interface ConflictCheckInput {
   maxAttempts: number;
   /** The head sha seen at the first try; a different head now means the agent pushed since. */
   baselineHeadSha: string | null;
+  /**
+   * Wake for a PR that merges but is behind its base. GitHub reports `behind`
+   * when the base requires branches to be up to date before merging, so this
+   * fires where the rebase is actually needed to merge.
+   */
+  wakeOnBehind?: boolean;
 }
 
 export function decideConflict(input: ConflictCheckInput): ConflictDecision {
@@ -88,11 +95,15 @@ export function decideConflict(input: ConflictCheckInput): ConflictDecision {
   const state = mergeStateOf(pull);
   switch (state) {
     case "conflicting":
-      return { type: "wake", headSha: pull.headSha };
+      return { type: "wake", state, headSha: pull.headSha };
     case "unknown":
       return input.attempt >= input.maxAttempts
         ? { type: "gave_up", reason: "still_unknown" }
         : { type: "recheck", headSha: pull.headSha };
+    case "behind":
+      return input.wakeOnBehind
+        ? { type: "wake", state, headSha: pull.headSha }
+        : { type: "done", state, headSha: pull.headSha };
     default:
       return { type: "done", state, headSha: pull.headSha };
   }

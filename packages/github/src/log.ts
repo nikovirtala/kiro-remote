@@ -56,6 +56,7 @@ export const METRIC_NAMES = [
   "ConflictChecks",
   "ConflictRechecks",
   "ConflictsFound",
+  "BehindFound",
   "ConflictChecksSkipped",
   "ConflictChecksGaveUp",
   "ConflictWakes",
