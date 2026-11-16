@@ -66,13 +66,17 @@ export interface RouteConfig {
   checksDebounceMs: number;
 }
 
+/** The two wakes a base move can cause (see conflicts.ts). */
+export type BaseMoveWakeKind = "pr_conflict" | "pr_behind";
+
 export type WakeKind =
   | "pr_merged"
   | "pr_closed"
   | "review"
   | "comment"
   | "checks_failed"
-  | "pr_conflict";
+  | "pr_conflict"
+  | "pr_behind";
 
 export interface FailedCheck {
   name: string;

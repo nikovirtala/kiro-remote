@@ -45,6 +45,8 @@ export interface ConsumerConfig {
    * mergeability yet. N delays mean N + 1 tries in total.
    */
   conflictRecheckDelaysSec: readonly number[];
+  /** Also wake when a PR merges but is behind a base that requires up-to-date branches. */
+  wakeOnBehind: boolean;
 }
 
 export interface ConsumerDeps {
@@ -357,6 +359,7 @@ async function checkConflict(
       attempt: msg.attempt,
       maxAttempts,
       baselineHeadSha: msg.headSha,
+      wakeOnBehind: deps.config.wakeOnBehind,
     });
   } catch (err) {
     deps.logger.warn("conflict_check_read_failed", { ...fields, error: String(err) });
@@ -388,7 +391,8 @@ async function checkConflict(
       return null;
     }
     case "wake": {
-      deps.metrics.count("ConflictsFound", 1);
+      const kind = decision.state === "behind" ? "pr_behind" : "pr_conflict";
+      deps.metrics.count(decision.state === "behind" ? "BehindFound" : "ConflictsFound", 1);
       const data = {
         conflict: {
           base: msg.base,
@@ -400,7 +404,7 @@ async function checkConflict(
       const wake = await enqueueWake(wakeDeps(deps), {
         type: "wake",
         sessionId: link.sessionId,
-        kind: "pr_conflict",
+        kind,
         key: link.pr,
         repo: msg.repo,
         number: msg.number,
@@ -413,12 +417,18 @@ async function checkConflict(
           number: msg.number,
           data: data.conflict,
           deliveryIds: [msg.deliveryId],
+          kind,
         }),
       });
       if (!wake.merged) {
-        deps.metrics.count("ConflictWakes", 1);
+        deps.metrics.count("ConflictWakes", 1, { state: decision.state });
       }
-      deps.logger.info("conflict_wake", { ...fields, sessionId: link.sessionId, ...wake });
+      deps.logger.info("conflict_wake", {
+        ...fields,
+        state: decision.state,
+        sessionId: link.sessionId,
+        ...wake,
+      });
       return link.sessionId;
     }
   }

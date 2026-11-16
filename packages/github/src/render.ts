@@ -9,7 +9,7 @@
  */
 
 import { GITHUB_QUOTE_MAX_CHARS } from "@nikovirtala/kiro-remote-core";
-import type { ConflictData, FailedCheck } from "./types.ts";
+import type { BaseMoveWakeKind, ConflictData, FailedCheck } from "./types.ts";
 
 export const WAKE_HEADER_PREFIX = "[GitHub webhook]";
 export const QUOTE_BEGIN = "<<<BEGIN GITHUB QUOTE>>>";
@@ -141,10 +141,16 @@ export function conflictPrompt(args: {
   number: number;
   data: ConflictData;
   deliveryIds: string[];
+  /** Defaults to "pr_conflict". */
+  kind?: BaseMoveWakeKind;
 }): string {
   // A branch name is chosen by whoever can push: keep it to one safe line and no backticks.
   const base = safeLabel(args.data.base, 100).replace(/`/g, "'");
   const sha = args.data.baseSha.replace(/[^0-9a-f]/gi, "") || "unknown";
+  const line =
+    args.kind === "pr_behind"
+      ? `PR #${args.number} is behind \`${base}\`, which requires it to be up to date before merging: \`${base}\` moved to ${sha} (${conflictCause(args.data)}). Rebase onto \`${base}\` (never merge it in), push with --force-with-lease and say what changed.`
+      : `PR #${args.number} no longer merges into \`${base}\`: it conflicts with \`${base}\` at ${sha} (${conflictCause(args.data)}). Rebase onto \`${base}\` (never merge it in), resolve the conflicts, push with --force-with-lease and say what changed.`;
   return [
     header({
       event: "mergeability check after the base branch moved",
@@ -152,6 +158,6 @@ export function conflictPrompt(args: {
       number: args.number,
       deliveryIds: args.deliveryIds,
     }),
-    `PR #${args.number} no longer merges into \`${base}\`: it conflicts with \`${base}\` at ${sha} (${conflictCause(args.data)}). Rebase onto \`${base}\` (never merge it in), resolve the conflicts, push with --force-with-lease and say what changed.`,
+    line,
   ].join("\n");
 }

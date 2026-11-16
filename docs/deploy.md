@@ -182,8 +182,9 @@ You can still pass `-c key=value` directly to the CDK CLI for one-off synths.
 | `GITHUB_AGENT_LOGINS`        | `githubAgentLogins`      |
 | `GITHUB_PR_TRAILER`          | `githubPrTrailer`        |
 | `GITHUB_AUTO_CLOSE_ON_MERGE` | `githubAutoCloseOnMerge` |
+| `GITHUB_WAKE_ON_BEHIND`      | `githubWakeOnBehind`     |
 
-The five `GITHUB_*` keys belong to the optional [GitHub wake](./github.md)
+The six `GITHUB_*` keys belong to the optional [GitHub wake](./github.md)
 feature. Leave `GITHUB_APP_SECRET_ARN` blank and nothing is deployed for it.
 
 > **Allow-list glob gotcha:** repos are matched as `owner/name`, where a single

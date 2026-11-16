@@ -118,16 +118,18 @@ describe("GitHub feature ON", () => {
     expect(JSON.stringify(api)).not.toContain("GITHUB_APP_SECRET_ARN");
   });
 
-  test("prTrailer and autoCloseOnMerge are configurable", () => {
+  test("prTrailer, autoCloseOnMerge and wakeOnBehind are configurable", () => {
     const t2 = synthStack({
       githubAppSecretArn: SECRET_ARN,
       githubPrTrailer: "off",
       githubAutoCloseOnMerge: "after_turn",
+      githubWakeOnBehind: "on",
     });
     const consumer = functionsByLogicalIdPart(t2, "GithubConsumerFn")[0][1] as {
       Properties: { Environment: { Variables: Record<string, unknown> } };
     };
     expect(consumer.Properties.Environment.Variables.GITHUB_AUTO_CLOSE_ON_MERGE).toBe("after_turn");
+    expect(consumer.Properties.Environment.Variables.GITHUB_WAKE_ON_BEHIND).toBe("on");
     const api = functionsByLogicalIdPart(t2, "ApiFn")[0][1] as {
       Properties: { Environment: { Variables: Record<string, unknown> } };
     };

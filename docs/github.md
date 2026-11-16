@@ -117,15 +117,16 @@ transcript know why the turn started:
 [GitHub webhook] This turn was started by GitHub, not by the user: <event> on <owner>/<repo>#<n> (delivery <id>).
 ```
 
-| Event                                                                                                | Wake                                                                                                                                                                                                                                                                                                             |
-| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pull_request.closed`, merged                                                                        | "PR #n was merged into `<base>` at `<sha>`. Finish any remaining work and summarise what's left, or say you're done."                                                                                                                                                                                            |
-| `pull_request.closed`, not merged                                                                    | "PR #n was closed without merging."                                                                                                                                                                                                                                                                              |
-| `pull_request_review.submitted`: `changes_requested` or `commented`                                  | Who and which state. A trusted reviewer's review body and inline comments are also quoted.                                                                                                                                                                                                                       |
-| `issue_comment.created` on a linked PR                                                               | Who commented. A trusted commenter's text is quoted. Bots, the agent's logins and comments posted through the agent's app are ignored ([why](#the-agents-github-identity)).                                                                                                                                      |
-| `check_suite.completed` / `workflow_run.completed`, `failure` or `timed_out`, on the PR's head sha   | The failing check names and URLs. **Debounced 2 minutes per PR**: one wake for the whole batch.                                                                                                                                                                                                                  |
-| a base branch moves (a PR merged into it, or a push to it), and a linked open PR on it now conflicts | "PR #n no longer merges into `<base>`: it conflicts with `<base>` at `<sha>` (after #m was merged / after a push). Rebase onto `<base>` (never merge it in), resolve the conflicts, push with --force-with-lease and say what changed." **Debounced 2 minutes per PR.** See [Conflicting PRs](#conflicting-prs). |
-| everything else                                                                                      | No wake. The delivery is kept (7 days), and `pull_request.*` refreshes the link's `prState` and `headSha`.                                                                                                                                                                                                       |
+| Event                                                                                                                 | Wake                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pull_request.closed`, merged                                                                                         | "PR #n was merged into `<base>` at `<sha>`. Finish any remaining work and summarise what's left, or say you're done."                                                                                                                                                                                            |
+| `pull_request.closed`, not merged                                                                                     | "PR #n was closed without merging."                                                                                                                                                                                                                                                                              |
+| `pull_request_review.submitted`: `changes_requested` or `commented`                                                   | Who and which state. A trusted reviewer's review body and inline comments are also quoted.                                                                                                                                                                                                                       |
+| `issue_comment.created` on a linked PR                                                                                | Who commented. A trusted commenter's text is quoted. Bots, the agent's logins and comments posted through the agent's app are ignored ([why](#the-agents-github-identity)).                                                                                                                                      |
+| `check_suite.completed` / `workflow_run.completed`, `failure` or `timed_out`, on the PR's head sha                    | The failing check names and URLs. **Debounced 2 minutes per PR**: one wake for the whole batch.                                                                                                                                                                                                                  |
+| a base branch moves (a PR merged into it, or a push to it), and a linked open PR on it now conflicts                  | "PR #n no longer merges into `<base>`: it conflicts with `<base>` at `<sha>` (after #m was merged / after a push). Rebase onto `<base>` (never merge it in), resolve the conflicts, push with --force-with-lease and say what changed." **Debounced 2 minutes per PR.** See [Conflicting PRs](#conflicting-prs). |
+| the same check, with `GITHUB_WAKE_ON_BEHIND=on`: the PR merges but is behind a base that requires up-to-date branches | "PR #n is behind `<base>`, which requires it to be up to date before merging: `<base>` moved to `<sha>` (after #m was merged / after a push). Rebase onto `<base>` (never merge it in), push with --force-with-lease and say what changed." **Off by default.** Debounced like a conflict.                       |
+| everything else                                                                                                       | No wake. The delivery is kept (7 days), and `pull_request.*` refreshes the link's `prState` and `headSha`.                                                                                                                                                                                                       |
 
 **Untrusted text is never forwarded.** For anyone outside `GITHUB_TRUSTED_LOGINS`
 (default: the owner of the repo the event is about, which is the App's
@@ -166,10 +167,11 @@ PR's **base branch**, so that is what the check watches.
    by what GitHub reports.
 3. **Read and decide.** For each candidate it reads `GET /pulls/{n}` and calls
    the pure `decideConflict()` (`packages/github/src/conflicts.ts`). The result
-   is a small state: `clean`, `behind`, `conflicting` or `unknown`. Only
-   `conflicting` (`mergeable: false`, or `mergeable_state: "dirty"`) writes a
-   wake. `behind` (mergeable but out of date) is computed and logged, and wakes
-   nothing.
+   is a small state: `clean`, `behind`, `conflicting` or `unknown`. `conflicting`
+   (`mergeable: false`, or `mergeable_state: "dirty"`) writes a wake. `behind`
+   (mergeable, but out of date with a base that requires up-to-date branches)
+   writes a wake only with `GITHUB_WAKE_ON_BEHIND=on`; otherwise it is logged and
+   wakes nothing. See [Behind but mergeable](#behind-but-mergeable).
 4. **GitHub has not computed it yet.** Right after the base moved, a read
    returns `mergeable: null` and starts a background job
    ([REST docs](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)).
@@ -194,12 +196,12 @@ The check costs **one read of `GET /pulls/{n}` per linked open PR per base move*
 (plus up to two re-reads while GitHub computes), and one GSI1 query. The App's
 **Pull requests: Read-only** permission covers it; nothing is written to GitHub.
 
-| `mergeable` | `mergeable_state`                   | State         | Wakes                          |
-| ----------- | ----------------------------------- | ------------- | ------------------------------ |
-| `false`     | `dirty` (or any)                    | `conflicting` | yes                            |
-| `null`      | any                                 | `unknown`     | no: ask again, at most 3 tries |
-| `true`      | `behind`                            | `behind`      | no                             |
-| `true`      | `clean`, `blocked`, `unstable`, ... | `clean`       | no                             |
+| `mergeable` | `mergeable_state`                   | State         | Wakes                                |
+| ----------- | ----------------------------------- | ------------- | ------------------------------------ |
+| `false`     | `dirty` (or any)                    | `conflicting` | yes                                  |
+| `null`      | any                                 | `unknown`     | no: ask again, at most 3 tries       |
+| `true`      | `behind`                            | `behind`      | only with `GITHUB_WAKE_ON_BEHIND=on` |
+| `true`      | `clean`, `blocked`, `unstable`, ... | `clean`       | no                                   |
 
 **The `push` subscription is optional.** Without it only a merged PR moves a base
 (the common case today), and everything above works as described. With it, a
@@ -210,6 +212,28 @@ branch of an allowed repo is then delivered and stored (7 days), and one that
 targets no linked PR's base costs one GSI1 query. A merge then arrives as both
 `pull_request.closed` and `push`; the wake is debounced into one, but the PRs are
 read twice.
+
+#### Behind but mergeable
+
+`GITHUB_WAKE_ON_BEHIND` (`off` or `on`, default `off`): with `on`, the same check
+also wakes a session whose linked PR still merges but is `behind` its base, with
+its own prompt asking for a rebase. GitHub reports `mergeable_state: "behind"`
+when the base branch requires branches to be up to date before merging (the
+"Require branches to be up to date before merging" option of a status-check
+rule, or the strict policy of a ruleset). Without that rule a PR that is behind
+but merges cleanly is reported `clean`, so the setting wakes only where the
+rebase is needed to merge.
+
+In such a repo every merge leaves every other open PR on that base behind, so
+with `on` each merge wakes every session with an open linked PR there. Each
+wake is a launch-class turn and counts toward `MAX_CLOUD_SESSIONS`. It needs no
+new App permission (`mergeable_state` comes from the same `GET /pulls/{n}` read)
+and adds no reads.
+
+A conflict and a behind wake for the same PR never both go out, since both ask
+for a rebase. A pending conflict wake absorbs a behind result, and a conflict
+replaces a pending behind wake (`WakesDropped`, `reason=superseded_by_conflict`)
+and keeps the PRs it named.
 
 **Links made before this feature** join the index the next time a
 `pull_request` webhook for them is processed (any push to the PR, an edit, a
@@ -306,6 +330,7 @@ GITHUB_TRUSTED_LOGINS=your-login          # default: the repo owner
 GITHUB_AGENT_LOGINS=kiro-agent[bot]       # the login Kiro's agent opens PRs as
 GITHUB_PR_TRAILER=on                      # on (default) | off
 GITHUB_AUTO_CLOSE_ON_MERGE=off            # off (default) | after_turn
+GITHUB_WAKE_ON_BEHIND=off                 # off (default) | on
 ```
 
 Only the webhook function and the consumer function can read the secret. The
@@ -338,11 +363,12 @@ The GitHub Lambdas use the same Powertools Logger, Metrics and Tracer as the res
 `LinksRejected` (by `reason`), `WakesDelivered`, `WakesDropped` (by `reason`),
 `Redelivered`, `AutoClosed`, `AutoCloseSkipped` (a linked PR was still open),
 and for [conflicting PRs](#conflicting-prs): `ConflictChecks` (first tries, one per
-PR read), `ConflictRechecks` (later tries), `ConflictsFound`,
+PR read), `ConflictRechecks` (later tries), `ConflictsFound`, `BehindFound`
+(only counted when `GITHUB_WAKE_ON_BEHIND=on`),
 `ConflictChecksSkipped` (by `reason`: `closed`, `other_base`, `head_changed`,
 `not_found`), `ConflictChecksGaveUp` (by `reason`: `still_unknown`,
-`read_failed`) and `ConflictWakes` (new inbox items; a wake folded into a pending
-one is not counted). Each check logs `conflict_check_done`,
+`read_failed`) and `ConflictWakes` (by `state`: `conflicting` or `behind`; new
+inbox items only, a wake folded into a pending one is not counted). Each check logs `conflict_check_done`,
 `conflict_check_skipped`, `conflict_recheck_scheduled`, `conflict_check_gave_up`
 or `conflict_wake` with the PR, base and attempt. The bridge also emits `WakesDelivered` and `WakesDropped` as it
 settles turns.

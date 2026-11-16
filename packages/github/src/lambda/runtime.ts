@@ -50,6 +50,7 @@ export function consumerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Con
     conflictDebounceMs: GITHUB_CHECKS_DEBOUNCE_MS,
     // Tries at 0 s, 40 s and 120 s after the base moved, then give up.
     conflictRecheckDelaysSec: [40, 80],
+    wakeOnBehind: env.GITHUB_WAKE_ON_BEHIND === "on",
   };
 }
 

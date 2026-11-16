@@ -310,6 +310,76 @@ describe("conflict wake: debounce", () => {
   });
 });
 
+describe("behind wake (GITHUB_WAKE_ON_BEHIND=on)", () => {
+  const BEHIND: PullState = { mergeable: true, mergeableState: "behind" };
+
+  it("is off by default: a behind PR is checked and logged, never woken", async () => {
+    const w = world();
+    const gh = github(w);
+    await link(w, 8, S8);
+    gh.set(8, BEHIND);
+    await merged(w, 7, "del-merge-7");
+    expect(gh.reads).toEqual([8]);
+    expect(await pending(w, S8)).toEqual([]);
+    expect(w.log.lines.some((l) => l.includes("conflict_check_done") && l.includes("behind"))).toBe(
+      true,
+    );
+  });
+
+  it("when on, wakes a behind PR with the behind prompt, debounced like a conflict", async () => {
+    const w = world({ wakeOnBehind: true });
+    const gh = github(w);
+    await link(w, 8, S8);
+    await link(w, 9, S9);
+    gh.set(8, BEHIND);
+    gh.set(9, CLEAN);
+    await merged(w, 7, "del-merge-7");
+    w.clock.now += 30_000;
+    await merged(w, 10, "del-merge-10", H("3"));
+    expect(await pending(w, S9)).toEqual([]);
+    const items = await pending(w, S8);
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe("pr_behind");
+    expect(items[0].prompt.split("\n")[1]).toContain(
+      `PR #8 is behind \`main\`, which requires it to be up to date before merging: \`main\` moved to ${H("3")} (after #7, #10 were merged).`,
+    );
+    expect(w.metrics.sum("BehindFound")).toBe(2);
+    expect(w.metrics.sum("ConflictWakes", { state: "behind" })).toBe(1);
+  });
+
+  it("a conflict replaces a pending behind wake for the same PR, keeping the PRs it named", async () => {
+    const w = world({ wakeOnBehind: true });
+    const gh = github(w);
+    await link(w, 8, S8);
+    gh.set(8, BEHIND);
+    await merged(w, 7, "del-merge-7");
+    gh.set(8, DIRTY);
+    await merged(w, 10, "del-merge-10", H("3"));
+    const items = await w.repo.queryInbox(S8);
+    expect(items.map((i) => [i.kind, i.status])).toEqual([
+      ["pr_behind", "dropped"],
+      ["pr_conflict", "pending"],
+    ]);
+    expect(items[1].prompt).toContain("(after #7, #10 were merged)");
+    expect(w.metrics.sum("WakesDropped", { reason: "superseded_by_conflict" })).toBe(1);
+  });
+
+  it("a behind result folds into a pending conflict wake instead of adding a second one", async () => {
+    const w = world({ wakeOnBehind: true });
+    const gh = github(w);
+    await link(w, 8, S8);
+    gh.set(8, DIRTY);
+    await merged(w, 7, "del-merge-7");
+    gh.set(8, BEHIND);
+    await merged(w, 10, "del-merge-10", H("3"));
+    const items = await pending(w, S8);
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe("pr_conflict");
+    expect(items[0].deliveryIds).toEqual(["del-merge-7", "del-merge-10"]);
+    expect(items[0].prompt).toContain("no longer merges");
+  });
+});
+
 describe("conflict wake: a push to the base (optional push subscription)", () => {
   async function pushed(w: World, ref: string, id = "del-push-1") {
     const payload = fixture("push");
