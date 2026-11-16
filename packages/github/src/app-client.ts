@@ -61,6 +61,11 @@ export interface PullInfo {
   headRef: string;
   authorLogin: string | null;
   body: string | null;
+  baseRef: string | null;
+  /** `null` while GitHub is still computing it (a background job was started). */
+  mergeable: boolean | null;
+  /** dirty, behind, clean, blocked, unstable, has_hooks, draft or unknown. */
+  mergeableState: string | null;
 }
 
 export interface ReviewCommentInfo {
@@ -191,6 +196,9 @@ export class GithubClient {
         merged?: boolean;
         created_at: string;
         head: { sha: string; ref: string };
+        base?: { ref?: string } | null;
+        mergeable?: boolean | null;
+        mergeable_state?: string | null;
         user?: { login?: string } | null;
         body?: string | null;
       };
@@ -203,6 +211,9 @@ export class GithubClient {
         headRef: d.head.ref,
         authorLogin: d.user?.login ?? null,
         body: d.body ?? null,
+        baseRef: d.base?.ref ?? null,
+        mergeable: d.mergeable ?? null,
+        mergeableState: d.mergeable_state ?? null,
       };
     } catch (err) {
       if (statusOf(err) === 404) {

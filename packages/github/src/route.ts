@@ -16,6 +16,9 @@
  *   check_suite / workflow_run completed
  *     with failure or timed_out
  *     on the linked PR's head sha       -> wake (debounced; one wake for the batch)
+ *   a base branch moves (a PR merged into it, or a push to it)
+ *                                       -> checkBase: the consumer reads the open linked PRs
+ *                                          on that branch and wakes the ones that now conflict
  * Everything else changes no session; the delivery is simply kept in the store.
  */
 
@@ -28,7 +31,14 @@ import {
   safeLabel,
   safeLogin,
 } from "./render.ts";
-import type { Action, FailedCheck, GithubEvent, RouteConfig, RouteLink } from "./types.ts";
+import type {
+  Action,
+  BaseMove,
+  FailedCheck,
+  GithubEvent,
+  RouteConfig,
+  RouteLink,
+} from "./types.ts";
 
 type Json = Record<string, unknown>;
 
@@ -117,6 +127,45 @@ function prStateOf(pr: Json): PrState {
   return pr.state === "closed" ? "closed" : "open";
 }
 
+const NO_SHA = /^0+$/;
+
+/**
+ * The base branch an event moved, or null. Two events move one: a PR merged into
+ * it, and a push to it (needs the optional `push` App subscription). Any later
+ * trigger (a scheduled sweep) can build a BaseMove itself and reuse the check.
+ */
+export function baseMoveOf(event: GithubEvent): BaseMove | null {
+  const repo = eventRepo(event);
+  if (!repo) {
+    return null;
+  }
+  const p = event.payload;
+  if (event.name === "pull_request") {
+    const pr = obj(p.pull_request);
+    const base = str(obj(pr.base).ref);
+    const number = num(pr.number) ?? num(p.number);
+    if (str(p.action) !== "closed" || pr.merged !== true || !base || number === null) {
+      return null;
+    }
+    const sha = str(pr.merge_commit_sha)?.replace(/[^0-9a-f]/gi, "") || "unknown";
+    return { repo, base, baseSha: sha, afterPr: number };
+  }
+  if (event.name === "push") {
+    const ref = str(p.ref);
+    const after = str(p.after);
+    if (!ref?.startsWith("refs/heads/") || p.deleted === true || !after || NO_SHA.test(after)) {
+      return null;
+    }
+    return {
+      repo,
+      base: ref.slice("refs/heads/".length),
+      baseSha: after.replace(/[^0-9a-f]/gi, "") || "unknown",
+      afterPr: null,
+    };
+  }
+  return null;
+}
+
 /** Route one delivery. `links` are the stored links for the PRs the event names. */
 export function route(
   event: GithubEvent,
@@ -125,7 +174,14 @@ export function route(
 ): Action[] {
   const repo = eventRepo(event);
   const numbers = eventPrNumbers(event);
+  const move = baseMoveOf(event);
+  const moved: Action[] = move
+    ? [{ type: "checkBase", deliveryId: event.deliveryId, ...move }]
+    : [];
   if (!repo || numbers.length === 0) {
+    if (moved.length > 0) {
+      return moved;
+    }
     return [{ type: "ignore", reason: repo ? "no_pull_request" : "no_repository" }];
   }
   const actions: Action[] = [];
@@ -150,6 +206,7 @@ export function route(
       url: str(pr.html_url) ?? str(issue.html_url) ?? null,
     });
   }
+  actions.push(...moved);
   return actions.length > 0 ? actions : [{ type: "ignore", reason: "no_action" }];
 }
 
@@ -218,6 +275,7 @@ function routeLinked(
           pr: link.pr,
           prState: prStateOf(pr),
           ...(str(obj(pr.head).sha) ? { headSha: str(obj(pr.head).sha) as string } : {}),
+          ...(str(obj(pr.base).ref) ? { baseRef: str(obj(pr.base).ref) as string } : {}),
         },
       ];
       if (action !== "closed") {

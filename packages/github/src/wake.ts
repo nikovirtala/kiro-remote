@@ -11,8 +11,8 @@ import {
 } from "@nikovirtala/kiro-remote-core";
 import { ulid } from "ulid";
 import type { Logger, Metrics } from "./log.ts";
-import { checksPrompt } from "./render.ts";
-import type { Action, FailedCheck } from "./types.ts";
+import { checksPrompt, conflictPrompt } from "./render.ts";
+import type { Action, ConflictData, FailedCheck } from "./types.ts";
 
 type WakeAction = Extract<Action, { type: "wake" }>;
 
@@ -43,7 +43,12 @@ export async function enqueueWake(
     const target = pending.find(
       (i) => i.key === a.key && i.kind === a.kind && nowMs - Date.parse(i.createdAt) < a.debounceMs,
     );
-    if (target) {
+    if (target && a.kind === "pr_conflict") {
+      const merged = await mergeConflictItem(deps, target, a);
+      if (merged) {
+        return { merged: true, id: target.id };
+      }
+    } else if (target) {
       const checks = unionChecks(
         (target.data as { checks?: FailedCheck[] } | null)?.checks ?? [],
         a.data?.checks ?? [],
@@ -97,6 +102,34 @@ export async function enqueueWake(
     );
   }
   return { merged: false, id };
+}
+
+/**
+ * Fold another base move into a pending conflict item: keep the newest base sha,
+ * list every PR whose merge moved the base, and re-render the prompt.
+ */
+async function mergeConflictItem(
+  deps: WakeDeps,
+  target: InboxItem,
+  a: WakeAction,
+): Promise<boolean> {
+  const old = (target.data as { conflict?: ConflictData } | null)?.conflict;
+  const add = a.data?.conflict;
+  if (!add) {
+    return false;
+  }
+  const conflict: ConflictData = {
+    base: add.base,
+    baseSha: add.baseSha,
+    afterPrs: [...new Set([...(old?.afterPrs ?? []), ...add.afterPrs])],
+    afterPush: (old?.afterPush ?? false) || add.afterPush,
+  };
+  const deliveryIds = [...new Set([...target.deliveryIds, a.deliveryId])];
+  return deps.repo.mergeInboxItem(a.sessionId, target.id, {
+    deliveryIds,
+    data: { conflict },
+    prompt: conflictPrompt({ repo: a.repo, number: a.number, data: conflict, deliveryIds }),
+  });
 }
 
 function unionChecks(a: readonly FailedCheck[], b: readonly FailedCheck[]): FailedCheck[] {

@@ -11,6 +11,7 @@
 
 import {
   type CommandQueue,
+  type ConflictCheckMessage,
   type GithubQueue,
   type PrLinkItem,
   type PrState,
@@ -20,8 +21,10 @@ import {
   sessionHasRepo,
 } from "@nikovirtala/kiro-remote-core";
 import type { GithubClient } from "./app-client.ts";
+import { type ConflictDecision, decideConflict } from "./conflicts.ts";
 import { harvestTurn } from "./harvest.ts";
 import type { Logger, Metrics } from "./log.ts";
+import { conflictPrompt } from "./render.ts";
 import { eventPrNumbers, eventRepo, route } from "./route.ts";
 import type { Action, GithubEvent, ReviewComment, RouteConfig, RouteLink } from "./types.ts";
 import { autoCloseIfDone, drainAndCount, enqueueWake, type WakeDeps } from "./wake.ts";
@@ -35,6 +38,13 @@ export interface ConsumerConfig {
   agentApps: readonly string[];
   autoCloseOnMerge: "off" | "after_turn";
   checksDebounceMs: number;
+  /** Debounce for conflict wakes: several base moves in a row give one wake. */
+  conflictDebounceMs: number;
+  /**
+   * Seconds to wait before each re-check when GitHub has not computed
+   * mergeability yet. N delays mean N + 1 tries in total.
+   */
+  conflictRecheckDelaysSec: readonly number[];
 }
 
 export interface ConsumerDeps {
@@ -60,6 +70,7 @@ function toRouteLink(l: PrLinkItem): RouteLink {
     linkedBy: l.linkedBy,
     prState: l.prState,
     headSha: l.headSha,
+    baseRef: l.baseRef ?? null,
   };
 }
 
@@ -132,6 +143,7 @@ export async function linkFromTrailer(deps: ConsumerDeps, event: GithubEvent): P
     linkedBy: "trailer",
     prState: prStateOfPayload(pr),
     headSha: typeof obj(pr.head).sha === "string" ? (obj(pr.head).sha as string) : null,
+    baseRef: typeof obj(pr.base).ref === "string" ? (obj(pr.base).ref as string) : null,
   });
   if (created.created) {
     deps.metrics.count("LinksCreated", 1, { method: "trailer" });
@@ -227,7 +239,13 @@ export async function processDelivery(
         await deps.repo.updateLinkState(a.pr, {
           ...(a.prState ? { prState: a.prState } : {}),
           ...(a.headSha ? { headSha: a.headSha } : {}),
+          ...(a.baseRef ? { baseRef: a.baseRef } : {}),
         });
+        break;
+      case "checkBase":
+        if (await checkBase(deps, a, touched)) {
+          woke = true;
+        }
         break;
       case "wake":
         await enqueueWake(wd, a);
@@ -260,6 +278,152 @@ export async function processDelivery(
   return { status, actions: actions.map((a) => a.type) };
 }
 
+/**
+ * A base branch moved: check every open linked PR on it. This is the only place
+ * that fans out; each PR then runs {@link checkConflict}. The merged PR itself
+ * is skipped, and so is any link known to target another branch (no read).
+ * Links without a known base are read and filtered by what GitHub says.
+ * Returns whether any wake was written.
+ */
+async function checkBase(
+  deps: ConsumerDeps,
+  move: Extract<Action, { type: "checkBase" }>,
+  touched: Set<string>,
+): Promise<boolean> {
+  const links = await deps.repo.queryOpenLinks(move.repo);
+  let woke = false;
+  for (const link of links) {
+    if (link.number === move.afterPr || (link.baseRef && link.baseRef !== move.base)) {
+      continue;
+    }
+    const sessionId = await checkConflict(deps, {
+      kind: "conflict_check",
+      repo: link.repo,
+      number: link.number,
+      base: move.base,
+      baseSha: move.baseSha,
+      afterPr: move.afterPr,
+      deliveryId: move.deliveryId,
+      attempt: 1,
+      headSha: null,
+    });
+    if (sessionId) {
+      touched.add(sessionId);
+      woke = true;
+    }
+  }
+  return woke;
+}
+
+/**
+ * One try of the mergeability check for one linked PR. Reads the PR, decides
+ * (see conflicts.ts), and acts: write a wake, schedule a re-check, or stop.
+ * Returns the session to drain when a wake was written.
+ *
+ * The re-check is a delayed message on the GitHub queue (SQS DelaySeconds): it
+ * needs no schedule or table, survives a Lambda restart, and a failed try is
+ * retried by SQS itself. A try that cannot read GitHub is also scheduled again,
+ * counted as one of the tries.
+ */
+async function checkConflict(
+  deps: ConsumerDeps,
+  msg: ConflictCheckMessage,
+): Promise<string | null> {
+  const key = `${msg.repo}#${msg.number}`;
+  const delays = deps.config.conflictRecheckDelaysSec;
+  const maxAttempts = delays.length + 1;
+  const fields = { pr: key, base: msg.base, attempt: msg.attempt, deliveryId: msg.deliveryId };
+  const link = await deps.repo.getPrLink(key);
+  if (!link || (link.prState !== "open" && link.prState !== "unknown")) {
+    deps.metrics.count("ConflictChecksSkipped", 1, { reason: "closed" });
+    deps.logger.info("conflict_check_skipped", { ...fields, reason: "closed" });
+    return null;
+  }
+  deps.metrics.count(msg.attempt > 1 ? "ConflictRechecks" : "ConflictChecks", 1);
+
+  let decision: ConflictDecision;
+  try {
+    const pull = await deps.github.getPull(msg.repo, msg.number);
+    decision = decideConflict({
+      pull: pull && {
+        state: pull.state,
+        merged: pull.merged,
+        headSha: pull.headSha,
+        baseRef: pull.baseRef ?? null,
+        mergeable: pull.mergeable ?? null,
+        mergeableState: pull.mergeableState ?? null,
+      },
+      base: msg.base,
+      attempt: msg.attempt,
+      maxAttempts,
+      baselineHeadSha: msg.headSha,
+    });
+  } catch (err) {
+    deps.logger.warn("conflict_check_read_failed", { ...fields, error: String(err) });
+    decision =
+      msg.attempt >= maxAttempts
+        ? { type: "gave_up", reason: "read_failed" }
+        : { type: "recheck", headSha: msg.headSha ?? "" };
+  }
+
+  switch (decision.type) {
+    case "skip":
+      deps.metrics.count("ConflictChecksSkipped", 1, { reason: decision.reason });
+      deps.logger.info("conflict_check_skipped", { ...fields, reason: decision.reason });
+      return null;
+    case "done":
+      deps.logger.info("conflict_check_done", { ...fields, state: decision.state });
+      return null;
+    case "gave_up":
+      deps.metrics.count("ConflictChecksGaveUp", 1, { reason: decision.reason });
+      deps.logger.warn("conflict_check_gave_up", { ...fields, reason: decision.reason });
+      return null;
+    case "recheck": {
+      const delay = delays[msg.attempt - 1] ?? delays[delays.length - 1] ?? 30;
+      await deps.githubQueue.send(
+        { ...msg, attempt: msg.attempt + 1, headSha: decision.headSha || msg.headSha },
+        delay,
+      );
+      deps.logger.info("conflict_recheck_scheduled", { ...fields, delaySeconds: delay });
+      return null;
+    }
+    case "wake": {
+      deps.metrics.count("ConflictsFound", 1);
+      const data = {
+        conflict: {
+          base: msg.base,
+          baseSha: msg.baseSha,
+          afterPrs: msg.afterPr === null ? [] : [msg.afterPr],
+          afterPush: msg.afterPr === null,
+        },
+      };
+      const wake = await enqueueWake(wakeDeps(deps), {
+        type: "wake",
+        sessionId: link.sessionId,
+        kind: "pr_conflict",
+        key: link.pr,
+        repo: msg.repo,
+        number: msg.number,
+        deliveryId: msg.deliveryId,
+        data,
+        debounceMs: deps.config.conflictDebounceMs,
+        autoClose: false,
+        prompt: conflictPrompt({
+          repo: msg.repo,
+          number: msg.number,
+          data: data.conflict,
+          deliveryIds: [msg.deliveryId],
+        }),
+      });
+      if (!wake.merged) {
+        deps.metrics.count("ConflictWakes", 1);
+      }
+      deps.logger.info("conflict_wake", { ...fields, sessionId: link.sessionId, ...wake });
+      return link.sessionId;
+    }
+  }
+}
+
 /** Handle a queue message of any kind. */
 export async function handleQueueMessage(
   deps: ConsumerDeps,
@@ -287,6 +451,13 @@ export async function handleQueueMessage(
     case "drain":
       await drainAndCount(wakeDeps(deps), message.sessionId);
       return;
+    case "conflict_check": {
+      const sessionId = await checkConflict(deps, message);
+      if (sessionId) {
+        await drainAndCount(wakeDeps(deps), sessionId);
+      }
+      return;
+    }
   }
 }
 
