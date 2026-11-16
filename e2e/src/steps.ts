@@ -1870,10 +1870,26 @@ const ghConflictWake: Step<HarnessContext> = {
 
 const ghConflictCleanup: Step<HarnessContext> = {
   id: "gh-conflict-cleanup",
-  name: "GitHub conflict: close any open PR and delete the head branches",
+  name: "GitHub conflict: delete the session, then close any open PR and delete the head branches",
   requires: ["baseUrl", "repo", "github"],
   needs: [],
   async run(ctx) {
+    // The rebased PR is still open, so the session is still alive. Delete it
+    // first: closing the PR would wake it, and that wake raced the harness's
+    // final delete live (the delete lost with a concurrent modification).
+    const id = ctx.state.ghConflict?.session.id;
+    let sessionDeleted = false;
+    if (id && ctx.state.created.has(id)) {
+      const client = restOf(ctx);
+      try {
+        await client.deleteSession(REST_PRINCIPAL, id);
+      } catch {
+        // A 404 means it is already gone; anything else is settled by the poll.
+      }
+      await waitUntilGone(ctx, id, () => restGone(client, id), { honorAbort: false });
+      ctx.state.created.delete(id);
+      sessionDeleted = true;
+    }
     const prs = ctx.state.ghConflict?.prs ?? [];
     for (const pr of prs) {
       try {
@@ -1899,7 +1915,7 @@ const ghConflictCleanup: Step<HarnessContext> = {
         // The branch is already gone.
       }
     }
-    return { branchesDeleted: prs.length };
+    return { sessionDeleted, branchesDeleted: prs.length };
   },
 };
 
