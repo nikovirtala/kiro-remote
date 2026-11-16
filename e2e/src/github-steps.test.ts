@@ -151,6 +151,63 @@ describe("gh-chain-first-pr", () => {
   });
 });
 
+describe("gh-conflict-prs", () => {
+  const step = GITHUB_STEPS.find((s) => s.id === "gh-conflict-prs");
+  const pull = (n: number, mergeable: boolean | null) =>
+    JSON.stringify({
+      number: n,
+      state: "open",
+      created_at: "2026-02-01T10:00:00Z",
+      merged_at: null,
+      mergeable,
+      mergeable_state: mergeable ? "clean" : "dirty",
+      head: { ref: `b${n}`, sha: String(n).repeat(40) },
+      base: { ref: "main" },
+    });
+  function ctxWith(ghResponses: string[]) {
+    return {
+      deps: {
+        now: () => 0,
+        sleep: async () => {},
+        gh: async () => ghResponses.shift() ?? "{}",
+      },
+      state: {
+        created: new Set<string>(),
+        ghConflict: { session: { id: "S", cursor: 0 }, launchedAt: 0, prs: [] as unknown[] },
+        rest: {
+          getSession: async () => ({
+            links: [
+              { pr: "o/r#5", repo: "o/r", linkedBy: "harvest", prState: "open" },
+              { pr: "o/r#6", repo: "o/r", linkedBy: "harvest", prState: "open" },
+            ],
+          }),
+        },
+      },
+    } as never;
+  }
+
+  it("records both PRs, lowest number first, when each merges cleanly", async () => {
+    const ctx = ctxWith([
+      JSON.stringify([JSON.parse(pull(6, true)), JSON.parse(pull(5, true))]),
+      pull(5, true),
+      pull(5, true),
+      pull(6, true),
+      pull(6, true),
+    ]);
+    const out = await step?.run(ctx);
+    expect(out).toMatchObject({ first: 5, second: 6, base: "main" });
+  });
+
+  it("fails when a PR already conflicts before any merge (the scenario would prove nothing)", async () => {
+    const ctx = ctxWith([
+      JSON.stringify([JSON.parse(pull(6, true)), JSON.parse(pull(5, false))]),
+      pull(5, false),
+      pull(5, false),
+    ]);
+    await expect(step?.run(ctx)).rejects.toThrow(/must be open and mergeable/);
+  });
+});
+
 describe("gh-checks-wake", () => {
   const step = GITHUB_STEPS.find((s) => s.id === "gh-checks-wake");
   /** The GitHub Actions suite with this conclusion (null = still running), plus other apps' suites. */
@@ -300,6 +357,10 @@ describe("the GitHub scenario is opt-in", () => {
       "gh-checks-wake",
       "gh-close-wake",
       "gh-checks-cleanup",
+      "gh-conflict-launch",
+      "gh-conflict-prs",
+      "gh-conflict-wake",
+      "gh-conflict-cleanup",
     ]);
     expect(GITHUB_STEPS.every((s) => s.requires.includes("github"))).toBe(true);
   });

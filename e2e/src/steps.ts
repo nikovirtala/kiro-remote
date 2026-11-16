@@ -72,6 +72,12 @@ export interface HarnessState {
     session: SessionCursor;
     pr?: { repo: string; number: number; headRef: string };
   };
+  /** The conflict scenario's session and its two sibling PRs (both cut from the default branch), lowest number first. */
+  ghConflict?: {
+    session: SessionCursor;
+    launchedAt: number;
+    prs: Array<{ repo: string; number: number; headRef: string; headSha: string; base: string }>;
+  };
   /** GitHub delivery ids of the wake turns the GitHub steps have seen so far. */
   ghWakeDeliveries?: string[];
   /** Session ids created and not yet confirmed deleted. */
@@ -1641,6 +1647,253 @@ const ghChecksCleanup: Step<HarnessContext> = {
   },
 };
 
+/* -------------------------------------------------------------------------- */
+/* GitHub conflict: merging one PR makes its sibling conflict, which wakes      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Merge -> the conflict wake: the 2 minute debounce, up to two re-checks when
+ * GitHub has not computed mergeability (40 s, then 80 s), and slack. The same
+ * numbers as GITHUB_CHECKS_DEBOUNCE_MS and the consumer's re-check delays.
+ */
+const GH_CONFLICT_WINDOW_MS = 2 * 60_000 + 2 * 60_000 + 2 * 60_000;
+const GH_CONFLICT_WAKE_TIMEOUT_MS = GH_CONFLICT_WINDOW_MS + 4 * 60_000;
+
+function ghConflictOf(ctx: HarnessContext): NonNullable<HarnessState["ghConflict"]> {
+  if (!ctx.state.ghConflict) {
+    throw new Error("no conflict session from gh-conflict-launch");
+  }
+  return ctx.state.ghConflict;
+}
+
+/** The slice of a pull request the conflict steps read for mergeability. */
+interface GhMergeability {
+  mergeable: boolean | null;
+  mergeable_state?: string;
+  head: { sha: string };
+}
+
+/** Poll a PR until GitHub has computed its mergeability (`mergeable` is null while it runs). */
+async function ghMergeability(
+  ctx: HarnessContext,
+  repo: string,
+  number: number,
+): Promise<GhMergeability> {
+  return pollUntil(ctx, `PR #${number}'s mergeability`, 2 * 60_000, async () => {
+    const pull = JSON.parse(
+      await ghOf(ctx)(["api", `repos/${repo}/pulls/${number}`]),
+    ) as GhMergeability;
+    return pull.mergeable === null ? null : pull;
+  });
+}
+
+const ghConflictLaunch: Step<HarnessContext> = {
+  id: "gh-conflict-launch",
+  name: "GitHub conflict: launch a session that opens two PRs editing the same line",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["login"],
+  async run(ctx) {
+    const client = restOf(ctx);
+    const file = `docs/kiro-remote-e2e-${ctx.deps.runId.toLowerCase()}-conflict.md`;
+    const prompt = [
+      `This task needs two independent pull requests that both add the file ${file}, each with a`,
+      "single, different line, so that they conflict once one of them is merged.",
+      `PR 1: on a new branch from the default branch, add ${file} whose only line is "alpha", and open a pull request.`,
+      `PR 2: on another new branch, also from the default branch (NOT from PR 1's branch), add ${file}`,
+      'whose only line is "beta", and open a second pull request.',
+      "Reply with both pull request URLs and nothing else.",
+      "If you are later told that a pull request was merged, do NOT change anything: reply with the single word noted.",
+      "If you are later told that a pull request no longer merges into the default branch, rebase that pull",
+      "request's branch onto the updated default branch (never merge the default branch in), resolve the",
+      'conflict so that the file keeps both lines ("alpha", then "beta"), push with --force-with-lease,',
+      "and reply with one sentence saying what you changed.",
+    ].join(" ");
+    const launchedAt = ctx.deps.now();
+    const launched = (await client.launchSession(REST_PRINCIPAL, {
+      prompt,
+      repos: [repoOf(ctx)],
+      title: titleFor(ctx.deps.runId, "rest"),
+    })) as unknown;
+    if (!isObj(launched)) {
+      throw new Error("POST /v1/sessions is not an object");
+    }
+    const id = str(launched, "sessionId", "POST /v1/sessions");
+    ctx.state.created.add(id);
+    ctx.state.ghConflict = { session: { id, cursor: 0 }, launchedAt, prs: [] };
+    const res = await waitForTurn({
+      after: 0,
+      read: restEventReader(ctx, id),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    ghConflictOf(ctx).session.cursor = res.cursor;
+    return { sessionId: id, ...turnCaptured(res) };
+  },
+};
+
+const ghConflictPrs: Step<HarnessContext> = {
+  id: "gh-conflict-prs",
+  name: "GitHub conflict: both PRs are open, linked, and merge cleanly while neither is merged",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-conflict-launch"],
+  async run(ctx) {
+    const conflict = ghConflictOf(ctx);
+    const client = restOf(ctx);
+    const links = await pollUntil(ctx, "both PR links", GH_LINK_TIMEOUT_MS, async () => {
+      const session = await client.getSession(REST_PRINCIPAL, conflict.session.id);
+      return session.links && session.links.length >= 2 ? session.links : null;
+    });
+    if (links.length !== 2) {
+      throw new Error(`expected 2 linked PRs, found ${links.length}`);
+    }
+    const refs = links.map((l) => prRef(l.pr)).sort((a, b) => a.number - b.number);
+    const opened = await ghPullsSince(ctx, refs[0].repo, conflict.launchedAt - GH_CLOCK_SKEW_MS);
+    if (opened.length !== 2 || !refs.every((r) => opened.some((p) => p.number === r.number))) {
+      throw new Error(
+        `expected exactly the two linked PRs to exist, found: ${opened.map((p) => `#${p.number}`).join(", ") || "none"}`,
+      );
+    }
+    for (const r of refs) {
+      const pull = await ghPull(ctx, r.repo, r.number);
+      const state = await ghMergeability(ctx, r.repo, r.number);
+      if (pull.state !== "open" || state.mergeable !== true) {
+        throw new Error(
+          `PR #${r.number} must be open and mergeable before the first merge (state ${pull.state}, mergeable ${String(state.mergeable)})`,
+        );
+      }
+      conflict.prs.push({
+        repo: r.repo,
+        number: r.number,
+        headRef: pull.head.ref,
+        headSha: pull.head.sha,
+        base: pull.base.ref,
+      });
+    }
+    if (conflict.prs[0].base !== conflict.prs[1].base) {
+      throw new Error("the two PRs must target the same base branch");
+    }
+    return { first: refs[0].number, second: refs[1].number, base: conflict.prs[0].base };
+  },
+};
+
+const ghConflictWake: Step<HarnessContext> = {
+  id: "gh-conflict-wake",
+  name: "GitHub conflict: merging one PR wakes the session for the other, which it rebases to a clean merge",
+  requires: ["baseUrl", "repo", "github"],
+  needs: ["gh-conflict-prs"],
+  async run(ctx) {
+    const conflict = ghConflictOf(ctx);
+    const s = conflict.session;
+    const [first, second] = conflict.prs;
+    const startedAt = ctx.deps.now();
+    const mergeSha = await ghMerge(ctx, first.repo, first.number);
+
+    // The merged PR is linked, so its own merge wakes the session first (the
+    // agent is told to do nothing). The conflict wake comes after the debounce.
+    const mergeWake = await waitForWake(ctx, s, startedAt);
+    const mergePrompt = await turnPrompt(ctx, s.id, mergeWake.wake.turnId);
+    if (!mergePrompt.includes(`PR #${first.number} was merged into`)) {
+      throw new Error(`the first wake turn is not PR #${first.number}'s merge wake`);
+    }
+
+    const { wake, settled, latencyMs } = await waitForWake(ctx, s, startedAt, {
+      timeoutMs: GH_CONFLICT_WAKE_TIMEOUT_MS,
+    });
+    const prompt = await turnPrompt(ctx, s.id, wake.turnId);
+    const lines = prompt.split("\n");
+    const base = second.base;
+    const sentence = `PR #${second.number} no longer merges into \`${base}\`: it conflicts with \`${base}\` at `;
+    if (
+      !(lines[0] ?? "").startsWith("[GitHub webhook]") ||
+      !(lines[0] ?? "").includes("mergeability check after the base branch moved") ||
+      !prompt.includes(sentence) ||
+      !prompt.includes(`(after #${first.number} was merged)`)
+    ) {
+      throw new Error(
+        `the wake prompt is not the conflict wake for PR #${second.number}: ${prompt.slice(0, 300)}`,
+      );
+    }
+    if (prompt.includes(`PR #${first.number} no longer merges`)) {
+      throw new Error(`the merged PR #${first.number} was reported as conflicting`);
+    }
+    if (latencyMs > GH_CONFLICT_WINDOW_MS) {
+      throw new Error(
+        `the conflict wake started ${Math.round(latencyMs / 1000)} s after the merge, later than the ${Math.round(GH_CONFLICT_WINDOW_MS / 1000)} s debounce plus re-check window`,
+      );
+    }
+
+    // The agent rebased: the PR merges cleanly and contains the first PR's merge commit.
+    const pull = await ghMergeability(ctx, second.repo, second.number);
+    if (pull.mergeable !== true || pull.mergeable_state === "dirty") {
+      throw new Error(
+        `PR #${second.number} still does not merge after the wake turn (mergeable ${String(pull.mergeable)}, ${pull.mergeable_state ?? "?"})`,
+      );
+    }
+    if (pull.head.sha === second.headSha) {
+      throw new Error(
+        `PR #${second.number}'s head did not change: the session did not push a rebase`,
+      );
+    }
+    const cmp = JSON.parse(
+      await ghOf(ctx)(["api", `repos/${second.repo}/compare/${mergeSha}...${pull.head.sha}`]),
+    ) as { behind_by?: number };
+    if (cmp.behind_by !== 0) {
+      throw new Error(
+        `PR #${second.number} is not rebased onto PR #${first.number}'s merge commit (behind by ${cmp.behind_by})`,
+      );
+    }
+    // The agent's own push and reply must not wake it again.
+    await expectNoWake(ctx, s, GH_QUIET_MS, "the conflict wake turn settled");
+    return {
+      first: first.number,
+      second: second.number,
+      mergeWakeTurnId: mergeWake.wake.turnId,
+      conflictWakeTurnId: wake.turnId,
+      mergeToConflictWakeStartMs: latencyMs,
+      windowMs: GH_CONFLICT_WINDOW_MS,
+      quietAfterMs: GH_QUIET_MS,
+      ...settled,
+    };
+  },
+};
+
+const ghConflictCleanup: Step<HarnessContext> = {
+  id: "gh-conflict-cleanup",
+  name: "GitHub conflict: close any open PR and delete the head branches",
+  requires: ["baseUrl", "repo", "github"],
+  needs: [],
+  async run(ctx) {
+    const prs = ctx.state.ghConflict?.prs ?? [];
+    for (const pr of prs) {
+      try {
+        await ghOf(ctx)([
+          "api",
+          "--method",
+          "PATCH",
+          `repos/${pr.repo}/pulls/${pr.number}`,
+          "-f",
+          "state=closed",
+        ]);
+      } catch {
+        // Already merged or closed.
+      }
+      try {
+        await ghOf(ctx)([
+          "api",
+          "--method",
+          "DELETE",
+          `repos/${pr.repo}/git/refs/heads/${pr.headRef}`,
+        ]);
+      } catch {
+        // The branch is already gone.
+      }
+    }
+    return { branchesDeleted: prs.length };
+  },
+};
+
 /** The opt-in GitHub wake scenario; appended to {@link STEPS} when KIRO_API_E2E_GITHUB=1. */
 export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghLaunch,
@@ -1658,6 +1911,10 @@ export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
   ghChecksWake,
   ghCloseWake,
   ghChecksCleanup,
+  ghConflictLaunch,
+  ghConflictPrs,
+  ghConflictWake,
+  ghConflictCleanup,
 ];
 
 /** The steps, in run order. */
