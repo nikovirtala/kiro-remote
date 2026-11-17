@@ -2,7 +2,7 @@
  * GET /oauth/callback.
  *
  * Cognito redirects here after managed login. We locate the OAUTH#TX by the
- * upstream `state`, exchange the Cognito authorization code using the facade's
+ * upstream `state` (consuming it: the state is single-use), exchange the Cognito authorization code using the facade's
  * OWN PKCE verifier, envelope-encrypt the Cognito token set with KMS into a
  * one-time OAUTH#CODE item (sha256(code) key, 60 s TTL, bound to
  * client_id/redirect_uri/client code_challenge), then redirect to the client's
@@ -52,9 +52,13 @@ export async function handleCallback(
     );
   }
 
-  const tx = await deps.repo.getOAuthTx(upstreamState);
+  // Consume the transaction (a conditional delete that returns it): the state
+  // is single-use, so a replayed callback finds nothing and is refused exactly
+  // like an unknown state. This applies to every outcome below, including an
+  // upstream error: the transaction is spent once its state has come back.
+  const tx = await deps.repo.consumeOAuthTx(upstreamState);
   if (!tx) {
-    // Expired or unknown transaction -> cannot trust any redirect target.
+    // Unknown, already used or expired transaction -> cannot trust any redirect target.
     return withBranch(
       errorPageResponse(400, "invalid_request", "authorization transaction not found or expired"),
       "tx_not_found",

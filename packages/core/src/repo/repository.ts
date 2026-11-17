@@ -492,11 +492,52 @@ export class Repository {
     await this.ddb.send(new PutCommand({ TableName: this.table, Item: item }));
   }
 
+  /**
+   * True when an item is past its `ttl`. DynamoDB deletes expired items only
+   * eventually (typically within a few days) and reads return them until then,
+   * so every read of short-lived state checks this. An item with no `ttl`
+   * (a client registered before clients expired) never expires.
+   */
+  private expired(item: { ttl?: number }): boolean {
+    return item.ttl !== undefined && item.ttl <= Math.floor(this.now() / 1000);
+  }
+
+  /** The transaction, or null when it is unknown or expired. Strongly consistent. */
   async getOAuthTx(id: string): Promise<OAuthTxItem | null> {
     const res = await this.ddb.send(
-      new GetCommand({ TableName: this.table, Key: { PK: oauthTxPk(id), SK: SINGLETON_SK } }),
+      new GetCommand({
+        TableName: this.table,
+        Key: { PK: oauthTxPk(id), SK: SINGLETON_SK },
+        ConsistentRead: true,
+      }),
     );
-    return (res.Item as OAuthTxItem | undefined) ?? null;
+    const item = res.Item as OAuthTxItem | undefined;
+    return item && !this.expired(item) ? item : null;
+  }
+
+  /**
+   * Consume a transaction: a conditional delete that returns the old item, so
+   * of two callbacks with the same state exactly one gets it. Null when it is
+   * unknown, already consumed or expired (an expired item is deleted too).
+   */
+  async consumeOAuthTx(id: string): Promise<OAuthTxItem | null> {
+    let old: OAuthTxItem | undefined;
+    try {
+      const res = await this.ddb.send(
+        new DeleteCommand({
+          TableName: this.table,
+          Key: { PK: oauthTxPk(id), SK: SINGLETON_SK },
+          ConditionExpression: "attribute_exists(PK)",
+          ReturnValues: "ALL_OLD",
+        }),
+      );
+      old = res.Attributes as OAuthTxItem | undefined;
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
+        throw err;
+      }
+    }
+    return old && !this.expired(old) ? old : null;
   }
 
   async putOAuthCode(
@@ -512,7 +553,10 @@ export class Repository {
     await this.ddb.send(new PutCommand({ TableName: this.table, Item: item }));
   }
 
-  /** Consume an OAuth code: read-and-delete atomically (deleted on first use). */
+  /**
+   * Consume an OAuth code: read-and-delete atomically (deleted on first use,
+   * also when it has expired). Null when unknown, already used or expired.
+   */
   async consumeOAuthCode(sha256Code: string): Promise<OAuthCodeItem | null> {
     const res = await this.ddb.send(
       new DeleteCommand({
@@ -521,7 +565,8 @@ export class Repository {
         ReturnValues: "ALL_OLD",
       }),
     );
-    return (res.Attributes as OAuthCodeItem | undefined) ?? null;
+    const item = res.Attributes as OAuthCodeItem | undefined;
+    return item && !this.expired(item) ? item : null;
   }
 
   async putCimd(
@@ -567,9 +612,14 @@ export class Repository {
     );
   }
 
+  /** The client, or null when it is unknown. Strongly consistent. */
   async getClient(clientId: string): Promise<RegisteredClientItem | null> {
     const res = await this.ddb.send(
-      new GetCommand({ TableName: this.table, Key: { PK: clientPk(clientId), SK: SINGLETON_SK } }),
+      new GetCommand({
+        TableName: this.table,
+        Key: { PK: clientPk(clientId), SK: SINGLETON_SK },
+        ConsistentRead: true,
+      }),
     );
     return (res.Item as RegisteredClientItem | undefined) ?? null;
   }

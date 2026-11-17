@@ -29,12 +29,13 @@ const config: FacadeConfig = {
 const CLIENT_ID = "https://claude.ai/mcp.json";
 const REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback";
 
-function makeRepo(ddb: FakeDdbClient): Repository {
+function makeRepo(ddb: FakeDdbClient, now?: () => number): Repository {
   const deps = {
     ddb,
     s3: new FakeS3Client(),
     tableName: "t",
     bucketName: "b",
+    ...(now ? { now } : {}),
   } as unknown as RepositoryDeps;
   return new Repository(deps);
 }
@@ -607,6 +608,129 @@ describe("GET /oauth/callback error paths", () => {
     );
     expect(res.status).toBe(400);
     expect(res.headers["content-type"]).toContain("text/html");
+  });
+});
+
+describe("single-use, short-lived transaction and code (moved clock)", () => {
+  const T0 = 1_700_000_000_000;
+  const MINUTE = 60_000;
+  const clientVerifier = generateCodeVerifier();
+
+  /** Run /oauth/authorize against a repo whose clock the test controls. */
+  async function authorized(now: () => number) {
+    const repo = makeRepo(new FakeDdbClient(), now);
+    const res = await handleAuthorize(
+      authorizeReq({
+        response_type: "code",
+        client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI,
+        code_challenge: s256Challenge(clientVerifier),
+        code_challenge_method: "S256",
+        resource: config.mcpResource,
+        state: "client-state",
+      }),
+      {
+        config,
+        repo,
+        clients: clientResolver(),
+        generateState: () => "up-state",
+        generateVerifier: () => "up-verifier",
+      },
+    );
+    expect(res.status).toBe(302);
+    return repo;
+  }
+
+  const callbackReq = (state: string) => ({
+    method: "GET",
+    path: "/oauth/callback",
+    query: { code: "cognito-code", state },
+    headers: {},
+  });
+
+  const cognitoWithTokens = () =>
+    new FakeCognito({
+      codeTokenSet: { access_token: "A", token_type: "Bearer", expires_in: 900 },
+    });
+
+  test("a second callback with the same state is refused like an unknown state", async () => {
+    const repo = await authorized(() => T0);
+    const deps = {
+      config,
+      repo,
+      cognito: cognitoWithTokens(),
+      kms: new FakeKms(),
+      generateCode: () => "our-code",
+    };
+    const first = await handleCallback(callbackReq("up-state"), deps);
+    expect(first.status).toBe(302);
+    expect(new URL(first.headers.location).searchParams.get("code")).toBe("our-code");
+
+    const replay = await handleCallback(callbackReq("up-state"), deps);
+    const unknown = await handleCallback(callbackReq("never-issued"), deps);
+    expect(replay.status).toBe(400);
+    expect(replay.headers.location).toBeUndefined();
+    expect(replay.status).toBe(unknown.status);
+    expect(replay.body).toBe(unknown.body);
+    expect(replay.logContext).toEqual({ branch: "tx_not_found" });
+  });
+
+  test("the transaction is spent even when the callback carries an upstream error", async () => {
+    const repo = await authorized(() => T0);
+    const deps = { config, repo, cognito: cognitoWithTokens(), kms: new FakeKms() };
+    const errored = await handleCallback(
+      { ...callbackReq("up-state"), query: { state: "up-state", error: "access_denied" } },
+      deps,
+    );
+    expect(new URL(errored.headers.location).searchParams.get("error")).toBe("access_denied");
+    const again = await handleCallback(callbackReq("up-state"), deps);
+    expect(again.status).toBe(400);
+  });
+
+  test("a transaction older than 10 minutes is refused at the callback", async () => {
+    let now = T0;
+    const repo = await authorized(() => now);
+    now = T0 + 10 * MINUTE + 1000;
+    const res = await handleCallback(callbackReq("up-state"), {
+      config,
+      repo,
+      cognito: cognitoWithTokens(),
+      kms: new FakeKms(),
+    });
+    expect(res.status).toBe(400);
+    expect(res.logContext).toEqual({ branch: "tx_not_found" });
+  });
+
+  test("a code older than 60 seconds is refused at the token endpoint", async () => {
+    let now = T0;
+    const repo = await authorized(() => now);
+    const kms = new FakeKms();
+    await handleCallback(callbackReq("up-state"), {
+      config,
+      repo,
+      cognito: cognitoWithTokens(),
+      kms,
+      generateCode: () => "our-code",
+    });
+    now = T0 + 61_000;
+    const res = await handleToken(
+      {
+        method: "POST",
+        path: "/oauth/token",
+        query: {},
+        headers: {},
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: "our-code",
+          code_verifier: clientVerifier,
+          client_id: CLIENT_ID,
+          redirect_uri: REDIRECT_URI,
+        }).toString(),
+      },
+      { repo, cognito: cognitoWithTokens(), kms },
+    );
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_grant");
   });
 });
 
