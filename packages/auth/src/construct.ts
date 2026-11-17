@@ -16,8 +16,11 @@
  *   - ONE public, no-secret facade app client (authorization_code + PKCE,
  *     /oauth/callback as the only callback URL, 15 min access tokens, 30 day
  *     rotating refresh tokens, token revocation enabled),
- *   - OPTIONAL pre-registered public clients from a prop list {name,
- *     callbackUrls} that still flow through the facade.
+ *
+ * Pre-registered clients ({name, callbackUrls}) get NO Cognito app client: the
+ * facade always authorizes against the single facade client above, and a
+ * pre-registered client only exists as an allow-list the facade checks (its
+ * logical client_id and exact redirect URIs, see {@link PreRegisteredClientProps}).
  *
  * The REST/MCP wiring (Lambdas, API Gateway) is assembled in packages/cdk
  * (FEAT-007); this construct exposes the user pool, resource server, scopes,
@@ -42,11 +45,16 @@ import {
 } from "aws-cdk-lib/aws-cognito";
 import { Construct } from "constructs";
 
-/** A pre-registered public client that still authorizes through the facade. */
+/**
+ * A pre-registered public client. It is a facade-side allow-list entry only,
+ * with no Cognito app client of its own: the client presents `name` as its
+ * `client_id` at /oauth/authorize, may use only the exact `callbackUrls` as
+ * `redirect_uri`, and is authorized against the facade client like any other.
+ */
 export interface PreRegisteredClientProps {
-  /** Logical name, also used to derive the Cognito client construct id. */
+  /** Logical name, presented by the client as its `client_id`. */
   name: string;
-  /** Exact callback URLs the client may use. */
+  /** Exact redirect URIs the client may use. */
   callbackUrls: string[];
 }
 
@@ -63,9 +71,6 @@ export interface KiroRemoteAuthProps {
    * `<prefix>.auth.<region>.amazoncognito.com` subdomain).
    */
   cognitoDomainPrefix: string;
-
-  /** Optional pre-registered public clients (Claude Code, VS Code, ...). */
-  preRegisteredClients?: PreRegisteredClientProps[];
 
   /**
    * Optional passkey relying-party id override. Defaults to the managed-login
@@ -104,8 +109,6 @@ export class KiroRemoteAuth extends Construct {
   readonly scopes: FacadeScopes;
   /** The single public, no-secret facade app client. */
   readonly facadeClient: UserPoolClient;
-  /** Any optional pre-registered public clients, keyed by name. */
-  readonly preRegisteredClients: Record<string, UserPoolClient> = {};
 
   constructor(scope: Construct, id: string, props: KiroRemoteAuthProps) {
     super(scope, id);
@@ -222,30 +225,9 @@ export class KiroRemoteAuth extends Construct {
     // branding style exists for the client (otherwise the page shows "Login
     // pages unavailable"). The CDK domain with `managedLoginVersion: 2` does
     // NOT auto-create one, so provision a default (Cognito-provided) branding
-    // for every client. `useCognitoProvidedValues: true` applies the default
+    // for the facade client. `useCognitoProvidedValues: true` applies the default
     // styling with no custom design work.
     this.addManagedLoginBranding("FacadeClientBranding", this.facadeClient);
-
-    for (const client of props.preRegisteredClients ?? []) {
-      this.preRegisteredClients[client.name] = this.userPool.addClient(`Client${client.name}`, {
-        generateSecret: false,
-        authFlows: { user: true, userSrp: false, adminUserPassword: false, custom: false },
-        oAuth: {
-          flows: { authorizationCodeGrant: true, implicitCodeGrant: false },
-          callbackUrls: client.callbackUrls,
-          scopes: oauthScopes,
-        },
-        accessTokenValidity: Duration.minutes(15),
-        refreshTokenValidity: Duration.days(30),
-        refreshTokenRotationGracePeriod: Duration.seconds(0),
-        enableTokenRevocation: true,
-        preventUserExistenceErrors: true,
-      });
-      this.addManagedLoginBranding(
-        `Branding${client.name.replace(/[^a-zA-Z0-9]/g, "")}`,
-        this.preRegisteredClients[client.name],
-      );
-    }
   }
 
   /**
