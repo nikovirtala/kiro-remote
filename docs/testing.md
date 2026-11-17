@@ -32,6 +32,27 @@ mise exec -- pnpm --filter @nikovirtala/kiro-remote-mcp test
 mise exec -- pnpm --filter @nikovirtala/kiro-remote-cdk test
 ```
 
+## DynamoDB paths against the AWS Emulator
+
+`packages/api/test/emulator.test.ts` runs the OAuth facade's storage (the
+single-use transaction, the one-time code, `ConsistentRead`, the registered-client
+`ttl` and its renewal) against the [AWS Emulator](https://docs.aws.amazon.com/emulator/latest/userguide/),
+which implements the real DynamoDB conditional-write and `ReturnValues` behavior
+that the in-memory fakes only imitate. It is skipped by default. To run it, start
+the emulator, load its connection variables (see the user guide), and set
+`KIRO_REMOTE_EMULATOR_TEST=1`:
+
+```bash
+export AWS_ENDPOINT_URL=https://127.0.0.1:9297
+export AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/emulator/9297/emulator_credentials
+export AWS_CONFIG_FILE=$HOME/.aws/emulator/9297/config
+export NODE_EXTRA_CA_CERTS=$HOME/.aws/emulator/9297/ca.pem
+KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-api test emulator
+```
+
+The test creates and deletes its own table and refuses to run unless
+`AWS_ENDPOINT_URL` is a loopback address, so it cannot reach real AWS.
+
 ## Synthesizing the CDK stack
 
 The CDK unit tests synthesize the stack with test props and run the cdk-nag
