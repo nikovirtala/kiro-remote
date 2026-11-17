@@ -12,7 +12,6 @@
     "lint": "biome check ."
   },
   "dependencies": {
-    "@aws-sdk/client-cognito-identity-provider": "^3.1163.0",
     "@aws-sdk/client-kms": "^3.1163.0",
     "@nikovirtala/kiro-remote-core": "workspace:*"
   },
