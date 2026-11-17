@@ -6,7 +6,8 @@
  * OAUTH#CODE atomically (delete-on-first-use so replay fails), decrypt the
  * Cognito token set via KMS, and return the Cognito tokens UNCHANGED.
  *
- * refresh_token: pass straight through to Cognito.
+ * refresh_token: pass straight through to Cognito, after checking that a
+ * presented dynamically-registered client_id is still registered.
  *
  * revoke: pass straight through to Cognito RevokeToken.
  *
@@ -15,6 +16,8 @@
  */
 
 import type { Repository } from "@nikovirtala/kiro-remote-core";
+import { CimdError } from "./cimd.ts";
+import type { ClientResolver } from "./clients.ts";
 import { type CognitoPort, CognitoTokenError, type CognitoTokenSet } from "./cognito.ts";
 import type { KmsPort } from "./kms.ts";
 import { sha256Hex, verifyS256 } from "./pkce.ts";
@@ -24,6 +27,12 @@ export interface TokenDeps {
   repo: Repository;
   cognito: CognitoPort;
   kms: KmsPort;
+  /**
+   * When set, a refresh that presents the `client_id` of a dynamically
+   * registered client whose registration is gone is refused with
+   * `invalid_client` so the client registers again.
+   */
+  clients?: ClientResolver;
 }
 
 export interface RevokeDeps {
@@ -90,6 +99,17 @@ async function handleRefresh(
   const refreshToken = form.refresh_token;
   if (!refreshToken) {
     return tokenError(400, "invalid_request", "refresh_token is required");
+  }
+  // client_id is optional on refresh (the refresh token is the credential).
+  if (form.client_id && deps.clients) {
+    try {
+      await deps.clients.assertRegistered(form.client_id);
+    } catch (err) {
+      if (err instanceof CimdError) {
+        return tokenError(400, err.oauthError, "client registration not found; register again");
+      }
+      throw err;
+    }
   }
   try {
     const tokenSet = await deps.cognito.refresh({ refreshToken });

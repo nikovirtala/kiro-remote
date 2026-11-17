@@ -208,7 +208,11 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
         responseTypes: item.responseTypes,
         tokenEndpointAuthMethod: item.tokenEndpointAuthMethod,
         createdAt: item.createdAt,
+        ...(item.ttl !== undefined ? { ttl: item.ttl } : {}),
       };
+    },
+    async renewClient(clientId: string, currentTtl: number | undefined): Promise<void> {
+      await repo.renewClient(clientId, currentTtl);
     },
     async putClient(client: ResolvedDynamicClient): Promise<void> {
       await repo.putClient({
@@ -239,7 +243,7 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
     config: facadeConfig,
     authorize: { config: facadeConfig, repo, clients },
     callback: { config: facadeConfig, repo, cognito, kms: kmsAdapter },
-    token: { repo, cognito, kms: kmsAdapter },
+    token: { repo, cognito, kms: kmsAdapter, clients },
     revoke: { cognito },
     register: { config: facadeConfig, store: dynamicClients },
   };

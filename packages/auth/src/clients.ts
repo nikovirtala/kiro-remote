@@ -37,6 +37,11 @@ export interface ResolvedDynamicClient {
   responseTypes: string[];
   tokenEndpointAuthMethod: string;
   createdAt: number;
+  /**
+   * When the registration expires (unix epoch seconds). Absent on registrations
+   * made before they expired; those never do.
+   */
+  ttl?: number;
 }
 
 /**
@@ -47,8 +52,15 @@ export interface ResolvedDynamicClient {
  * packages/api wiring.
  */
 export interface DynamicClientStore {
+  /** The client, or null when it is unknown OR its registration has expired. */
   getClient(clientId: string): Promise<ResolvedDynamicClient | null>;
   putClient(client: ResolvedDynamicClient): Promise<void>;
+  /**
+   * Extend the registration of a client that is in use. `currentTtl` is the
+   * `ttl` of the client as read; the store writes at most once a day per client
+   * and never to a registration without a `ttl`.
+   */
+  renewClient(clientId: string, currentTtl: number | undefined): Promise<void>;
 }
 
 export interface ClientResolverDeps {
@@ -158,17 +170,52 @@ export class ClientResolver {
         isCimd: false,
       };
     }
-    if (this.dynamic) {
-      const dyn = await this.dynamic.getClient(clientId);
-      if (dyn) {
-        return {
-          clientId: dyn.clientId,
-          clientName: dyn.clientName ?? dyn.clientId,
-          redirectUris: dyn.redirectUris,
-          isCimd: false,
-        };
-      }
+    const dyn = await this.resolveDynamic(clientId);
+    if (dyn) {
+      return {
+        clientId: dyn.clientId,
+        clientName: dyn.clientName ?? dyn.clientId,
+        redirectUris: dyn.redirectUris,
+        isCimd: false,
+      };
     }
     throw new CimdError("invalid_client", "unknown client_id");
+  }
+
+  /**
+   * Check a `client_id` presented at /oauth/token (refresh). A dynamically
+   * registered client whose registration is gone (expired) is refused with
+   * `invalid_client`, the code an MCP client reads as "register again". A
+   * client that is a CIMD URL or pre-registered is not looked up, and neither
+   * is anything when no dynamic store is configured. Throws {@link CimdError}.
+   */
+  async assertRegistered(clientId: string): Promise<void> {
+    if (!this.dynamic || clientId.startsWith("https://") || this.preRegistered.has(clientId)) {
+      return;
+    }
+    if (!(await this.resolveDynamic(clientId))) {
+      throw new CimdError("invalid_client", "unknown client_id");
+    }
+  }
+
+  /**
+   * Look a dynamically-registered client up and, because it is in use, extend
+   * its registration. The extension is best effort: a failed write never
+   * fails the sign-in.
+   */
+  private async resolveDynamic(clientId: string): Promise<ResolvedDynamicClient | null> {
+    if (!this.dynamic) {
+      return null;
+    }
+    const dyn = await this.dynamic.getClient(clientId);
+    if (!dyn) {
+      return null;
+    }
+    try {
+      await this.dynamic.renewClient(dyn.clientId, dyn.ttl);
+    } catch {
+      // Best effort: the registration is still valid for now.
+    }
+    return dyn;
   }
 }

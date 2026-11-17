@@ -281,6 +281,33 @@ describe("GET /oauth/authorize", () => {
     expect(res.status).toBe(302);
     expect(new URL(res.headers.location).pathname).toBe("/oauth2/authorize");
   });
+
+  test("pre-registered client authorizes with its logical id against the facade Cognito client", async () => {
+    const q = baseQuery();
+    q.client_id = "preclient";
+    q.redirect_uri = "https://pre.example/cb";
+    const res = await handleAuthorize(authorizeReq(q), deps());
+    // Upstream is always the single facade app client, never one named after the client.
+    expect(new URL(res.headers.location).searchParams.get("client_id")).toBe("facadeclient123");
+    const tx = await repo.getOAuthTx("fixed-upstream-state");
+    expect((tx?.data as { clientId?: string } | undefined)?.clientId).toBe("preclient");
+  });
+
+  test("pre-registered client may use only its listed redirect URIs", async () => {
+    for (const redirect of [
+      "https://pre.example/other",
+      "https://pre.example/cb/",
+      "https://evil.example/cb",
+    ]) {
+      const q = baseQuery();
+      q.client_id = "preclient";
+      q.redirect_uri = redirect;
+      const res = await handleAuthorize(authorizeReq(q), deps());
+      expect(res.status).toBe(400);
+      expect(res.headers.location).toBeUndefined();
+    }
+    expect(ddb.size()).toBe(0);
+  });
 });
 
 describe("full authorize -> callback -> token happy path", () => {
@@ -734,6 +761,158 @@ describe("single-use, short-lived transaction and code (moved clock)", () => {
   });
 });
 
+/** The DynamicClientStore the api wiring builds over the Repository, minus the field mapping. */
+function repoBackedStore(repo: Repository): DynamicClientStore {
+  return {
+    async getClient(clientId) {
+      const item = await repo.getClient(clientId);
+      return item ? { ...item } : null;
+    },
+    async putClient(client) {
+      await repo.putClient({ PK: `CLIENT#${client.clientId}`, SK: "A", ...client });
+    },
+    async renewClient(clientId, currentTtl) {
+      await repo.renewClient(clientId, currentTtl);
+    },
+  };
+}
+
+describe("registered clients expire and are extended when used (moved clock)", () => {
+  const T0 = 1_700_000_000_000;
+  const DAY = 24 * 60 * 60 * 1000;
+  const DYN_ID = "mcp_dyn1";
+  const DYN_REDIRECT = "https://dyn.example.com/cb";
+  const clientVerifier = generateCodeVerifier();
+
+  async function setup(now: () => number) {
+    const ddb = new FakeDdbClient();
+    const repo = makeRepo(ddb, now);
+    const store = repoBackedStore(repo);
+    await store.putClient({
+      clientId: DYN_ID,
+      clientName: "Dyn",
+      redirectUris: [DYN_REDIRECT],
+      grantTypes: ["authorization_code", "refresh_token"],
+      responseTypes: ["code"],
+      tokenEndpointAuthMethod: "none",
+      createdAt: now(),
+    });
+    const clients = new ClientResolver({
+      cimd: cimdFetcherFor(CIMD_DOC),
+      preRegistered: [],
+      dynamic: store,
+    });
+    return { ddb, repo, clients };
+  }
+
+  const authorize = (repo: Repository, clients: ClientResolver) =>
+    handleAuthorize(
+      authorizeReq({
+        response_type: "code",
+        client_id: DYN_ID,
+        redirect_uri: DYN_REDIRECT,
+        code_challenge: s256Challenge(clientVerifier),
+        code_challenge_method: "S256",
+        resource: config.mcpResource,
+      }),
+      { config, repo, clients },
+    );
+
+  test("a client past its 180 day ttl is unknown at /oauth/authorize", async () => {
+    let now = T0;
+    const { repo, clients } = await setup(() => now);
+    now = T0 + 179 * DAY;
+    expect((await authorize(repo, clients)).status).toBe(302);
+    // That authorize extended it, so 179 days later it is still known ...
+    now = T0 + 358 * DAY;
+    expect((await authorize(repo, clients)).status).toBe(302);
+    // ... and a client left alone for more than 180 days is not.
+    now += 181 * DAY;
+    const res = await authorize(repo, clients);
+    expect(res.status).toBe(400);
+    expect(res.headers.location).toBeUndefined();
+    expect(res.body).toContain("invalid_client");
+  });
+
+  test("authorize extends the ttl at most once a day", async () => {
+    let now = T0;
+    const { ddb, repo, clients } = await setup(() => now);
+    now = T0 + 60_000;
+    await authorize(repo, clients);
+    now = T0 + 12 * 60 * 60 * 1000;
+    await authorize(repo, clients);
+    expect(ddb.updates).toBe(0);
+    now = T0 + 25 * 60 * 60 * 1000;
+    await authorize(repo, clients);
+    await authorize(repo, clients);
+    expect(ddb.updates).toBe(1);
+    now += DAY + 60_000;
+    await authorize(repo, clients);
+    expect(ddb.updates).toBe(2);
+  });
+
+  test("a failed extension does not fail the authorize", async () => {
+    const { repo, clients } = await setup(() => T0 + 2 * DAY);
+    const broken = new ClientResolver({
+      cimd: cimdFetcherFor(CIMD_DOC),
+      preRegistered: [],
+      dynamic: {
+        ...repoBackedStore(repo),
+        async renewClient() {
+          throw new Error("throttled");
+        },
+      },
+    });
+    expect(clients).toBeDefined();
+    expect((await authorize(repo, broken)).status).toBe(302);
+  });
+
+  const refreshReq = (body: Record<string, string>) => ({
+    method: "POST",
+    path: "/oauth/token",
+    query: {},
+    headers: {},
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: "r",
+      ...body,
+    }).toString(),
+  });
+
+  test("a refresh from an expired registration gets invalid_client (register again)", async () => {
+    let now = T0;
+    const { repo, clients } = await setup(() => now);
+    const deps = { repo, cognito: new FakeCognito({}), kms: new FakeKms(), clients };
+    expect((await handleToken(refreshReq({ client_id: DYN_ID }), deps)).status).toBe(200);
+    now = T0 + 181 * DAY + 2 * DAY;
+    const res = await handleToken(refreshReq({ client_id: DYN_ID }), deps);
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_client");
+    // The refresh token is the credential: no client_id, no lookup.
+    expect((await handleToken(refreshReq({}), deps)).status).toBe(200);
+  });
+
+  test("a refresh from a CIMD or pre-registered client is not looked up", async () => {
+    const { repo } = await setup(() => T0);
+    let lookups = 0;
+    const clients = new ClientResolver({
+      cimd: cimdFetcherFor(CIMD_DOC),
+      preRegistered: [{ clientId: "preclient", clientName: "Pre", redirectUris: ["https://p/cb"] }],
+      dynamic: {
+        ...repoBackedStore(repo),
+        async getClient() {
+          lookups += 1;
+          return null;
+        },
+      },
+    });
+    const deps = { repo, cognito: new FakeCognito({}), kms: new FakeKms(), clients };
+    expect((await handleToken(refreshReq({ client_id: CLIENT_ID }), deps)).status).toBe(200);
+    expect((await handleToken(refreshReq({ client_id: "preclient" }), deps)).status).toBe(200);
+    expect(lookups).toBe(0);
+  });
+});
+
 describe("POST /oauth/revoke", () => {
   test("passes the token through to Cognito and returns 200 no-store", async () => {
     const cognito = new FakeCognito({});
@@ -770,6 +949,7 @@ describe("ClientResolver dynamic-store lookup (RFC 7591)", () => {
       async putClient(c) {
         map.set(c.clientId, c);
       },
+      async renewClient() {},
     };
   }
 

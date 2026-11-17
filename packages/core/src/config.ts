@@ -42,6 +42,18 @@ export const OAUTH_CODE_TTL_MS = 60 * 1000;
 /** Maximum TTL for cached CIMD (OAUTH#CIMD#) documents, in milliseconds. */
 export const OAUTH_CIMD_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * TTL for dynamically-registered (CLIENT#) items, in milliseconds. A resolve at
+ * /oauth/authorize (or a refresh) pushes it out again.
+ */
+export const OAUTH_CLIENT_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+
+/**
+ * A registered client's TTL is extended at most once per this interval, so the
+ * extension does not add a write to every authorize.
+ */
+export const OAUTH_CLIENT_RENEW_AFTER_MS = 24 * 60 * 60 * 1000;
+
 /** TTL for per-subject idempotency keys, in milliseconds. */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 

@@ -102,6 +102,13 @@ three ways:
   no client secret, `token_endpoint_auth_method: "none"`). This is what a client's
   "Register automatically" option uses; the RFC 8414 authorization-server metadata
   advertises it as the `registration_endpoint` (`<host>/oauth/register`).
+  A registration lasts 180 days and is extended (at most once a day) each time the
+  client signs in at `/oauth/authorize` or refreshes with its `client_id`. A client
+  whose registration has expired is unknown: `/oauth/authorize` shows an
+  `invalid_client` error page (it cannot redirect to an unverified `redirect_uri`),
+  and a refresh that presents its `client_id` returns `invalid_client`, which MCP
+  clients take as the signal to register again. Registrations made before this
+  limit existed have no expiry.
 - **A CIMD URL `client_id`** — a client-id-metadata-document URL whose host is
   allow-listed via the construct's `cimdAllowedHosts`. The metadata advertises
   `client_id_metadata_document_supported: true`.
@@ -155,7 +162,10 @@ sequenceDiagram
 the CIMD URL `<host>/oauth/clients/cli.json` (no registration step), and its
 `redirect_uri` is a loopback address on an ephemeral port. A refresh
 (`grant_type=refresh_token`) goes from the client to `/oauth/token`, which
-passes it straight to Cognito.
+passes it to Cognito (after checking that a registered `client_id`, if one is
+sent, is still registered). The `state` of a sign-in is single-use: a second
+`/oauth/callback` with the same `state`, or one more than 10 minutes after
+`/oauth/authorize`, is refused like an unknown state.
 
 ### Trying it in the MCP Inspector
 

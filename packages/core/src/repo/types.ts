@@ -230,9 +230,9 @@ export interface OAuthCimdItem {
 }
 
 /**
- * A dynamically-registered OAuth client (RFC 7591). Unlike OAUTH#TX/CODE/CIMD
- * items these are PERMANENT: there is deliberately NO `ttl` field, so a
- * registered client never expires.
+ * A dynamically-registered OAuth client (RFC 7591). `ttl` is set 180 days out at
+ * registration and extended when the client is used. Items registered before
+ * `ttl` existed have none and never expire; they are left as they are.
  */
 export interface RegisteredClientItem {
   PK: string; // CLIENT#<client_id>
@@ -244,6 +244,8 @@ export interface RegisteredClientItem {
   responseTypes: string[];
   tokenEndpointAuthMethod: string;
   createdAt: number;
+  /** Unix epoch seconds. Absent on registrations made before the TTL existed. */
+  ttl?: number;
 }
 
 export interface IdempotencyItem {
