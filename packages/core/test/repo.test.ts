@@ -17,6 +17,8 @@ import {
  */
 class FakeDdb {
   store = new Map<string, Record<string, unknown>>();
+  /** Every command sent, for asserting on the request shape (ConsistentRead). */
+  sent: Array<{ name: string; input: Record<string, unknown> }> = [];
 
   private key(pk: string, sk: string): string {
     return `${pk}\u0000${sk}`;
@@ -28,6 +30,7 @@ class FakeDdb {
   }): Promise<unknown> {
     const name = cmd.constructor.name;
     const input = cmd.input;
+    this.sent.push({ name, input });
     if (name === "PutCommand") {
       const item = input.Item as Record<string, string>;
       const k = this.key(item.PK, item.SK);
@@ -45,6 +48,9 @@ class FakeDdb {
       const key = input.Key as Record<string, string>;
       const k = this.key(key.PK, key.SK);
       const old = this.store.get(k);
+      if (input.ConditionExpression === "attribute_exists(PK)" && !old) {
+        throw Object.assign(new Error("missing"), { name: "ConditionalCheckFailedException" });
+      }
       this.store.delete(k);
       return { Attributes: old };
     }
@@ -253,6 +259,74 @@ describe("repository: OAuth code deleted on first use", () => {
     expect(first?.clientId).toBe("c");
     const second = await r.consumeOAuthCode("hash");
     expect(second).toBeNull();
+  });
+});
+
+const T0 = 1_700_000_000_000;
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+
+describe("repository: expired OAuth state is absent (DynamoDB TTL deletes late)", () => {
+  it("refuses a transaction past its 10 minute ttl, and serves it before", async () => {
+    let now = T0;
+    const { r, ddb } = repo(() => now);
+    await r.putOAuthTx("state", { clientId: "c" });
+    now = T0 + 10 * MINUTE - SECOND;
+    expect((await r.getOAuthTx("state"))?.data.clientId).toBe("c");
+    now = T0 + 10 * MINUTE + SECOND;
+    // The item is still in the table: only the read treats it as absent.
+    expect(ddb.store.size).toBe(1);
+    expect(await r.getOAuthTx("state")).toBeNull();
+    expect(await r.consumeOAuthTx("state")).toBeNull();
+  });
+
+  it("refuses a code past its 60 second ttl, and still deletes it", async () => {
+    let now = T0;
+    const { r, ddb } = repo(() => now);
+    const code = {
+      encryptedTokens: "x",
+      clientId: "c",
+      redirectUri: "https://a/cb",
+      codeChallenge: "h",
+    };
+    await r.putOAuthCode("fresh", code);
+    await r.putOAuthCode("stale", code);
+    now = T0 + 30 * SECOND;
+    expect((await r.consumeOAuthCode("fresh"))?.clientId).toBe("c");
+    now = T0 + 61 * SECOND;
+    expect(await r.consumeOAuthCode("stale")).toBeNull();
+    expect(ddb.store.size).toBe(0);
+  });
+});
+
+describe("repository: strongly consistent reads of just-written state", () => {
+  it("reads the transaction and the client with ConsistentRead", async () => {
+    const { r, ddb } = repo();
+    await r.putOAuthTx("state", {});
+    await r.getOAuthTx("state");
+    await r.getClient("mcp_x");
+    const gets = ddb.sent.filter((c) => c.name === "GetCommand");
+    expect(gets).toHaveLength(2);
+    expect(gets.every((g) => g.input.ConsistentRead === true)).toBe(true);
+  });
+});
+
+describe("repository: OAuth transaction consumed on first use", () => {
+  it("returns the transaction once, then nothing, and deletes it", async () => {
+    const { r, ddb } = repo();
+    await r.putOAuthTx("state", { clientId: "c" });
+    expect((await r.consumeOAuthTx("state"))?.data.clientId).toBe("c");
+    expect(ddb.store.size).toBe(0);
+    expect(await r.consumeOAuthTx("state")).toBeNull();
+    expect(await r.getOAuthTx("state")).toBeNull();
+  });
+
+  it("returns null for an unknown state (the conditional delete fails)", async () => {
+    const { r, ddb } = repo();
+    expect(await r.consumeOAuthTx("nope")).toBeNull();
+    const del = ddb.sent.find((c) => c.name === "DeleteCommand");
+    expect(del?.input.ConditionExpression).toBe("attribute_exists(PK)");
+    expect(del?.input.ReturnValues).toBe("ALL_OLD");
   });
 });
 

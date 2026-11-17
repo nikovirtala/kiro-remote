@@ -60,6 +60,11 @@ export class FakeDdbClient {
       const key = input.Key as { PK: string; SK: string };
       const k = this.key(key.PK, key.SK);
       const existing = this.items.get(k);
+      if (input.ConditionExpression === "attribute_exists(PK)" && !existing) {
+        const err = new Error("conditional check failed");
+        (err as { name: string }).name = "ConditionalCheckFailedException";
+        throw err;
+      }
       this.items.delete(k);
       if (input.ReturnValues === "ALL_OLD") {
         return { Attributes: existing };
