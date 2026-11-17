@@ -29,8 +29,7 @@ export interface AuthorizeDeps {
   config: FacadeConfig;
   repo: Repository;
   clients: ClientResolver;
-  /** Injectable id/secret generators for deterministic tests. */
-  generateTxId?: () => string;
+  /** Injectable secret generators for deterministic tests. */
   generateState?: () => string;
   generateVerifier?: () => string;
 }
@@ -154,7 +153,6 @@ export async function handleAuthorize(
   }
 
   // --- Build the transaction and the upstream Cognito authorization URL.
-  const txId = (deps.generateTxId ?? generateOpaqueToken)();
   const cognitoState = (deps.generateState ?? generateOpaqueToken)();
   const cognitoVerifier = (deps.generateVerifier ?? generateCodeVerifier)();
 
@@ -177,7 +175,6 @@ export async function handleAuthorize(
   };
   // The TX id is bound to the upstream state so /oauth/callback can locate it.
   await deps.repo.putOAuthTx(cognitoState, txData as unknown as Record<string, unknown>);
-  void txId;
 
   const authorizeUrl = appendQuery(`${deps.config.cognitoDomain}/oauth2/authorize`, {
     response_type: "code",
