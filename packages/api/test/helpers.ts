@@ -253,6 +253,7 @@ export class InMemoryDynamicClientStore implements DynamicClientStore {
   async putClient(client: ResolvedDynamicClient): Promise<void> {
     this.items.set(client.clientId, client);
   }
+  async renewClient(): Promise<void> {}
 }
 
 /* ------------------------------ Context builder ---------------------------- */

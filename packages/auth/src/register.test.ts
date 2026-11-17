@@ -21,6 +21,7 @@ class FakeStore implements DynamicClientStore {
   async getClient(clientId: string): Promise<ResolvedDynamicClient | null> {
     return this.items.get(clientId) ?? null;
   }
+  async renewClient(): Promise<void> {}
   async putClient(client: ResolvedDynamicClient): Promise<void> {
     this.items.set(client.clientId, client);
   }

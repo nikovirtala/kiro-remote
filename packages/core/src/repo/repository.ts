@@ -25,6 +25,8 @@ import {
   INLINE_PAYLOAD_MAX_BYTES,
   INLINE_PROMPT_MAX_BYTES,
   OAUTH_CIMD_MAX_TTL_MS,
+  OAUTH_CLIENT_RENEW_AFTER_MS,
+  OAUTH_CLIENT_TTL_MS,
   OAUTH_CODE_TTL_MS,
   OAUTH_TX_TTL_MS,
   PERMISSION_TIMEOUT_MS,
@@ -597,22 +599,26 @@ export class Repository {
   /* ---------------------- Dynamic client registration -------------------- */
 
   /**
-   * Persist a dynamically-registered OAuth client (RFC 7591). The
-   * `attribute_not_exists(PK)` condition guarantees a re-used `client_id` can
-   * never overwrite an existing registration. The CLIENT# item is PERMANENT
-   * (no TTL): registered clients do not expire.
+   * Persist a dynamically-registered OAuth client (RFC 7591) with a `ttl`
+   * {@link OAUTH_CLIENT_TTL_MS} from now. The `attribute_not_exists(PK)`
+   * condition guarantees a re-used `client_id` can never overwrite an existing
+   * registration.
    */
-  async putClient(item: RegisteredClientItem): Promise<void> {
+  async putClient(item: Omit<RegisteredClientItem, "ttl">): Promise<void> {
+    const stored: RegisteredClientItem = {
+      ...item,
+      ttl: ttlFromNow(OAUTH_CLIENT_TTL_MS, this.now()),
+    };
     await this.ddb.send(
       new PutCommand({
         TableName: this.table,
-        Item: item,
+        Item: stored,
         ConditionExpression: "attribute_not_exists(PK)",
       }),
     );
   }
 
-  /** The client, or null when it is unknown. Strongly consistent. */
+  /** The client, or null when it is unknown or expired. Strongly consistent. */
   async getClient(clientId: string): Promise<RegisteredClientItem | null> {
     const res = await this.ddb.send(
       new GetCommand({
@@ -621,7 +627,46 @@ export class Repository {
         ConsistentRead: true,
       }),
     );
-    return (res.Item as RegisteredClientItem | undefined) ?? null;
+    const item = res.Item as RegisteredClientItem | undefined;
+    return item && !this.expired(item) ? item : null;
+  }
+
+  /**
+   * Push a client's `ttl` out to {@link OAUTH_CLIENT_TTL_MS} from now, at most
+   * once per {@link OAUTH_CLIENT_RENEW_AFTER_MS}. `currentTtl` is the `ttl` of
+   * the item the caller just read: no write is made when it is recent enough
+   * or absent (a registration made before clients expired is left as it is).
+   * The write is conditional on the stored `ttl` still being old, so two
+   * concurrent callers do not both write.
+   */
+  async renewClient(clientId: string, currentTtl: number | undefined): Promise<void> {
+    if (currentTtl === undefined) {
+      return;
+    }
+    const nowMs = this.now();
+    const renewBelow = ttlFromNow(OAUTH_CLIENT_TTL_MS - OAUTH_CLIENT_RENEW_AFTER_MS, nowMs);
+    if (currentTtl >= renewBelow) {
+      return;
+    }
+    try {
+      await this.ddb.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { PK: clientPk(clientId), SK: SINGLETON_SK },
+          UpdateExpression: "SET #ttl = :ttl",
+          ConditionExpression: "attribute_exists(#ttl) AND #ttl < :renewBelow",
+          ExpressionAttributeNames: { "#ttl": "ttl" },
+          ExpressionAttributeValues: {
+            ":ttl": ttlFromNow(OAUTH_CLIENT_TTL_MS, nowMs),
+            ":renewBelow": renewBelow,
+          },
+        }),
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
+        throw err;
+      }
+    }
   }
 
   /* ------------------------------ Turn state ----------------------------- */

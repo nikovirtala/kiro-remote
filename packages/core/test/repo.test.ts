@@ -67,6 +67,11 @@ class FakeDdb {
           throw Object.assign(new Error("stale"), { name: "ConditionalCheckFailedException" });
         }
       }
+      if (input.ConditionExpression === "attribute_exists(#ttl) AND #ttl < :renewBelow") {
+        if (!item || typeof item.ttl !== "number" || item.ttl >= Number(values[":renewBelow"])) {
+          throw Object.assign(new Error("not due"), { name: "ConditionalCheckFailedException" });
+        }
+      }
       const current = item ?? {};
       const expr = input.UpdateExpression as string;
       if (expr.includes("eventSeq = eventSeq + :one")) {
@@ -330,8 +335,8 @@ describe("repository: OAuth transaction consumed on first use", () => {
   });
 });
 
-describe("repository: dynamically-registered CLIENT# item (RFC 7591, permanent)", () => {
-  function clientItem(clientId: string): RegisteredClientItem {
+describe("repository: dynamically-registered CLIENT# item (RFC 7591, 180 day ttl)", () => {
+  function clientItem(clientId: string): Omit<RegisteredClientItem, "ttl"> {
     return {
       PK: `CLIENT#${clientId}`,
       SK: "A",
@@ -357,8 +362,8 @@ describe("repository: dynamically-registered CLIENT# item (RFC 7591, permanent)"
     expect(got?.responseTypes).toEqual(["code"]);
     expect(got?.tokenEndpointAuthMethod).toBe("none");
     expect(got?.createdAt).toBe(1_700_000_000_000);
-    // Registered clients are PERMANENT: no TTL is stored.
-    expect("ttl" in (got as Record<string, unknown>)).toBe(false);
+    // A registration expires 180 days after it is made.
+    expect(got?.ttl).toBe(1_700_000_000 + 180 * 24 * 60 * 60);
   });
 
   it("returns null for an unknown client_id", async () => {
@@ -375,5 +380,92 @@ describe("repository: dynamically-registered CLIENT# item (RFC 7591, permanent)"
     // The first registration still persists unchanged.
     const got = await r.getClient("mcp_dup");
     expect(got?.clientId).toBe("mcp_dup");
+  });
+});
+
+describe("repository: registered client expiry and renewal", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const sec = (ms: number) => Math.floor(ms / 1000);
+  const base = {
+    SK: "A" as const,
+    clientName: null,
+    redirectUris: ["https://app.example.com/cb"],
+    grantTypes: ["authorization_code"],
+    responseTypes: ["code"],
+    tokenEndpointAuthMethod: "none",
+    createdAt: T0,
+  };
+  const client = (id: string) => ({ ...base, PK: `CLIENT#${id}`, clientId: id });
+  const updates = (ddb: FakeDdb) => ddb.sent.filter((c) => c.name === "UpdateCommand");
+
+  it("treats a client past its ttl as unknown", async () => {
+    let now = T0;
+    const { r } = repo(() => now);
+    await r.putClient(client("mcp_a"));
+    now = T0 + 179 * DAY;
+    expect((await r.getClient("mcp_a"))?.clientId).toBe("mcp_a");
+    now = T0 + 181 * DAY;
+    expect(await r.getClient("mcp_a")).toBeNull();
+  });
+
+  it("extends the ttl at most once a day", async () => {
+    let now = T0;
+    const { r, ddb } = repo(() => now);
+    await r.putClient(client("mcp_a"));
+    const renew = async () => {
+      const got = await r.getClient("mcp_a");
+      await r.renewClient("mcp_a", got?.ttl);
+      return (await r.getClient("mcp_a"))?.ttl;
+    };
+
+    // Registered a moment ago: no write.
+    now = T0 + 60_000;
+    expect(await renew()).toBe(sec(T0 + 180 * DAY));
+    expect(updates(ddb)).toHaveLength(0);
+
+    // 23 hours in: still no write, however often it is used.
+    now = T0 + 23 * 60 * 60 * 1000;
+    await renew();
+    await renew();
+    expect(updates(ddb)).toHaveLength(0);
+
+    // 25 hours in: one write, to 180 days from now.
+    now = T0 + 25 * 60 * 60 * 1000;
+    expect(await renew()).toBe(sec(now + 180 * DAY));
+    expect(updates(ddb)).toHaveLength(1);
+
+    // Used again right after: no second write.
+    now += 60_000;
+    await renew();
+    expect(updates(ddb)).toHaveLength(1);
+
+    // A day later: the next one.
+    now += DAY;
+    expect(await renew()).toBe(sec(now + 180 * DAY));
+    expect(updates(ddb)).toHaveLength(2);
+  });
+
+  it("loses a renewal race quietly: the stored ttl stays the newer one", async () => {
+    const now = T0 + 2 * DAY;
+    const { r, ddb } = repo(() => now);
+    await r.putClient(client("mcp_a"));
+    const stale = sec(T0 + 180 * DAY);
+    // Both callers read the old ttl; the second write's condition fails.
+    await r.renewClient("mcp_a", stale);
+    await r.renewClient("mcp_a", stale);
+    expect(updates(ddb)).toHaveLength(2);
+    expect((await r.getClient("mcp_a"))?.ttl).toBe(sec(now + 180 * DAY));
+  });
+
+  it("leaves a registration made before ttls existed alone", async () => {
+    let now = T0;
+    const { r, ddb } = repo(() => now);
+    ddb.store.set("CLIENT#mcp_old\u0000A", { ...client("mcp_old") });
+    now = T0 + 400 * DAY;
+    const got = await r.getClient("mcp_old");
+    expect(got?.clientId).toBe("mcp_old");
+    await r.renewClient("mcp_old", got?.ttl);
+    expect(updates(ddb)).toHaveLength(0);
+    expect((await r.getClient("mcp_old"))?.ttl).toBeUndefined();
   });
 });

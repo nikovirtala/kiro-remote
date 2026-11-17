@@ -33,6 +33,8 @@ interface StoredItem {
  */
 export class FakeDdbClient {
   private readonly items = new Map<string, StoredItem>();
+  /** Test introspection: how many UpdateItem calls were made. */
+  updates = 0;
 
   private key(pk: string, sk: string): string {
     return `${pk}\u0000${sk}`;
@@ -69,6 +71,22 @@ export class FakeDdbClient {
       if (input.ReturnValues === "ALL_OLD") {
         return { Attributes: existing };
       }
+      return {};
+    }
+    if (name === "UpdateCommand") {
+      // Only the ttl renewal of a registered client: SET #ttl = :ttl when the
+      // stored ttl exists and is below :renewBelow.
+      const key = input.Key as { PK: string; SK: string };
+      const k = this.key(key.PK, key.SK);
+      const existing = this.items.get(k);
+      const values = input.ExpressionAttributeValues as Record<string, number>;
+      this.updates += 1;
+      if (!existing || typeof existing.ttl !== "number" || existing.ttl >= values[":renewBelow"]) {
+        const err = new Error("conditional check failed");
+        (err as { name: string }).name = "ConditionalCheckFailedException";
+        throw err;
+      }
+      existing.ttl = values[":ttl"];
       return {};
     }
     throw new Error(`FakeDdbClient: unsupported command ${name}`);
