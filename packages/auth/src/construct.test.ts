@@ -2,7 +2,7 @@
  * CDK assertion test for KiroRemoteAuth. Confirms the construct synthesizes a
  * user pool (self-sign-up off, passwordless passkey-first), a resource server with the three
  * scopes, a public no-secret facade client with the right token lifetimes and
- * the single callback URL, and an optional pre-registered client. Full stack
+ * the single callback URL, and nothing else (no app client per pre-registered client). Full stack
  * assembly + cdk-nag run in FEAT-007; here we only assert the resource graph.
  */
 
@@ -17,9 +17,6 @@ function synth(): Template {
   new KiroRemoteAuth(stack, "Auth", {
     publicBaseUrl: "https://kiro.example.com",
     cognitoDomainPrefix: "kiro-remote-test",
-    preRegisteredClients: [
-      { name: "ClaudeCode", callbackUrls: ["https://claude.ai/api/mcp/auth_callback"] },
-    ],
   });
   return Template.fromStack(stack);
 }
@@ -120,12 +117,10 @@ describe("KiroRemoteAuth", () => {
     });
   });
 
-  test("creates the optional pre-registered client with its own callback URL", () => {
-    const clients = template.findResources("AWS::Cognito::UserPoolClient");
-    const callbackSets = Object.values(clients).map(
-      (c) => (c.Properties as { CallbackURLs?: string[] }).CallbackURLs,
-    );
-    expect(callbackSets).toContainEqual(["https://claude.ai/api/mcp/auth_callback"]);
+  test("creates exactly one app client: the facade client", () => {
+    // Pre-registered clients are a facade-side allow-list; none gets a Cognito
+    // app client (the facade authorizes every client against this one).
+    template.resourceCountIs("AWS::Cognito::UserPoolClient", 1);
   });
 
   test("provisions a default Managed Login v2 branding for the facade client", () => {
@@ -136,8 +131,7 @@ describe("KiroRemoteAuth", () => {
       (b) =>
         (b.Properties as { UseCognitoProvidedValues?: boolean }).UseCognitoProvidedValues === true,
     );
-    // One for the facade client + one for the single pre-registered client.
-    expect(defaults).toHaveLength(2);
+    expect(defaults).toHaveLength(1);
     for (const b of defaults) {
       expect((b.Properties as { UserPoolId?: unknown }).UserPoolId).toBeDefined();
       expect((b.Properties as { ClientId?: unknown }).ClientId).toBeDefined();

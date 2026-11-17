@@ -149,7 +149,7 @@ for the app client; without one the page shows "Login pages unavailable / Please
 contact an administrator" (see
 [deploy.md](./deploy.md#6-find-the-resource-identifiers-youll-need)). Fresh
 deploys get a default branding automatically — the stack provisions it for the
-facade client and every pre-registered client. A pool deployed **before** that
+facade client (the only app client). A pool deployed **before** that
 change needs a one-time manual branding creation:
 
 ```bash

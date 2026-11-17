@@ -185,7 +185,11 @@ export interface KiroRemoteProps {
    */
   kiroCliVersion?: string;
 
-  /** Optional pre-registered public clients passed through to the facade. */
+  /**
+   * Optional pre-registered public clients: a facade-side allow-list (the
+   * logical client id and its exact redirect URIs). No Cognito app client is
+   * created for them.
+   */
   preRegisteredClients?: PreRegisteredClientProps[];
 
   /**
@@ -535,7 +539,6 @@ export class KiroRemote extends Construct {
             }),
           }
         : {}),
-      ...(props.preRegisteredClients ? { preRegisteredClients: props.preRegisteredClients } : {}),
     });
 
     /* ------------------------------- Lambdas ----------------------------- */
@@ -566,12 +569,12 @@ export class KiroRemote extends Construct {
       commonEnv.GITHUB_PR_TRAILER = props.githubPrTrailer ?? "on";
     }
 
-    // Propagate the pre-registered (non-CIMD) clients the auth construct
-    // provisions so the API Lambda's ClientResolver accepts them at
-    // /oauth/authorize. The `client_id` a pre-registered client presents is its
-    // logical `name` (the authorize flow always uses the single facade client
-    // for the upstream Cognito call), and its allowed redirect URIs are the
-    // prop's `callbackUrls`. Serialized as JSON so the shape is self-describing
+    // Propagate the pre-registered (non-CIMD) clients so the API Lambda's
+    // ClientResolver accepts them at /oauth/authorize. They are an allow-list
+    // only: no Cognito app client exists for them. The `client_id` a
+    // pre-registered client presents is its logical `name` (the authorize flow
+    // always uses the single facade client for the upstream Cognito call), and
+    // its allowed redirect URIs are the prop's `callbackUrls`. Serialized as JSON so the shape is self-describing
     // and matches the resolver's PreRegisteredClient entry. Omitted entirely
     // when there are no pre-registered clients so the env stays clean.
     if (props.preRegisteredClients && props.preRegisteredClients.length > 0) {

@@ -351,6 +351,31 @@ describe("KiroRemote", () => {
     });
   });
 
+  test("a pre-registered client gets no Cognito app client, only the facade allow-list", () => {
+    // One app client (the facade client) and one branding, even though a
+    // pre-registered client is configured; its callback URL is not on any app client.
+    template.resourceCountIs("AWS::Cognito::UserPoolClient", 1);
+    template.resourceCountIs("AWS::Cognito::ManagedLoginBranding", 1);
+    const clients = Object.values(template.findResources("AWS::Cognito::UserPoolClient"));
+    expect(JSON.stringify(clients)).not.toContain("claude.ai/api/mcp/auth_callback");
+    // The facade still accepts it: logical id + exact redirect URIs in the API env.
+    const fns = Object.values(template.findResources("AWS::Lambda::Function"));
+    const env = fns
+      .map(
+        (f) =>
+          (f.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment
+            ?.Variables?.PREREGISTERED_CLIENTS,
+      )
+      .find((v) => typeof v === "string");
+    expect(JSON.parse(env as string)).toEqual([
+      {
+        clientId: "ClaudeCode",
+        clientName: "ClaudeCode",
+        redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
+      },
+    ]);
+  });
+
   test("the region flows from stack props (nothing hardcoded)", () => {
     expect(stack.region).toBe("eu-west-1");
     // A different region synthesizes cleanly too.
