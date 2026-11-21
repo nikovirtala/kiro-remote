@@ -1,0 +1,10 @@
+# adr configuration. Every key is optional: https://github.com/nikovirtala/ark/tree/main/packages/adr#config-adrtoml
+[log]
+default_template = "nygard"
+
+[policy]
+# Every write commits; --no-commit only stages.
+auto_commit = true
+
+[commit]
+# subject = "docs(adr): {action} {title}"
