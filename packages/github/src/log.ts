@@ -2,7 +2,7 @@
 
 import { type LogItem, Logger as PowertoolsLogger } from "@aws-lambda-powertools/logger";
 import { MetricUnit, Metrics as PowertoolsMetrics } from "@aws-lambda-powertools/metrics";
-import { redact } from "@nikovirtala/kiro-remote-core";
+import { redact, resourceAttributes } from "@nikovirtala/kiro-remote-core";
 
 const SERVICE_NAME = "kiro-remote-github";
 const METRICS_NAMESPACE = "KiroRemote/GitHub";
@@ -21,7 +21,8 @@ class RedactingLogger extends PowertoolsLogger {
   private readonly write: (line: string) => void;
 
   constructor(write: (line: string) => void) {
-    super({ serviceName: SERVICE_NAME });
+    // The deploy's commit, repository, environment and version on every line (OTEL_RESOURCE_ATTRIBUTES).
+    super({ serviceName: SERVICE_NAME, persistentKeys: resourceAttributes() });
     this.write = write;
   }
 

@@ -17,6 +17,7 @@
     "deploy": "cdk deploy --app \"node bin/app.ts\""
   },
   "dependencies": {
+    "@nikovirtala/deployment": "^0.1.0",
     "@nikovirtala/kiro-remote-api": "workspace:*",
     "@nikovirtala/kiro-remote-auth": "workspace:*",
     "@nikovirtala/kiro-remote-core": "workspace:*",

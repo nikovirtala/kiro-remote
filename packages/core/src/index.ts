@@ -27,6 +27,7 @@ export * from "./gateway/index.ts";
 export * from "./gateway/jsonrpc.ts";
 export * from "./github/pr-ref.ts";
 export * from "./github/queue.ts";
+export * from "./provenance.ts";
 export * from "./redact.ts";
 export * from "./repo/keys.ts";
 export * from "./repo/repository.ts";

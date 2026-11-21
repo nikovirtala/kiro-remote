@@ -11,6 +11,7 @@
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { provenanceFromContext } from "@nikovirtala/deployment/cdk";
 import { App } from "aws-cdk-lib";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { DockerImageCode } from "aws-cdk-lib/aws-lambda";
@@ -177,6 +178,10 @@ const github = githubAppSecretArn
     }
   : {};
 
+// The deploy pipeline (@nikovirtala/deployment) passes the commit, the repository URL and the
+// environment as context; a synth or a deploy.sh deploy without them stamps nothing.
+const provenance = provenanceFromContext(app.node);
+
 new KiroRemoteStack(app, "KiroRemoteStack", {
   ...(env ? { env } : {}),
   kiroRemote: {
@@ -190,6 +195,7 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     ...(lambdaImage ? { lambdaImage } : {}),
     ...(apiLambdaCode ? { apiLambdaCode } : {}),
     ...(customDomain ? { customDomain } : {}),
+    ...(provenance ? { provenance } : {}),
     ...github,
   },
 });

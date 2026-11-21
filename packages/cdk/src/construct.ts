@@ -29,6 +29,7 @@
  * literals and const objects only.
  */
 
+import { otelResourceAttributes } from "@nikovirtala/deployment/cdk";
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
 import { Annotations, Duration, RemovalPolicy, Validations } from "aws-cdk-lib";
 import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
@@ -327,6 +328,14 @@ export interface KiroRemoteProps {
 
   /** Bundled code for the GitHub consumer function. Defaults to an inline placeholder (synth only). */
   githubConsumerCode?: Code;
+  /**
+   * The OpenTelemetry resource attributes of this deploy (the commit, the repository URL, the
+   * environment, the service version), from `provenanceFromContext` of `@nikovirtala/deployment/cdk`.
+   * Every function gets them as `OTEL_RESOURCE_ATTRIBUTES`, and the loggers put them on every log
+   * line. Omitted (a synth without the deploy pipeline's context): nothing is stamped, so the
+   * template does not change from commit to commit.
+   */
+  provenance?: Readonly<Record<string, string>>;
 }
 
 /** A tiny inline Lambda placeholder so synth needs no bundling. Override in prod. */
@@ -1108,5 +1117,22 @@ export class KiroRemote extends Construct {
         ],
       });
     }
+
+    if (props.provenance) stampProvenance(this, props.provenance);
+  }
+}
+
+/**
+ * Stamps every function under `scope` with the deploy's OpenTelemetry resource attributes. The
+ * value changes with every commit, so every function's configuration is updated on every deploy:
+ * that is what lets a trace or a log line say which commit produced it.
+ */
+export function stampProvenance(
+  scope: IConstruct,
+  attributes: Readonly<Record<string, string>>,
+): void {
+  const value = otelResourceAttributes(attributes);
+  for (const c of scope.node.findAll()) {
+    if (c instanceof LambdaFunction) c.addEnvironment("OTEL_RESOURCE_ATTRIBUTES", value);
   }
 }
