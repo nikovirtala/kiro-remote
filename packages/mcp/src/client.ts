@@ -23,7 +23,9 @@ import type {
   ClientSession,
   ClientTurn,
   KiroRemoteClient,
+  WriteOptions,
 } from "@nikovirtala/kiro-remote-api";
+import { fingerprintRequest, withIdempotentResult } from "@nikovirtala/kiro-remote-api";
 import {
   capabilities as deriveCapabilities,
   type Principal,
@@ -76,6 +78,31 @@ export class InProcessClient implements KiroRemoteClient {
     this.kiroCliVersionFn = deps.kiroCliVersion;
   }
 
+  /**
+   * Run a state-changing call. Without a key it just runs; with one it goes
+   * through the same withIdempotency the REST routes use, scoped to the
+   * caller's sub and fingerprinted by (in-process, operation, input).
+   */
+  private async write<T>(
+    principal: Principal,
+    opts: WriteOptions | undefined,
+    operation: string,
+    input: unknown,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const key = opts?.idempotencyKey;
+    if (key === undefined) {
+      return fn();
+    }
+    return withIdempotentResult(
+      this.repo,
+      principal.sub,
+      key,
+      fingerprintRequest("MCP", operation, input),
+      fn,
+    );
+  }
+
   async capabilities(principal: Principal): Promise<ClientCapabilities> {
     const caps = await this.repo.getCaps();
     const normalized = caps ? deriveCapabilities(caps.initializeResult) : null;
@@ -113,17 +140,23 @@ export class InProcessClient implements KiroRemoteClient {
       model?: string;
       effort?: string;
     },
+    opts?: WriteOptions,
   ): Promise<{ sessionId: string; turnId: string | null }> {
-    const view = await svcLaunch(this.service, principal, args);
-    return { sessionId: view.id, turnId: view.activeTurnId };
+    return this.write(principal, opts, "launchSession", args, async () => {
+      const view = await svcLaunch(this.service, principal, args);
+      return { sessionId: view.id, turnId: view.activeTurnId };
+    });
   }
 
   async adoptSession(
     principal: Principal,
     args: { kiroSessionId: string },
+    opts?: WriteOptions,
   ): Promise<{ sessionId: string }> {
-    const view = await svcAdopt(this.service, principal, args);
-    return { sessionId: view.id };
+    return this.write(principal, opts, "adoptSession", args, async () => {
+      const view = await svcAdopt(this.service, principal, args);
+      return { sessionId: view.id };
+    });
   }
 
   async listSessions(
@@ -141,16 +174,25 @@ export class InProcessClient implements KiroRemoteClient {
     return (await svcGetSession(this.service, principal, sessionId)) as ClientSession;
   }
 
-  async deleteSession(principal: Principal, sessionId: string): Promise<void> {
-    await svcDelete(this.service, principal, sessionId);
+  async deleteSession(principal: Principal, sessionId: string, opts?: WriteOptions): Promise<void> {
+    await this.write(principal, opts, "deleteSession", { sessionId }, () =>
+      svcDelete(this.service, principal, sessionId),
+    );
   }
 
   async createTurn(
     principal: Principal,
     sessionId: string,
     args: { prompt: string; whenBusy: "steer" | "queue" | "reject" },
+    opts?: WriteOptions,
   ): Promise<ClientTurn> {
-    return (await svcSendPrompt(this.service, principal, sessionId, args)) as ClientTurn;
+    return this.write(
+      principal,
+      opts,
+      "createTurn",
+      { sessionId, ...args },
+      async () => (await svcSendPrompt(this.service, principal, sessionId, args)) as ClientTurn,
+    );
   }
 
   async getEvents(
@@ -184,8 +226,10 @@ export class InProcessClient implements KiroRemoteClient {
     };
   }
 
-  async cancelTurn(principal: Principal, sessionId: string): Promise<void> {
-    await svcCancel(this.service, principal, sessionId);
+  async cancelTurn(principal: Principal, sessionId: string, opts?: WriteOptions): Promise<void> {
+    await this.write(principal, opts, "cancelTurn", { sessionId }, () =>
+      svcCancel(this.service, principal, sessionId),
+    );
   }
 
   async answerPermission(
@@ -193,42 +237,58 @@ export class InProcessClient implements KiroRemoteClient {
     sessionId: string,
     requestId: string,
     args: { optionId: string; consent?: Record<string, unknown> },
+    opts?: WriteOptions,
   ): Promise<void> {
-    await svcAnswer(this.service, principal, sessionId, requestId, {
-      optionId: args.optionId,
-      ...(args.consent
-        ? {
-            consent: args.consent as {
-              scope: string;
-              resource: string;
-              workspaceRoot: string;
-            },
-          }
-        : {}),
-    });
+    await this.write(principal, opts, "answerPermission", { sessionId, requestId, ...args }, () =>
+      svcAnswer(this.service, principal, sessionId, requestId, {
+        optionId: args.optionId,
+        ...(args.consent
+          ? {
+              consent: args.consent as {
+                scope: string;
+                resource: string;
+                workspaceRoot: string;
+              },
+            }
+          : {}),
+      }),
+    );
   }
 
   async setConfig(
     principal: Principal,
     sessionId: string,
     args: { model?: string; effort?: string; mode?: string },
+    opts?: WriteOptions,
   ): Promise<void> {
-    await svcSetConfig(this.service, principal, sessionId, args);
+    await this.write(principal, opts, "setConfig", { sessionId, ...args }, () =>
+      svcSetConfig(this.service, principal, sessionId, args),
+    );
   }
 
   async linkPullRequest(
     principal: Principal,
     sessionId: string,
     args: { pr: string },
+    opts?: WriteOptions,
   ): Promise<ClientLink> {
-    return (await svcLink(this.service, principal, sessionId, args.pr)).link;
+    return this.write(
+      principal,
+      opts,
+      "linkPullRequest",
+      { sessionId, ...args },
+      async () => (await svcLink(this.service, principal, sessionId, args.pr)).link,
+    );
   }
 
   async unlinkPullRequest(
     principal: Principal,
     sessionId: string,
     args: { pr: string },
+    opts?: WriteOptions,
   ): Promise<void> {
-    await svcUnlink(this.service, principal, sessionId, args.pr);
+    await this.write(principal, opts, "unlinkPullRequest", { sessionId, ...args }, () =>
+      svcUnlink(this.service, principal, sessionId, args.pr),
+    );
   }
 }
