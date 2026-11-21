@@ -1,0 +1,17 @@
+envelope: ledger/v1
+kind: decision
+schema: decision/v1
+id: 01M7ZYGPMQ7JHJQQ1CN0CQK8B2
+subject: 2n47hfqw
+type: proposed
+at: 2026-11-21T20:59:40Z
+actor:
+  kind: agent
+  name: kiro
+  email: null
+  agent: kiro
+  on_behalf_of: niko.virtala@hey.com
+data:
+  title: Deploy kiro-remote from main through the deployment pipeline
+  template: nygard
+  template_version: 1
