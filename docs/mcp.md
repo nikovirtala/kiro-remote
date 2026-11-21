@@ -210,6 +210,32 @@ Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 | 15  | `kiro_cancel_turn`         | DESTRUCTIVE | Cancel the active turn.                                                                                           |
 | 16  | `kiro_delete_session`      | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                               |
 
+### Retrying safely: `idempotencyKey`
+
+Every tool that changes something (`kiro_launch_session`, `kiro_adopt_session`,
+`kiro_send_prompt`, `kiro_answer_permission`, `kiro_set_config`,
+`kiro_link_pull_request`, `kiro_unlink_pull_request`, `kiro_cancel_turn`,
+`kiro_delete_session`) takes an optional `idempotencyKey`: 1 to 128 characters
+from `A-Z a-z 0-9 . _ ~ : -`. Send the same key on every retry of one call and
+it runs at most once in 24 hours. A replay returns the first call's result and
+enqueues nothing. The key is scoped to your sub, and read-only tools have none.
+
+- **Same key, same input:** the stored result of the first call.
+- **Same key, different input** (another tool, session or argument): a tool
+  error, `this idempotency key was already used for a different request`. Use a
+  new key for a new request.
+- **A failed call is not stored**, so retrying it with the same key runs it again.
+- **No key:** nothing changes. The stdio CLI still sends a fresh
+  `Idempotency-Key` header on writes that always had one, so only a key you
+  choose makes a retry safe.
+
+Both transports share one implementation with the REST API
+([`withIdempotency`](../packages/api/src/idempotency.ts)): the stdio CLI sends the
+key as the `Idempotency-Key` header, and `/mcp` wraps its direct service call.
+A key stored over one transport is not meant to be replayed over the other: the
+stored result has that transport's shape, so the fingerprint differs and the
+replay is refused.
+
 **On cloud sessions.** Every session the bridge launches is a Kiro cloud
 session, and some tools have no effect there:
 

@@ -82,11 +82,38 @@ describe("tool catalog", () => {
 
 describe("schema parity with the core zod objects", () => {
   it("directly-mapped tools advertise exactly the core object's generated schema", () => {
-    const direct = ["kiro_launch_session", "kiro_list_sessions", "kiro_adopt_session"];
     const entries = Object.fromEntries(toolListEntries().map((e) => [e.name, e.inputSchema]));
-    for (const name of direct) {
-      const core = CORE_SCHEMA_FOR_TOOL[name];
-      expect(entries[name], name).toEqual(toMcpInputSchema(core));
+    expect(entries.kiro_list_sessions).toEqual(
+      toMcpInputSchema(CORE_SCHEMA_FOR_TOOL.kiro_list_sessions),
+    );
+    // Launch and adopt are the core object plus the optional idempotencyKey.
+    for (const name of ["kiro_launch_session", "kiro_adopt_session"]) {
+      const core = toMcpInputSchema(CORE_SCHEMA_FOR_TOOL[name]);
+      const { idempotencyKey, ...rest } = (entries[name].properties ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(idempotencyKey, name).toBeDefined();
+      expect(rest, name).toEqual(core.properties);
+      expect(entries[name].required, name).toEqual(core.required);
+    }
+  });
+
+  it("every state-changing tool has an optional, bounded idempotencyKey; no read tool does", () => {
+    for (const entry of toolListEntries()) {
+      const props = (entry.inputSchema.properties ?? {}) as Record<string, Record<string, unknown>>;
+      if (READ_TOOLS.has(entry.name)) {
+        expect(props.idempotencyKey, entry.name).toBeUndefined();
+        continue;
+      }
+      expect(props.idempotencyKey, entry.name).toMatchObject({
+        type: "string",
+        minLength: 1,
+        maxLength: 128,
+      });
+      expect(props.idempotencyKey.pattern, entry.name).toBeDefined();
+      expect(entry.inputSchema.required ?? [], entry.name).not.toContain("idempotencyKey");
+      expect(entry.description, entry.name).toContain("idempotencyKey");
     }
   });
 

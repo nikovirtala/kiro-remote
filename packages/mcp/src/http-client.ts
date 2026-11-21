@@ -17,6 +17,7 @@ import type {
   ClientSession,
   ClientTurn,
   KiroRemoteClient,
+  WriteOptions,
 } from "@nikovirtala/kiro-remote-api";
 import { type Principal, parsePrRef } from "@nikovirtala/kiro-remote-core";
 
@@ -48,16 +49,31 @@ export interface HttpClientDeps {
   newIdempotencyKey?: () => string;
 }
 
+/** `: <detail>` from an RFC 9457 problem body, so a tool error says why (else empty). */
+function problemDetail(body: string): string {
+  try {
+    const detail = (JSON.parse(body) as { detail?: unknown }).detail;
+    return typeof detail === "string" && detail !== "" ? `: ${detail}` : "";
+  } catch {
+    return "";
+  }
+}
+
 /** Raised when the REST API returns a non-2xx response. */
 export class HttpClientError extends Error {
   readonly status: number;
   readonly body: string;
   constructor(status: number, body: string) {
-    super(`REST API error ${status}`);
+    super(`REST API error ${status}${problemDetail(body)}`);
     this.name = "HttpClientError";
     this.status = status;
     this.body = body;
   }
+}
+
+/** The caller's idempotency key as a request option (none when unset). */
+function key(write: WriteOptions | undefined): { idempotencyKey?: string } {
+  return write?.idempotencyKey !== undefined ? { idempotencyKey: write.idempotencyKey } : {};
 }
 
 function randomId(): string {
@@ -81,7 +97,7 @@ export class HttpClient implements KiroRemoteClient {
   private async request(
     method: string,
     path: string,
-    opts: { body?: unknown; idempotent?: boolean } = {},
+    opts: { body?: unknown; idempotent?: boolean; idempotencyKey?: string } = {},
   ): Promise<unknown> {
     const token = await this.tokens.accessToken();
     const headers: Record<string, string> = {
@@ -91,7 +107,11 @@ export class HttpClient implements KiroRemoteClient {
     if (opts.body !== undefined) {
       headers["content-type"] = "application/json";
     }
-    if (opts.idempotent) {
+    // A caller-supplied key is sent as is, so a retry is deduplicated by the
+    // server. Otherwise writes that always carried a key keep a fresh one.
+    if (opts.idempotencyKey !== undefined) {
+      headers["idempotency-key"] = opts.idempotencyKey;
+    } else if (opts.idempotent) {
       headers["idempotency-key"] = this.newKey();
     }
     const res = await this.fetchFn(`${this.base}${path}`, {
@@ -136,8 +156,13 @@ export class HttpClient implements KiroRemoteClient {
       model?: string;
       effort?: string;
     },
+    write?: WriteOptions,
   ): Promise<{ sessionId: string; turnId: string | null }> {
-    return (await this.request("POST", "/sessions", { body: args, idempotent: true })) as {
+    return (await this.request("POST", "/sessions", {
+      body: args,
+      idempotent: true,
+      ...key(write),
+    })) as {
       sessionId: string;
       turnId: string | null;
     };
@@ -146,10 +171,12 @@ export class HttpClient implements KiroRemoteClient {
   async adoptSession(
     _principal: Principal,
     args: { kiroSessionId: string },
+    write?: WriteOptions,
   ): Promise<{ sessionId: string }> {
     const res = (await this.request("POST", "/sessions/adopt", {
       body: args,
       idempotent: true,
+      ...key(write),
     })) as { id?: string; sessionId?: string };
     return { sessionId: res.sessionId ?? res.id ?? "" };
   }
@@ -176,9 +203,14 @@ export class HttpClient implements KiroRemoteClient {
     )) as ClientSession;
   }
 
-  async deleteSession(_principal: Principal, sessionId: string): Promise<void> {
+  async deleteSession(
+    _principal: Principal,
+    sessionId: string,
+    write?: WriteOptions,
+  ): Promise<void> {
     await this.request("DELETE", `/sessions/${encodeURIComponent(sessionId)}`, {
       idempotent: true,
+      ...key(write),
     });
   }
 
@@ -186,10 +218,12 @@ export class HttpClient implements KiroRemoteClient {
     _principal: Principal,
     sessionId: string,
     args: { prompt: string; whenBusy: "steer" | "queue" | "reject" },
+    write?: WriteOptions,
   ): Promise<ClientTurn> {
     return (await this.request("POST", `/sessions/${encodeURIComponent(sessionId)}/turns`, {
       body: args,
       idempotent: true,
+      ...key(write),
     })) as ClientTurn;
   }
 
@@ -221,10 +255,11 @@ export class HttpClient implements KiroRemoteClient {
     )) as { permissions: ClientPermission[] };
   }
 
-  async cancelTurn(_principal: Principal, sessionId: string): Promise<void> {
+  async cancelTurn(_principal: Principal, sessionId: string, write?: WriteOptions): Promise<void> {
     await this.request("POST", `/sessions/${encodeURIComponent(sessionId)}/cancel`, {
       body: {},
       idempotent: true,
+      ...key(write),
     });
   }
 
@@ -233,11 +268,12 @@ export class HttpClient implements KiroRemoteClient {
     sessionId: string,
     requestId: string,
     args: { optionId: string; consent?: Record<string, unknown> },
+    write?: WriteOptions,
   ): Promise<void> {
     await this.request(
       "POST",
       `/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
-      { body: args, idempotent: true },
+      { body: args, idempotent: true, ...key(write) },
     );
   }
 
@@ -245,9 +281,12 @@ export class HttpClient implements KiroRemoteClient {
     _principal: Principal,
     sessionId: string,
     args: { model?: string; effort?: string; mode?: string },
+    write?: WriteOptions,
   ): Promise<void> {
+    // No fresh key: PATCH config never carried one, only a caller's key does.
     await this.request("PATCH", `/sessions/${encodeURIComponent(sessionId)}/config`, {
       body: args,
+      ...key(write),
     });
   }
 
@@ -255,10 +294,12 @@ export class HttpClient implements KiroRemoteClient {
     _principal: Principal,
     sessionId: string,
     args: { pr: string },
+    write?: WriteOptions,
   ): Promise<ClientLink> {
     return (await this.request("POST", `/sessions/${encodeURIComponent(sessionId)}/links`, {
       body: args,
       idempotent: true,
+      ...key(write),
     })) as ClientLink;
   }
 
@@ -266,6 +307,7 @@ export class HttpClient implements KiroRemoteClient {
     _principal: Principal,
     sessionId: string,
     args: { pr: string },
+    write?: WriteOptions,
   ): Promise<void> {
     const ref = parsePrRef(args.pr);
     if (!ref) {
@@ -274,6 +316,7 @@ export class HttpClient implements KiroRemoteClient {
     await this.request(
       "DELETE",
       `/sessions/${encodeURIComponent(sessionId)}/links/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`,
+      key(write),
     );
   }
 }

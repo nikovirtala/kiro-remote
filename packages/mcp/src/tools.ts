@@ -18,6 +18,7 @@
  * assert no field ever diverges from core.
  */
 
+import type { WriteOptions } from "@nikovirtala/kiro-remote-api";
 import {
   type Action,
   AdoptSessionSchema,
@@ -26,6 +27,7 @@ import {
   ConfigPatchSchema,
   CreateTurnSchema,
   EventsQuerySchema,
+  IdempotencyKeyFieldSchema,
   type JsonSchema,
   LaunchSessionSchema,
   LinkPullRequestSchema,
@@ -70,11 +72,28 @@ export interface ToolDef {
 /** A session id, shared by the session-targeting tools. */
 const SessionIdField = { sessionId: z.string().min(1) };
 
+/** The optional key every state-changing tool accepts. */
+const IdempotencyField = { idempotencyKey: IdempotencyKeyFieldSchema.optional() };
+
+/**
+ * Appended to every state-changing tool's description so agents know to use the
+ * key. One sentence; the field's own description says the same.
+ */
+const IDEMPOTENCY_SENTENCE =
+  " Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.";
+
 /** Tools that take no arguments share this empty-object schema. */
 const EmptyInputSchema = z.object({});
 
-/** kiro_get_session / kiro_cancel_turn / kiro_delete_session. */
+/** kiro_get_session. */
 const SessionIdSchema = z.object({ ...SessionIdField });
+
+/** kiro_cancel_turn / kiro_delete_session. */
+const SessionIdWriteSchema = SessionIdSchema.extend(IdempotencyField);
+
+/** kiro_launch_session / kiro_adopt_session: the core body plus the key. */
+const LaunchToolSchema = LaunchSessionSchema.extend(IdempotencyField);
+const AdoptToolSchema = AdoptSessionSchema.extend(IdempotencyField);
 
 /** kiro_get_transcript. */
 const GetTranscriptSchema = z.object({ ...SessionIdField });
@@ -83,25 +102,34 @@ const GetTranscriptSchema = z.object({ ...SessionIdField });
 const WaitForEventsSchema = EventsQuerySchema.omit({ wait: true }).extend(SessionIdField);
 
 /** kiro_send_prompt: the CreateTurn body plus the session. */
-const SendPromptSchema = CreateTurnSchema.extend(SessionIdField);
+const SendPromptSchema = CreateTurnSchema.extend({ ...SessionIdField, ...IdempotencyField });
 
 /** kiro_answer_permission: the AnswerPermission body plus the session + requestId. */
 const AnswerPermissionToolSchema = AnswerPermissionSchema.extend({
   ...SessionIdField,
   requestId: z.string().min(1),
+  ...IdempotencyField,
 });
 
 /** kiro_set_config: the ConfigPatch body plus the session. The core refine is kept. */
-const SetConfigToolSchema = ConfigPatchSchema.safeExtend(SessionIdField);
+const SetConfigToolSchema = ConfigPatchSchema.safeExtend({
+  ...SessionIdField,
+  ...IdempotencyField,
+});
 
 /** kiro_link_pull_request / kiro_unlink_pull_request: the link body plus the session. */
-const LinkToolSchema = LinkPullRequestSchema.extend(SessionIdField);
+const LinkToolSchema = LinkPullRequestSchema.extend({ ...SessionIdField, ...IdempotencyField });
 
 /** kiro_list_permissions. */
 const ListPermissionsSchema = z.object({
   ...SessionIdField,
   status: z.string().min(1).optional(),
 });
+
+/** The client's write options for a tool's optional key (none when absent). */
+function writeOptions(idempotencyKey: string | undefined): WriteOptions {
+  return idempotencyKey !== undefined ? { idempotencyKey } : {};
+}
 
 /**
  * The core zod object each tool's body derives from, for the parity test.
@@ -152,14 +180,13 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "kiro_launch_session",
-    description:
-      "Launch a new Kiro cloud session against one or more repos with an initial prompt.",
+    description: `Launch a new Kiro cloud session against one or more repos with an initial prompt.${IDEMPOTENCY_SENTENCE}`,
     action: "launch",
-    inputZod: LaunchSessionSchema,
+    inputZod: LaunchToolSchema,
     annotations: { title: "Launch Session", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
-      const input = LaunchSessionSchema.parse(args);
-      return await client.launchSession(principal, input);
+      const { idempotencyKey, ...input } = LaunchToolSchema.parse(args);
+      return await client.launchSession(principal, input, writeOptions(idempotencyKey));
     },
   },
   {
@@ -180,13 +207,13 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "kiro_adopt_session",
-    description: "Adopt an existing Kiro cloud session (started elsewhere) into the control plane.",
+    description: `Adopt an existing Kiro cloud session (started elsewhere) into the control plane.${IDEMPOTENCY_SENTENCE}`,
     action: "launch",
-    inputZod: AdoptSessionSchema,
+    inputZod: AdoptToolSchema,
     annotations: { title: "Adopt Session", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
-      const input = AdoptSessionSchema.parse(args);
-      return await client.adoptSession(principal, input);
+      const { idempotencyKey, ...input } = AdoptToolSchema.parse(args);
+      return await client.adoptSession(principal, input, writeOptions(idempotencyKey));
     },
   },
   {
@@ -202,17 +229,18 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "kiro_send_prompt",
-    description:
-      "Send a prompt to a session, steering, queueing, or rejecting it when the session is busy.",
+    description: `Send a prompt to a session, steering, queueing, or rejecting it when the session is busy.${IDEMPOTENCY_SENTENCE}`,
     action: "prompt",
     inputZod: SendPromptSchema,
     annotations: { title: "Send Prompt", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
       const input = SendPromptSchema.parse(args);
-      const turn = await client.createTurn(principal, input.sessionId, {
-        prompt: input.prompt,
-        whenBusy: input.whenBusy,
-      });
+      const turn = await client.createTurn(
+        principal,
+        input.sessionId,
+        { prompt: input.prompt, whenBusy: input.whenBusy },
+        writeOptions(input.idempotencyKey),
+      );
       return { turn };
     },
   },
@@ -262,67 +290,86 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "kiro_answer_permission",
-    description:
-      "Answer a pending permission request by returning one of the agent-supplied optionIds (plus optional persistent consent).",
+    description: `Answer a pending permission request by returning one of the agent-supplied optionIds (plus optional persistent consent).${IDEMPOTENCY_SENTENCE}`,
     action: "answerPermission",
     inputZod: AnswerPermissionToolSchema,
     annotations: { title: "Answer Permission", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
       const input = AnswerPermissionToolSchema.parse(args);
-      await client.answerPermission(principal, input.sessionId, input.requestId, {
-        optionId: input.optionId,
-        ...(input.consent ? { consent: input.consent } : {}),
-      });
+      await client.answerPermission(
+        principal,
+        input.sessionId,
+        input.requestId,
+        {
+          optionId: input.optionId,
+          ...(input.consent ? { consent: input.consent } : {}),
+        },
+        writeOptions(input.idempotencyKey),
+      );
       return { requestId: input.requestId, status: "answered" };
     },
   },
   {
     name: "kiro_set_config",
-    description: "Change a session's model, effort level, and/or mode.",
+    description: `Change a session's model, effort level, and/or mode.${IDEMPOTENCY_SENTENCE}`,
     action: "config",
     inputZod: SetConfigToolSchema,
     annotations: { title: "Set Config", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
       const input = SetConfigToolSchema.parse(args);
-      await client.setConfig(principal, input.sessionId, {
-        ...(input.model ? { model: input.model } : {}),
-        ...(input.effort ? { effort: input.effort } : {}),
-        ...(input.mode ? { mode: input.mode } : {}),
-      });
+      await client.setConfig(
+        principal,
+        input.sessionId,
+        {
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.effort ? { effort: input.effort } : {}),
+          ...(input.mode ? { mode: input.mode } : {}),
+        },
+        writeOptions(input.idempotencyKey),
+      );
       return { sessionId: input.sessionId, status: "configuring" };
     },
   },
   {
     name: "kiro_link_pull_request",
-    description:
-      "Link a pull request (owner/repo#n or a github.com URL) to a session so GitHub activity on it wakes the session. The PR's repo must be one of the session's repos; a PR links to at most one session.",
+    description: `Link a pull request (owner/repo#n or a github.com URL) to a session so GitHub activity on it wakes the session. The PR's repo must be one of the session's repos; a PR links to at most one session.${IDEMPOTENCY_SENTENCE}`,
     action: "link",
     inputZod: LinkToolSchema,
     annotations: { title: "Link Pull Request", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
       const input = LinkToolSchema.parse(args);
-      const link = await client.linkPullRequest(principal, input.sessionId, { pr: input.pr });
+      const link = await client.linkPullRequest(
+        principal,
+        input.sessionId,
+        { pr: input.pr },
+        writeOptions(input.idempotencyKey),
+      );
       return { sessionId: input.sessionId, link };
     },
   },
   {
     name: "kiro_unlink_pull_request",
-    description: "Remove a pull request link from a session.",
+    description: `Remove a pull request link from a session.${IDEMPOTENCY_SENTENCE}`,
     action: "link",
     inputZod: LinkToolSchema,
     // Not destructive: a link is reversible (link it again).
     annotations: { title: "Unlink Pull Request", readOnlyHint: false, openWorldHint: true },
     async run(client, principal, args) {
       const input = LinkToolSchema.parse(args);
-      await client.unlinkPullRequest(principal, input.sessionId, { pr: input.pr });
+      await client.unlinkPullRequest(
+        principal,
+        input.sessionId,
+        { pr: input.pr },
+        writeOptions(input.idempotencyKey),
+      );
       return { sessionId: input.sessionId, pr: input.pr, status: "unlinked" };
     },
   },
   {
     name: "kiro_cancel_turn",
-    description: "Cancel the active turn on a session.",
+    description: `Cancel the active turn on a session.${IDEMPOTENCY_SENTENCE}`,
     action: "cancel",
-    inputZod: SessionIdSchema,
+    inputZod: SessionIdWriteSchema,
     annotations: {
       title: "Cancel Turn",
       readOnlyHint: false,
@@ -330,16 +377,16 @@ export const TOOL_DEFS: readonly ToolDef[] = [
       openWorldHint: true,
     },
     async run(client, principal, args) {
-      const { sessionId } = SessionIdSchema.parse(args);
-      await client.cancelTurn(principal, sessionId);
+      const { sessionId, idempotencyKey } = SessionIdWriteSchema.parse(args);
+      await client.cancelTurn(principal, sessionId, writeOptions(idempotencyKey));
       return { sessionId, status: "cancelling" };
     },
   },
   {
     name: "kiro_delete_session",
-    description: "Permanently delete a session and its cloud sandbox.",
+    description: `Permanently delete a session and its cloud sandbox.${IDEMPOTENCY_SENTENCE}`,
     action: "delete",
-    inputZod: SessionIdSchema,
+    inputZod: SessionIdWriteSchema,
     annotations: {
       title: "Delete Session",
       readOnlyHint: false,
@@ -347,8 +394,8 @@ export const TOOL_DEFS: readonly ToolDef[] = [
       openWorldHint: true,
     },
     async run(client, principal, args) {
-      const { sessionId } = SessionIdSchema.parse(args);
-      await client.deleteSession(principal, sessionId);
+      const { sessionId, idempotencyKey } = SessionIdWriteSchema.parse(args);
+      await client.deleteSession(principal, sessionId, writeOptions(idempotencyKey));
       return { sessionId, status: "deleting" };
     },
   },
