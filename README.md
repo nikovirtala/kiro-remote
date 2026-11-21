@@ -46,6 +46,7 @@ Operator and user guides live under [`docs/`](./docs/):
 
 - [Overview and what to do next](./docs/README.md)
 - [Deploying the control plane](./docs/deploy.md)
+- [The deploy pipeline](./docs/pipeline.md) (how `main` deploys itself: smoke checks, deployment tasks, rollback and freeze)
 - [Running the tests](./docs/testing.md)
 - [Registering a user](./docs/users.md)
 - [Trying the REST API](./docs/rest-api.md)

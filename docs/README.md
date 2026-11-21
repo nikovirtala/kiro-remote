@@ -87,7 +87,8 @@ work through the guides in this order:
 1. **[Deploy the control plane](./deploy.md)** — install the toolchain, supply
    your `KIRO_API_KEY`, and `cdk deploy` the stack into your AWS account. This is
    the prerequisite for everything else; the REST API and MCP server only exist
-   once the stack is deployed.
+   once the stack is deployed. The maintainer's deployment then deploys itself
+   from `main` through the **[deploy pipeline](./pipeline.md)**.
 2. **[Register a user](./users.md)** — a user **is** required. Sign-up is operator
    driven (there is no public signup): you invite yourself with
    `scripts/invite-user.sh`, bootstrap a passkey from the emailed code, and sign
