@@ -1,0 +1,22 @@
+{
+  "name": "@nikovirtala/kiro-remote-pipeline",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The deploy pipeline of kiro-remote (its own CDK app), its smoke checks and its policy simulation, on @nikovirtala/deployment.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "synth": "cdk synth --quiet",
+    "simulate": "node scripts/simulate-pipeline-policy.ts"
+  },
+  "dependencies": {
+    "@nikovirtala/deployment": "^0.1.0",
+    "aws-cdk-lib": "^2.277.0",
+    "constructs": "^10.8.1"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1149.0"
+  }
+}

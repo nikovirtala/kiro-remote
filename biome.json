@@ -16,7 +16,9 @@
       "!.agents",
       "!.mise-data",
       "!.mise-cache",
-      "!.extralib"
+      "!.extralib",
+      "!docs/adr",
+      "!.claude/skills"
     ]
   },
   "formatter": {

@@ -1,0 +1,175 @@
+# How the deploy pipeline deploys kiro-remote (@nikovirtala/deployment, docs/pipeline.md).
+# Every name the run uses is here; packages/pipeline/src/names.ts holds the same names for the
+# pipeline stack, and packages/pipeline/src/names.test.ts fails when the two disagree.
+
+[project]
+name = "kiro-remote"
+region = "eu-north-1"
+environment = "production"
+repository = "nikovirtala/kiro-remote"
+
+[pipeline]
+name = "kiro-remote-deploy"
+
+[hints]
+unfreeze = "./scripts/pipeline.sh unfreeze"
+settings = "./scripts/pipeline.sh settings"
+
+[ledger]
+table = "kiro-remote-deployment-ledger"
+
+[freeze]
+parameter = "/kiro-remote/deployment/frozen"
+
+[roles]
+deploy = "kiro-remote-deployment-deploy"
+smoke = "kiro-remote-deployment-smoke"
+task_prefix = "kiro-remote-deployment-task-"
+
+[notify]
+topic = "kiro-remote-deployment"
+
+[provenance]
+github_token_secret = "kiro-remote/deployment/github-token"
+
+[tasks]
+dir = "tasks"
+
+[smoke]
+command = ["node", "packages/pipeline/scripts/smoke.ts"]
+
+# deploy.sh's guards, run as the deploy role before anything is built: the service stack must
+# already exist in the region (a wrong region would create a second one), and the secrets the
+# settings name must exist (names only; their values are never read).
+[[preflight]]
+kind = "stack"
+name = "KiroRemoteStack"
+
+[[preflight]]
+kind = "secret"
+setting = "KIRO_API_KEY_SECRET_ARN"
+
+[[preflight]]
+kind = "secret"
+setting = "GITHUB_APP_SECRET_ARN"
+
+[target]
+kind = "cdk"
+cdk = ["pnpm", "--filter", "@nikovirtala/kiro-remote-cdk", "exec", "cdk"]
+dir = "packages/cdk"
+# cdk.out, as deploy.sh: the bridge image's build context (the repository root) excludes it, and a
+# different directory would be copied into the image's context recursively (BRIDGE_IMAGE_EXCLUDES).
+output = "cdk.out"
+# What deploy.sh's `cdk deploy --all` deploys, with DNS_ZONE_NAME set (its default).
+stacks = ["KiroRemoteDnsStack", "KiroRemoteStack"]
+# KiroRemoteStack has no CloudWatch alarms yet, so there is nothing to pass as a rollback trigger.
+rollback_triggers = []
+monitoring_minutes = 10
+
+# --- The settings: deploy.env's keys, as scripts/deploy.sh maps them to -c flags. ---------------
+# Values live in SSM under the prefix (./scripts/pipeline.sh settings copies them). A setting whose
+# absence would delete something on deploy is REQUIRED, with that effect. SSM cannot hold a blank
+# value, so a setting deploy.sh turns off with a blank (CUSTOM_DOMAIN_NAME=, DNS_ZONE_NAME=) is on
+# in the pipeline whenever its default is.
+[settings]
+prefix = "/kiro-remote/deployment/settings/"
+
+[[settings.keys]]
+key = "KIRO_CLI_VERSION"
+context = "kiroCliVersion"
+required = "Without it the app refuses to synthesize: it pins the kiro-cli version baked into the bridge image."
+pattern = "^\\d+\\.\\d+\\.\\d+$"
+pattern_hint = "a kiro-cli version like 3.1.0"
+
+[[settings.keys]]
+key = "PUBLIC_BASE_URL"
+context = "publicBaseUrl"
+default = "https://kiro-remote.nikovirtala.dev"
+pattern = "^https://[^/]+$"
+pattern_hint = "an https origin without a trailing slash"
+
+[[settings.keys]]
+key = "COGNITO_DOMAIN_PREFIX"
+context = "cognitoDomainPrefix"
+default = "kiro-remote"
+
+[[settings.keys]]
+key = "ALLOWED_REPOS"
+context = "allowedRepos"
+default = "*/*"
+
+[[settings.keys]]
+key = "CUSTOM_DOMAIN_NAME"
+context = "customDomainName"
+default = "kiro-remote.nikovirtala.dev"
+
+[[settings.keys]]
+key = "DNS_ZONE_NAME"
+context = "dnsZoneName"
+default = "kiro-remote.nikovirtala.dev"
+
+[[settings.keys]]
+key = "HOSTED_ZONE_ID"
+context = "hostedZoneId"
+required = "Without it the custom domain switches to manual-CNAME mode: the deploy deletes its alias records and replaces its certificate."
+required_when = ["DNS_ZONE_NAME", "CUSTOM_DOMAIN_NAME"]
+pattern = "^Z[A-Z0-9]{5,31}$"
+pattern_hint = "a hosted zone id like Z0123456789ABCDEFGHIJ, without /hostedzone/"
+
+[[settings.keys]]
+key = "HOSTED_ZONE_NAME"
+context = "hostedZoneName"
+
+[[settings.keys]]
+key = "CERTIFICATE_ARN"
+context = "certificateArn"
+pattern = "^arn:aws:acm:"
+pattern_hint = "an ACM certificate ARN"
+
+[[settings.keys]]
+key = "KIRO_API_KEY_SECRET_ARN"
+context = "kiroApiKeySecretArn"
+required = "Without it the stack creates an empty Kiro API key secret, which is deleted on rollback."
+pattern = "^arn:aws:secretsmanager:eu-north-1:\\d{12}:secret:"
+pattern_hint = "a Secrets Manager secret ARN in eu-north-1"
+
+[[settings.keys]]
+key = "SES_FROM_EMAIL"
+context = "sesFromEmail"
+
+[[settings.keys]]
+key = "SES_VERIFIED_DOMAIN"
+context = "sesVerifiedDomain"
+
+[[settings.keys]]
+key = "GITHUB_APP_SECRET_ARN"
+context = "githubAppSecretArn"
+required = "A deploy without it removes GitHub wake: its webhook route, its queues and its two functions."
+pattern = "^arn:aws:secretsmanager:eu-north-1:\\d{12}:secret:"
+pattern_hint = "a Secrets Manager secret ARN in eu-north-1"
+
+[[settings.keys]]
+key = "GITHUB_TRUSTED_LOGINS"
+context = "githubTrustedLogins"
+
+[[settings.keys]]
+key = "GITHUB_AGENT_LOGINS"
+context = "githubAgentLogins"
+
+[[settings.keys]]
+key = "GITHUB_PR_TRAILER"
+context = "githubPrTrailer"
+pattern = "^(on|off)$"
+pattern_hint = "on or off"
+
+[[settings.keys]]
+key = "GITHUB_AUTO_CLOSE_ON_MERGE"
+context = "githubAutoCloseOnMerge"
+pattern = "^(off|after_turn)$"
+pattern_hint = "off or after_turn"
+
+[[settings.keys]]
+key = "GITHUB_WAKE_ON_BEHIND"
+context = "githubWakeOnBehind"
+pattern = "^(off|on)$"
+pattern_hint = "off or on"
