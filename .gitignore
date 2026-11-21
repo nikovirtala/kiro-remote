@@ -8,6 +8,7 @@ build/
 
 # CDK
 cdk.out/
+cdk.out.*/
 cdk.context.json
 # Bundled API Lambda asset (built on the opt-in production path)
 .api-bundle/
