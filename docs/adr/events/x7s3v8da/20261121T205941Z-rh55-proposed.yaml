@@ -1,0 +1,17 @@
+envelope: ledger/v1
+kind: decision
+schema: decision/v1
+id: 01M7ZYGRC1V75JZERZZDEMRH55
+subject: x7s3v8da
+type: proposed
+at: 2026-11-21T20:59:41Z
+actor:
+  kind: agent
+  name: kiro
+  email: null
+  agent: kiro
+  on_behalf_of: niko.virtala@hey.com
+data:
+  title: Stamp every function with the deploy's provenance
+  template: nygard
+  template_version: 1

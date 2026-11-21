@@ -1,0 +1,17 @@
+envelope: ledger/v1
+kind: decision
+schema: decision/v1
+id: 01M7ZYGQHRX5ZNHFX39EA98P8Z
+subject: bwram7sv
+type: proposed
+at: 2026-11-21T20:59:40Z
+actor:
+  kind: agent
+  name: kiro
+  email: null
+  agent: kiro
+  on_behalf_of: niko.virtala@hey.com
+data:
+  title: Run the smoke checks as a role that cannot read session data
+  template: nygard
+  template_version: 1
