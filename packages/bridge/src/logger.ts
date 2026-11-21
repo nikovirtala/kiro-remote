@@ -13,7 +13,7 @@
  */
 
 import { type LogItem, Logger as PowertoolsLogger } from "@aws-lambda-powertools/logger";
-import { redact } from "@nikovirtala/kiro-remote-core";
+import { redact, resourceAttributes } from "@nikovirtala/kiro-remote-core";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -62,7 +62,8 @@ class RedactingLogger extends PowertoolsLogger {
     super({
       serviceName: SERVICE_NAME,
       logLevel: level.toUpperCase() as Uppercase<LogLevel>,
-      persistentKeys: bindings,
+      // The deploy's commit, repository, environment and version on every line (OTEL_RESOURCE_ATTRIBUTES).
+      persistentKeys: { ...resourceAttributes(), ...bindings },
     });
     this.sink = sink;
   }

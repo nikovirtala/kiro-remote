@@ -9,7 +9,7 @@
 import { Logger } from "@aws-lambda-powertools/logger";
 import { Metrics, MetricUnit } from "@aws-lambda-powertools/metrics";
 import { Tracer } from "@aws-lambda-powertools/tracer";
-import { redact } from "@nikovirtala/kiro-remote-core";
+import { redact, resourceAttributes } from "@nikovirtala/kiro-remote-core";
 
 const SERVICE_NAME = "kiro-remote-api";
 const METRICS_NAMESPACE = "KiroRemote";
@@ -91,7 +91,10 @@ export class PowertoolsObservability implements Observability {
   readonly tracer: Tracer;
 
   constructor(deps?: { logger?: Logger; metrics?: Metrics; tracer?: Tracer }) {
-    this.logger = deps?.logger ?? new Logger({ serviceName: SERVICE_NAME });
+    // The deploy's commit, repository, environment and version on every line (OTEL_RESOURCE_ATTRIBUTES).
+    this.logger =
+      deps?.logger ??
+      new Logger({ serviceName: SERVICE_NAME, persistentKeys: resourceAttributes() });
     this.metrics =
       deps?.metrics ?? new Metrics({ namespace: METRICS_NAMESPACE, serviceName: SERVICE_NAME });
     this.tracer = deps?.tracer ?? tracer;
