@@ -1150,11 +1150,17 @@ export class Repository {
 
   /* ----------------------------- Idempotency ----------------------------- */
 
-  async putIdempotency(sub: string, key: string, response: Record<string, unknown>): Promise<void> {
+  async putIdempotency(
+    sub: string,
+    key: string,
+    response: Record<string, unknown>,
+    fingerprint?: string,
+  ): Promise<void> {
     const item: IdempotencyItem = {
       PK: idempotencyPk(sub, key),
       SK: SINGLETON_SK,
       response,
+      ...(fingerprint !== undefined ? { fingerprint } : {}),
       ttl: ttlFromNow(IDEMPOTENCY_TTL_MS, this.now()),
     };
     await this.ddb.send(

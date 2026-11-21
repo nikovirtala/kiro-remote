@@ -27,7 +27,16 @@ export {
   noContentResponse,
   parseEvent,
 } from "./http.ts";
-export { requireIdempotencyKey, withIdempotency } from "./idempotency.ts";
+export {
+  canonicalJson,
+  fingerprintRequest,
+  fingerprintRestRequest,
+  IdempotencyKeyReuseError,
+  optionalIdempotencyKey,
+  requireIdempotencyKey,
+  withIdempotency,
+  withIdempotentResult,
+} from "./idempotency.ts";
 export { type BuildContextOptions, buildContextFromEnv } from "./lambda/context-from-env.ts";
 export type {
   ClientCapabilities,
@@ -40,6 +49,7 @@ export type {
   KiroRemoteClient,
   McpTransportHandler,
   McpTransportRequest,
+  WriteOptions,
 } from "./mcp-seam.ts";
 export {
   NoopObservability,

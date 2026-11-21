@@ -91,8 +91,17 @@ turns exist only when the optional [GitHub wake](./github.md) is deployed.
 
 ### Conventions
 
-- Every `POST` accepts an **`Idempotency-Key`** header, stored for 24h and scoped
-  to your sub, so a retried write is not applied twice.
+- Every `POST` takes an **`Idempotency-Key`** header (1 to 128 characters from
+  `A-Z a-z 0-9 . _ ~ : -`, else 400 `invalid-idempotency-key`), stored for 24h and
+  scoped to your sub, so a retried write is not applied twice. `DELETE
+  /v1/sessions/{id}` requires it too. `PATCH /v1/sessions/{id}/config` and
+  `DELETE /v1/sessions/{id}/links/{owner}/{repo}/{n}` accept it optionally.
+- The stored entry carries a fingerprint of the request (method, path and
+  validated body). Replaying a key with the same request returns the stored
+  response; with a different request it returns **422**
+  (`type: idempotency-key-reused`). Errors are not stored, so a failed request
+  can be retried with the same key. Entries stored before fingerprints existed
+  match any replay until they expire.
 - Writes enqueue a command and return **202**; reads are served from DynamoDB.
 - Errors are **RFC 9457** `application/problem+json`.
 - A route whose extension the server does not advertise returns **501**

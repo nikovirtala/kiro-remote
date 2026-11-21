@@ -205,6 +205,24 @@ describe("repository: idempotency store (idempotent replay)", () => {
   });
 });
 
+describe("repository: idempotency fingerprint", () => {
+  it("stores the fingerprint with the response and the 24h ttl", async () => {
+    const { r } = repo();
+    await r.putIdempotency("user-1", "fp-key", { ok: true }, "abc123");
+    const got = await r.getIdempotency("user-1", "fp-key");
+    expect(got?.fingerprint).toBe("abc123");
+    expect(got?.response).toEqual({ ok: true });
+  });
+
+  it("leaves the fingerprint off an entry stored without one", async () => {
+    const { r } = repo();
+    await r.putIdempotency("user-1", "no-fp", { ok: true });
+    const got = await r.getIdempotency("user-1", "no-fp");
+    expect(got).not.toBeNull();
+    expect(got && "fingerprint" in got).toBe(false);
+  });
+});
+
 describe("repository: CONFIG#CAPS + CONFIG#MODELS round-trip", () => {
   it("stores the raw initialize result so deriveCapabilities reproduces it", async () => {
     const { r } = repo();
