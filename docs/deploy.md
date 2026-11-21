@@ -819,6 +819,11 @@ Never commit or echo the real key; use the placeholder `ksk_xxxxxxxx` in notes.
 
 ## 5. Bootstrap and deploy
 
+> **The maintainer's deployment deploys through the [deploy pipeline](./pipeline.md):** every
+> merge to `main` deploys, runs the smoke checks and the deployment tasks, and rolls back and
+> freezes itself on a failure. `scripts/deploy.sh` below stays the way to deploy your own copy, and
+> the pipeline's break-glass path.
+
 If the account/region has never been CDK-bootstrapped, bootstrap it once. The
 `aws-cdk` CLI is a dev dependency of `packages/cdk`, so invoke it through pnpm:
 
