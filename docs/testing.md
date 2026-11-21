@@ -50,8 +50,14 @@ export NODE_EXTRA_CA_CERTS=$HOME/.aws/emulator/9297/ca.pem
 KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-api test emulator
 ```
 
-The test creates and deletes its own table and refuses to run unless
-`AWS_ENDPOINT_URL` is a loopback address, so it cannot reach real AWS.
+`packages/api/test/idempotency-emulator.test.ts` runs the same way and covers the
+idempotency store: the create-once conditional put, the stored fingerprint and
+24h `ttl`, replays, the refusal of a reused key, entries without a fingerprint,
+a lost race between two first calls, and a REST launch on the real `Repository`.
+The emulator does not evaluate IAM, so neither test proves permissions.
+
+The tests create and delete their own table and refuse to run unless
+`AWS_ENDPOINT_URL` is a loopback address, so they cannot reach real AWS.
 
 ## Synthesizing the CDK stack
 

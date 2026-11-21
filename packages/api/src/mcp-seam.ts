@@ -111,6 +111,17 @@ export interface ClientCapabilities {
   activeSessionCount: number;
 }
 
+/** Options for the state-changing client methods. */
+export interface WriteOptions {
+  /**
+   * Caller-supplied idempotency key. When set, the call is deduplicated for 24h
+   * per caller (the in-process client wraps the service call; the HTTP client
+   * sends it as the Idempotency-Key header). When unset, no deduplication is
+   * added (the HTTP client still sends a fresh key on POSTs).
+   */
+  idempotencyKey?: string;
+}
+
 /**
  * The single client interface the MCP server (FEAT-006) is written against.
  * The in-process variant (used by the /mcp Streamable HTTP transport mounted in
@@ -136,11 +147,13 @@ export interface KiroRemoteClient {
       model?: string;
       effort?: string;
     },
+    opts?: WriteOptions,
   ): Promise<{ sessionId: string; turnId: string | null }>;
 
   adoptSession(
     principal: Principal,
     args: { kiroSessionId: string },
+    opts?: WriteOptions,
   ): Promise<{ sessionId: string }>;
 
   listSessions(
@@ -150,12 +163,13 @@ export interface KiroRemoteClient {
 
   getSession(principal: Principal, sessionId: string): Promise<ClientSession>;
 
-  deleteSession(principal: Principal, sessionId: string): Promise<void>;
+  deleteSession(principal: Principal, sessionId: string, opts?: WriteOptions): Promise<void>;
 
   createTurn(
     principal: Principal,
     sessionId: string,
     args: { prompt: string; whenBusy: "steer" | "queue" | "reject" },
+    opts?: WriteOptions,
   ): Promise<ClientTurn>;
 
   getEvents(
@@ -170,19 +184,21 @@ export interface KiroRemoteClient {
     args: { status?: string },
   ): Promise<{ permissions: ClientPermission[] }>;
 
-  cancelTurn(principal: Principal, sessionId: string): Promise<void>;
+  cancelTurn(principal: Principal, sessionId: string, opts?: WriteOptions): Promise<void>;
 
   answerPermission(
     principal: Principal,
     sessionId: string,
     requestId: string,
     args: { optionId: string; consent?: Record<string, unknown> },
+    opts?: WriteOptions,
   ): Promise<void>;
 
   setConfig(
     principal: Principal,
     sessionId: string,
     args: { model?: string; effort?: string; mode?: string },
+    opts?: WriteOptions,
   ): Promise<void>;
 
   /** Link a pull request (`owner/repo#n` or a URL) to a session. */
@@ -190,10 +206,16 @@ export interface KiroRemoteClient {
     principal: Principal,
     sessionId: string,
     args: { pr: string },
+    opts?: WriteOptions,
   ): Promise<ClientLink>;
 
   /** Remove a pull request link from a session. */
-  unlinkPullRequest(principal: Principal, sessionId: string, args: { pr: string }): Promise<void>;
+  unlinkPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    opts?: WriteOptions,
+  ): Promise<void>;
 }
 
 /** The request context handed to the MCP transport handler by the router. */

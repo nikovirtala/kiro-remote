@@ -17,6 +17,8 @@ import {
   CreateTurnSchema,
   EventSchema,
   EventsQuerySchema,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+  IDEMPOTENCY_KEY_PATTERN,
   type JsonSchema,
   LaunchSessionSchema,
   LinkPullRequestSchema,
@@ -94,12 +96,26 @@ export function buildOpenApiDocument(config: FacadeConfig): Record<string, unkno
   const turnSchema = toOpenApiSchema(TurnSchema);
   const eventSchema = toOpenApiSchema(EventSchema);
 
+  const idempotencyKeySchema = {
+    type: "string",
+    minLength: 1,
+    maxLength: IDEMPOTENCY_KEY_MAX_LENGTH,
+    pattern: IDEMPOTENCY_KEY_PATTERN.source,
+  };
+
   const idempotencyHeader = {
     name: "Idempotency-Key",
     in: "header",
     required: true,
-    schema: { type: "string" },
-    description: "Required on every POST; stored 24h per subject for replay-safe retries.",
+    schema: idempotencyKeySchema,
+    description:
+      "Required on every POST; stored 24h per subject for replay-safe retries. Replaying a key with a different request is refused with 422 (idempotency-key-reused).",
+  };
+  const optionalIdempotencyHeader = {
+    ...idempotencyHeader,
+    required: false,
+    description:
+      "Optional here; when sent, stored 24h per subject so a retry is not applied twice. Replaying a key with a different request is refused with 422 (idempotency-key-reused).",
   };
 
   const errorResponses = {
@@ -280,7 +296,13 @@ export function buildOpenApiDocument(config: FacadeConfig): Record<string, unkno
         operationId: "unlinkPullRequest",
         summary: "Remove a pull request link from the session.",
         security: securityFor(ri, "link"),
-        parameters: [pathParam("id"), pathParam("owner"), pathParam("repo"), pathParam("n")],
+        parameters: [
+          pathParam("id"),
+          pathParam("owner"),
+          pathParam("repo"),
+          pathParam("n"),
+          optionalIdempotencyHeader,
+        ],
         responses: { "204": jsonResponseSpec("Unlinked"), ...errorResponses },
       },
     },
@@ -308,7 +330,7 @@ export function buildOpenApiDocument(config: FacadeConfig): Record<string, unkno
         operationId: "setConfig",
         summary: "Change session model/effort/mode (enqueues a command).",
         security: securityFor(ri, "config"),
-        parameters: [pathParam("id")],
+        parameters: [pathParam("id"), optionalIdempotencyHeader],
         requestBody: jsonBody(toOpenApiSchema(ConfigPatchSchema)),
         responses: { "202": jsonResponseSpec("Accepted"), ...errorResponses },
       },

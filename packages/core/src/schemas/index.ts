@@ -20,6 +20,26 @@ export const RepoRefSchema = z
   .string()
   .regex(/^[^/\s]+\/[^/\s]+$/, "repo must be in owner/name form");
 
+/** Longest Idempotency-Key accepted, over REST and MCP. */
+export const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+
+/**
+ * The characters an Idempotency-Key may contain: letters, digits and `. _ ~ : -`
+ * (so UUIDs, ULIDs and `step:launch:3` all fit). `#` is excluded because the key
+ * is part of the store's partition key (`IDEMP#<sub>#<key>`).
+ */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~:-]+$/;
+
+/** The optional `idempotencyKey` input of every state-changing MCP tool. */
+export const IdempotencyKeyFieldSchema = z
+  .string()
+  .min(1)
+  .max(IDEMPOTENCY_KEY_MAX_LENGTH)
+  .regex(IDEMPOTENCY_KEY_PATTERN, "idempotencyKey may only contain A-Z a-z 0-9 . _ ~ : -")
+  .describe(
+    "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused.",
+  );
+
 export const SessionModeSchema = z.string().min(1);
 export const ModelIdSchema = z.string().min(1);
 export const EffortLevelSchema = z.string().min(1);

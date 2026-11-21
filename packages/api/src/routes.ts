@@ -48,7 +48,12 @@ import {
   jsonResponse,
   noContentResponse,
 } from "./http.ts";
-import { requireIdempotencyKey, withIdempotency } from "./idempotency.ts";
+import {
+  fingerprintRestRequest,
+  optionalIdempotencyKey,
+  requireIdempotencyKey,
+  withIdempotency,
+} from "./idempotency.ts";
 import { CapabilityUnavailableError, PROBLEM_TYPE_BASE, UnprocessableError } from "./problem.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -206,13 +211,19 @@ export async function postLaunchSession(
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
   const body = LaunchSessionSchema.parse(parseJsonBody(req));
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
-    const view = await launchSession(ctx.service, principal, body);
-    // Launch enqueues a turn as part of its command; expose the launch path.
-    ctx.obs.sessionLaunched("launch");
-    ctx.obs.info("session launched", { sessionId: view.id });
-    return acceptedResponse({ sessionId: view.id, turnId: view.activeTurnId });
-  });
+  return withIdempotency(
+    ctx.repo,
+    principal.sub,
+    key,
+    fingerprintRestRequest(req, body),
+    async () => {
+      const view = await launchSession(ctx.service, principal, body);
+      // Launch enqueues a turn as part of its command; expose the launch path.
+      ctx.obs.sessionLaunched("launch");
+      ctx.obs.info("session launched", { sessionId: view.id });
+      return acceptedResponse({ sessionId: view.id, turnId: view.activeTurnId });
+    },
+  );
 }
 
 export async function postAdoptSession(
@@ -222,12 +233,18 @@ export async function postAdoptSession(
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
   const body = AdoptSessionSchema.parse(parseJsonBody(req));
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
-    const view = await adoptSession(ctx.service, principal, body);
-    ctx.obs.sessionLaunched("adopt");
-    ctx.obs.info("session adopted", { sessionId: view.id });
-    return acceptedResponse(view);
-  });
+  return withIdempotency(
+    ctx.repo,
+    principal.sub,
+    key,
+    fingerprintRestRequest(req, body),
+    async () => {
+      const view = await adoptSession(ctx.service, principal, body);
+      ctx.obs.sessionLaunched("adopt");
+      ctx.obs.info("session adopted", { sessionId: view.id });
+      return acceptedResponse(view);
+    },
+  );
 }
 
 export async function deleteSessionRoute(
@@ -236,7 +253,7 @@ export async function deleteSessionRoute(
   principal: Principal,
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
+  return withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req), async () => {
     await deleteSession(ctx.service, principal, req.params.id);
     return acceptedResponse({ sessionId: req.params.id, status: "deleting" });
   });
@@ -249,13 +266,19 @@ export async function postTurn(
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
   const body = CreateTurnSchema.parse(parseJsonBody(req));
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
-    const turn = await sendPrompt(ctx.service, principal, req.params.id, {
-      prompt: body.prompt,
-      whenBusy: body.whenBusy,
-    });
-    return acceptedResponse(turn);
-  });
+  return withIdempotency(
+    ctx.repo,
+    principal.sub,
+    key,
+    fingerprintRestRequest(req, body),
+    async () => {
+      const turn = await sendPrompt(ctx.service, principal, req.params.id, {
+        prompt: body.prompt,
+        whenBusy: body.whenBusy,
+      });
+      return acceptedResponse(turn);
+    },
+  );
 }
 
 export async function postCancel(
@@ -264,7 +287,7 @@ export async function postCancel(
   principal: Principal,
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
+  return withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req), async () => {
     await cancelTurn(ctx.service, principal, req.params.id);
     return acceptedResponse({ sessionId: req.params.id, status: "cancelling" });
   });
@@ -277,22 +300,28 @@ export async function postAnswerPermission(
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
   const body = AnswerPermissionSchema.parse(parseJsonBody(req));
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
-    try {
-      await answerPermission(ctx.service, principal, req.params.id, req.params.requestId, body);
-    } catch (err) {
-      // A non-offered optionId is a 422, not a generic 409.
-      if (
-        err instanceof Error &&
-        err.name === "InvalidStateError" &&
-        err.message.includes("optionId not offered")
-      ) {
-        throw new UnprocessableError(err.message, "option-not-offered");
+  return withIdempotency(
+    ctx.repo,
+    principal.sub,
+    key,
+    fingerprintRestRequest(req, body),
+    async () => {
+      try {
+        await answerPermission(ctx.service, principal, req.params.id, req.params.requestId, body);
+      } catch (err) {
+        // A non-offered optionId is a 422, not a generic 409.
+        if (
+          err instanceof Error &&
+          err.name === "InvalidStateError" &&
+          err.message.includes("optionId not offered")
+        ) {
+          throw new UnprocessableError(err.message, "option-not-offered");
+        }
+        throw err;
       }
-      throw err;
-    }
-    return acceptedResponse({ requestId: req.params.requestId, status: "answered" });
-  });
+      return acceptedResponse({ requestId: req.params.requestId, status: "answered" });
+    },
+  );
 }
 
 export async function patchConfig(
@@ -306,8 +335,16 @@ export async function patchConfig(
   if (body.model !== undefined || body.effort !== undefined) {
     await requireCapability(ctx, "_kiro/setConfigOption");
   }
-  await setConfig(ctx.service, principal, req.params.id, body);
-  return acceptedResponse({ sessionId: req.params.id, status: "configuring" });
+  const apply = async (): Promise<HttpResponse> => {
+    await setConfig(ctx.service, principal, req.params.id, body);
+    return acceptedResponse({ sessionId: req.params.id, status: "configuring" });
+  };
+  // The key is optional here: PATCH never required one, so clients without it
+  // behave as before.
+  const key = optionalIdempotencyKey(req);
+  return key === undefined
+    ? apply()
+    : withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req, body), apply);
 }
 
 /** POST /v1/sessions/{id}/links */
@@ -318,13 +355,24 @@ export async function postLink(
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
   const body = LinkPullRequestSchema.parse(parseJsonBody(req));
-  return withIdempotency(ctx.repo, principal.sub, key, async () => {
-    const { link, created } = await linkPullRequest(ctx.service, principal, req.params.id, body.pr);
-    if (created) {
-      ctx.obs.linkCreated("manual");
-    }
-    return jsonResponse(created ? 201 : 200, link);
-  });
+  return withIdempotency(
+    ctx.repo,
+    principal.sub,
+    key,
+    fingerprintRestRequest(req, body),
+    async () => {
+      const { link, created } = await linkPullRequest(
+        ctx.service,
+        principal,
+        req.params.id,
+        body.pr,
+      );
+      if (created) {
+        ctx.obs.linkCreated("manual");
+      }
+      return jsonResponse(created ? 201 : 200, link);
+    },
+  );
 }
 
 /** DELETE /v1/sessions/{id}/links/{owner}/{repo}/{n} */
@@ -334,8 +382,15 @@ export async function deleteLink(
   principal: Principal,
 ): Promise<HttpResponse> {
   const { owner, repo, n } = req.params;
-  await unlinkPullRequest(ctx.service, principal, req.params.id, `${owner}/${repo}#${n}`);
-  return noContentResponse();
+  const apply = async (): Promise<HttpResponse> => {
+    await unlinkPullRequest(ctx.service, principal, req.params.id, `${owner}/${repo}#${n}`);
+    return noContentResponse();
+  };
+  // Optional key, as for PATCH config: DELETE of a link never required one.
+  const key = optionalIdempotencyKey(req);
+  return key === undefined
+    ? apply()
+    : withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req), apply);
 }
 
 /** GET /v1/github/unmatched */

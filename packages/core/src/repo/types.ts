@@ -252,5 +252,10 @@ export interface IdempotencyItem {
   PK: string; // IDEMP#<sub>#<key>
   SK: "A";
   response: Record<string, unknown>;
+  /**
+   * SHA-256 (hex) of the request that produced `response`. Absent on entries
+   * stored before fingerprints existed; those match any replay until they expire.
+   */
+  fingerprint?: string;
   ttl: number;
 }
