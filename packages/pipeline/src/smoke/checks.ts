@@ -108,6 +108,7 @@ export const CHECKS: readonly SmokeCheck[] = [
     task: "stack",
     name: "the stacks are healthy",
     run: ({ aws, add }) => {
+      add("stack", "a drill: this check fails on purpose", "FAIL", "remove me");
       const s = stack(aws);
       add(
         "stack",
