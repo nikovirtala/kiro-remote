@@ -177,10 +177,7 @@ describe("the smoke checks", () => {
     process.env.DEPLOY_COMMIT = COMMIT;
     const { aws, fetch } = fakeAccount(healthy());
     const results = await runChecks(CHECKS, { aws, fetch });
-    // The drill (docs/pipeline.md): its check fails on purpose. Revert this with the check.
-    expect(
-      results.filter((r) => r.status !== "PASS" && r.status !== "INFO").map((r) => r.name),
-    ).toEqual(["a drill: this check fails on purpose"]);
+    expect(results.filter((r) => r.status !== "PASS" && r.status !== "INFO")).toEqual([]);
     expect(results.filter((r) => r.status === "INFO").map((r) => r.task)).toEqual(["queues"]);
     expect(results.length).toBeGreaterThan(20);
   });
