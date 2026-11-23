@@ -35,6 +35,36 @@ export interface SessionMetaItem {
   version: number; // optimistic lock
   GSI1PK: string; // USER#<sub>
   GSI1SK: string; // updatedAt
+  /**
+   * An automatic close (autoCloseOnMerge) was due while prompts were still queued, so it waits:
+   * once the queue is empty the close is decided again. Absent or false: nothing is owed.
+   */
+  closeAfterQueue?: boolean;
+}
+
+/**
+ * A queued prompt's status. `queued`: waiting for the turn in front of it. `delivered`: claimed by
+ * a drain and sent to the bridge as a prompt command; its turn has not started yet. `started`: its
+ * turn exists (same id) and runs or ran. `failed`: it will not run, `failReason` says why.
+ */
+export type QueuedPromptStatus = "queued" | "delivered" | "started" | "failed";
+
+/** PK SESSION#<id>, SK QPROMPT#<turn id>: a prompt sent with whenBusy "queue", and the turn id it runs under. */
+export interface QueuedPromptItem {
+  PK: string;
+  SK: string;
+  /** The turn id returned to the caller; the turn runs under it. */
+  id: string;
+  sessionId: string;
+  prompt: string | S3Pointer;
+  status: QueuedPromptStatus;
+  queuedAt: string;
+  /** When a drain claimed it (status `delivered`); null before. */
+  claimedAt: string | null;
+  /** Why it failed (status `failed`), a PromptFailReason (schemas/feed.ts); null otherwise. */
+  failReason: string | null;
+  failedAt: string | null;
+  ttl: number;
 }
 
 /** Why a turn started. `github` turns carry the webhook delivery ids that caused them. */

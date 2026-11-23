@@ -14,9 +14,11 @@
  *    `launchAlreadyIssued` durable-row check for the runtime-reset case, and the
  *    `issuedTurns` set with FIFO eviction at {@link MAX_ISSUED_TURNS});
  *  - the decisions that reject an operation that cannot be honored for a cloud
- *    session ({@link UnsupportedCloudOperationError} for a mid-turn steer, a
- *    cancel, and a `whenBusy=queue` follow-up) and the client-visible rejection
- *    persist (recordUnsupportedRejection).
+ *    session ({@link UnsupportedCloudOperationError} for a mid-turn steer and a
+ *    cancel) and the client-visible rejection persist
+ *    (recordUnsupportedRejection). A `whenBusy=queue` prompt is not rejected: it
+ *    waits on the session's queue (service/queue.ts) and runs when the turn in
+ *    front of it has ended.
  *
  * The engine itself (initialize, session/new, session/load, session/prompt,
  * session/delete) is driven by the consumer through {@link KasEngine}; keeping
@@ -24,8 +26,9 @@
  *
  * A cloud turn is effectively NON-INTERACTIVE: it runs in Kiro's cloud sandbox
  * and the short-lived engine only relays its updates, so nothing can interleave
- * with a turn once it starts. That is why mid-turn steer, cancel and
- * `whenBusy=queue` are rejected rather than forwarded.
+ * with a turn once it starts. That is why mid-turn steer and cancel are
+ * rejected rather than forwarded, and why a prompt for a busy session waits on
+ * the queue instead of being handed to the agent.
  */
 
 import {
@@ -47,8 +50,7 @@ import type { Metrics } from "./metrics.ts";
  * A PERMANENT "this operation cannot be honored for a cloud session" rejection.
  *
  * A cloud turn runs in Kiro's cloud sandbox and the short-lived engine only
- * relays it, so a mid-turn steer/cancel (and a `whenBusy=queue` follow-up, which
- * has no drain mechanism) genuinely cannot be honored. This is NOT a transient
+ * relays it, so a mid-turn steer/cancel genuinely cannot be honored. This is NOT a transient
  * dispatch failure: redelivering the same command will reject identically every
  * time. The consumer recognizes this sentinel and treats it as
  * "log + persist a client-visible rejection + ack the message" rather than
@@ -320,15 +322,20 @@ export class CloudSession {
    * into one of: a logged idempotent no-op (already-issued turn id), a fresh
    * prompt (idle session -> the caller should start a new turn), a quiet
    * rejection (`whenBusy=reject`), or a LOUD {@link UnsupportedCloudOperationError}
-   * (mid-turn steer, or `whenBusy=queue` which has no drain). This encodes the
-   * "a cloud turn is effectively non-interactive" rule in ONE place. Does NOT
-   * mutate the machine.
+   * (a mid-turn steer). A prompt sent with `whenBusy=queue` never gets here: the
+   * consumer stores it on the session's queue first (see service/queue.ts). This
+   * encodes the "a cloud turn is effectively non-interactive" rule in ONE place.
+   * Does NOT mutate the machine.
+   *
+   * `queueOpen` says prompts are queued (or about to start): the session counts
+   * as busy then, so a steer or a reject cannot start a turn ahead of them.
    */
   classifySteer(
     rt: SessionRuntime,
     id: string,
-    whenBusy: "steer" | "queue" | "reject",
+    whenBusy: "steer" | "reject",
     turnId: string | undefined,
+    queueOpen = false,
   ): "idempotent" | "prompt" | "reject" {
     // Idempotency for a redelivered `prompt` command (which routes through
     // steer): if this turn id was already accepted, it is a logged no-op --
@@ -341,7 +348,7 @@ export class CloudSession {
       return "idempotent";
     }
 
-    const busy = rt.machine.turn === "running";
+    const busy = rt.machine.turn === "running" || queueOpen;
     if (!busy) {
       // Idle session: a follow-up is a new prompt (session/prompt).
       return "prompt";
@@ -350,30 +357,19 @@ export class CloudSession {
       this.logger.info("steer_rejected", { sessionId: id });
       return "reject";
     }
-    if (whenBusy === "queue") {
-      // `whenBusy=queue` is NOT drainable on a cloud session. There is no
-      // queue-drain mechanism, and a cloud turn runs in Kiro's sandbox where we
-      // cannot interleave with it, so a "queued" follow-up would never actually
-      // run. Reject it the SAME visible, non-state-mutating way as a mid-turn
-      // steer: do NOT apply `prompt.queued` (telling the client the turn is
-      // queued when it will never drain is worse than a clean rejection). The
-      // user should wait for the active turn to settle, then send a new prompt.
-      this.logger.warn("steer_queue_unsupported_cloud", { sessionId: id });
-      throw new UnsupportedCloudOperationError(
-        "queue",
-        "queuing a follow-up turn is not supported for cloud sessions; wait for the active turn to complete, then send a new prompt",
-      );
-    }
     // Mid-turn steering is NOT supported on a cloud session: the turn runs in
     // Kiro's sandbox and the engine that started it may already be gone (a
     // detached turn), so there is nothing to steer. Reject LOUDLY (sentinel
     // error -> the consumer logs + persists a client-visible rejection event +
     // acks the message) instead of looping the command through SQS redelivery;
-    // the user should wait for the turn to settle, then send a new prompt.
-    this.logger.warn("steer_unsupported_cloud", { sessionId: id });
+    // the user should wait for the turn to settle, then send a new prompt (or
+    // queue it with whenBusy=queue). The queue is not touched.
+    this.logger.warn("steer_unsupported_cloud", { sessionId: id, queueOpen });
     throw new UnsupportedCloudOperationError(
       "steer",
-      "mid-turn steering is not supported for cloud sessions; wait for the turn to complete, then send a new prompt",
+      queueOpen && rt.machine.turn !== "running"
+        ? "prompts are queued for this cloud session and it cannot take a steer; send the prompt with whenBusy=queue to run it after them"
+        : "mid-turn steering is not supported for cloud sessions; wait for the turn to complete, then send a new prompt, or send it with whenBusy=queue",
     );
   }
 
@@ -399,8 +395,7 @@ export class CloudSession {
 
   /**
    * Persist a client-visible rejection for an operation that cannot be honored
-   * for a cloud session (mid-turn steer/cancel, a queued follow-up with no
-   * drain, or adopt). This runs OFF the command-dispatch error path (the
+   * for a cloud session (mid-turn steer/cancel, or adopt). This runs OFF the command-dispatch error path (the
    * consumer calls it after catching an {@link UnsupportedCloudOperationError})
    * so a polling client sees, via GET /v1/sessions/{id}/events, WHY the
    * operation did nothing instead of silence -- WITHOUT turning the SQS message
@@ -412,13 +407,14 @@ export class CloudSession {
     rt: SessionRuntime,
     operation: string,
     reason: string,
+    turnId: string | null = rt.activeTurnId,
   ): Promise<void> {
     await this.writeEvent(
       rt,
       {
         type: "turn.failed",
         sessionId: rt.id,
-        turnId: rt.activeTurnId,
+        turnId,
         replay: false,
         rawType: "operation_rejected",
         failureReason: "generic",

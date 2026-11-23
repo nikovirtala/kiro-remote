@@ -54,6 +54,13 @@ class FakeRepo {
   async queryWaits(): Promise<never[]> {
     return [];
   }
+  /** The queue is covered against the real Repository in queue.test.ts. */
+  async listQueuedPrompts(): Promise<never[]> {
+    return [];
+  }
+  async putQueuedPrompt(): Promise<boolean> {
+    return true;
+  }
   async getPermission(_sessionId: string, requestId: string) {
     return this.perms.get(requestId) ?? null;
   }

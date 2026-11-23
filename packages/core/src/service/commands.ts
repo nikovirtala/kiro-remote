@@ -37,6 +37,11 @@ export interface PromptCommand extends CommandBase {
    * on the TURN# row and releases the inbox items if the turn cannot start.
    */
   trigger?: TurnTrigger;
+  /**
+   * The turn id is a queued prompt a drain claimed (`delivered`): the bridge starts it only from
+   * that state and gives it back to the queue when the session is not idle (see service/queue.ts).
+   */
+  queued?: true;
 }
 
 export interface SteerCommand extends CommandBase {

@@ -105,6 +105,7 @@ describe("the contract", () => {
       "link.added",
       "link.removed",
       "link.state_changed",
+      "prompt.failed",
       "wait.registered",
       "wait.removed",
       "wake.delivered",
@@ -116,8 +117,9 @@ describe("the contract", () => {
       expect(["state", "annotation"]).toContain(FEED_TYPES[t].effect);
       expect(checkedIn(`${t}.json`).properties.effect.const).toBe(FEED_TYPES[t].effect);
     }
-    // Links and waits move state; wakes only record a decision.
+    // Links and waits move state; wakes and failed prompts only record a decision.
     expect(FEED_TYPE_NAMES.filter((t) => FEED_TYPES[t].effect === "annotation").sort()).toEqual([
+      "prompt.failed",
       "wake.delivered",
       "wake.dropped",
       "wake.queued",
@@ -148,6 +150,8 @@ describe("the contract", () => {
     await w.repo.claimInbox("S1", ["i1"], "turn-1");
     await w.repo.releaseInbox("S1", ["i1"], "turn-1");
     await w.repo.dropInbox("S1", ["i1"], "session_deleted");
+    await w.repo.putQueuedPrompt({ sessionId: "S1", id: "q1", prompt: "p" });
+    await w.repo.failQueuedPrompt("S1", "q1", { reason: "session_deleted", source: "rest" });
     const events = await w.feed();
     expect(new Set(types(events))).toEqual(new Set(FEED_TYPE_NAMES));
     // A session's deleted waits are published under the reason the schema lists for it.

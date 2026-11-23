@@ -149,6 +149,27 @@ export async function getTurn(
   await svcGetSession(ctx.service, principal, req.params.id);
   const turn = await ctx.repo.getTurn(req.params.id, req.params.turnId);
   if (!turn) {
+    // A prompt that waits on the session's queue (or failed there) has no turn yet.
+    const queued = await ctx.repo.getQueuedPrompt(req.params.id, req.params.turnId);
+    if (queued) {
+      return jsonResponse(200, {
+        id: queued.id,
+        sessionId: queued.sessionId,
+        status:
+          queued.status === "failed"
+            ? "failed"
+            : queued.status === "started"
+              ? "running"
+              : "queued",
+        // For a prompt that failed in the queue, why (session_deleted, session_failed, not_sent).
+        stopReason: queued.failReason,
+        startedAt: null,
+        endedAt: queued.failedAt,
+        metering: null,
+        trigger: { source: "user", deliveryIds: [] },
+        prompt: await ctx.repo.queuedPromptText(queued),
+      });
+    }
     return jsonResponse(404, {
       type: `${PROBLEM_TYPE_BASE}/turn-not-found`,
       title: "Turn Not Found",
@@ -277,10 +298,13 @@ export async function postTurn(
     key,
     fingerprintRestRequest(req, body),
     async () => {
-      const turn = await sendPrompt(ctx.service, principal, req.params.id, {
-        prompt: body.prompt,
-        whenBusy: body.whenBusy,
-      });
+      const turn = await sendPrompt(
+        ctx.service,
+        principal,
+        req.params.id,
+        { prompt: body.prompt, whenBusy: body.whenBusy },
+        { source: "rest" },
+      );
       return acceptedResponse(turn);
     },
   );

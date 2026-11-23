@@ -42,8 +42,18 @@ export const FEED_TTL_DAYS = 35;
  * - `harvest`: the PR URL the agent printed in a turn.
  * - `sweep`: a read of GitHub kiro-remote made on its own initiative (the check made when a wait is
  *   registered, and a later scheduled sweep).
+ * - `bridge`: kiro-remote itself, while it drives a session (a queued prompt that cannot run because
+ *   its session failed; added within v: 1, under the rule on enum values above).
  */
-export const FeedSourceSchema = z.enum(["mcp", "rest", "trailer", "webhook", "harvest", "sweep"]);
+export const FeedSourceSchema = z.enum([
+  "mcp",
+  "rest",
+  "trailer",
+  "webhook",
+  "harvest",
+  "sweep",
+  "bridge",
+]);
 export type FeedSource = z.infer<typeof FeedSourceSchema>;
 
 /**
@@ -63,6 +73,18 @@ const WaitSourceSchema = z.enum(["mcp", "rest", "trailer"]);
 /** Why a session is woken: its own PR's event, its PR no longer merging, or a PR it waits for. */
 export const WakeCauseSchema = z.enum(["linked_pr_event", "conflict", "wait"]);
 export type WakeCause = z.infer<typeof WakeCauseSchema>;
+
+/**
+ * Why a prompt that was accepted will not run (the `reason` of `prompt.failed`). A reader treats a
+ * value it does not know as opaque.
+ *
+ * - `session_deleted`: the session was deleted (by the caller, or found deleted) while the prompt
+ *   waited.
+ * - `session_failed`: the session failed (it never provisioned), so nothing can run.
+ * - `not_sent`: the prompt was stored but could not be sent to the bridge; the caller got an error.
+ */
+export const PromptFailReasonSchema = z.enum(["session_deleted", "session_failed", "not_sent"]);
+export type PromptFailReason = z.infer<typeof PromptFailReasonSchema>;
 
 const wakeItem = {
   /** The inbox item the wake is, so queued, delivered and dropped can be followed together. */
@@ -107,6 +129,15 @@ export const FEED_TYPES = {
         "registration_failed",
         "session_deleted",
       ]),
+    }),
+  },
+  "prompt.failed": {
+    effect: "annotation",
+    payload: z.strictObject({
+      /** The turn id the caller was given for the prompt. */
+      turnId: z.string().min(1),
+      whenBusy: z.literal("queue"),
+      reason: PromptFailReasonSchema,
     }),
   },
   "wake.queued": {

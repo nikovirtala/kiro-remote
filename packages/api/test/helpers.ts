@@ -151,6 +151,10 @@ export class FakeDdb {
       const to = values[":to"] as string;
       rows = rows.filter((i) => i.SK >= from && i.SK <= to);
     }
+    const prefix = /begins_with\(SK, (:\w+)\)/.exec(String(input.KeyConditionExpression ?? ""));
+    if (prefix && typeof values[prefix[1]] === "string") {
+      rows = rows.filter((i) => i.SK.startsWith(values[prefix[1]] as string));
+    }
     if (typeof values[":permPrefix"] === "string") {
       rows = rows.filter((i) => i.SK.startsWith(values[":permPrefix"] as string));
     }

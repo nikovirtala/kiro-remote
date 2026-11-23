@@ -51,6 +51,16 @@ export interface ClientSession {
   links?: ClientLink[];
   /** Pull requests the session waits for (present when the session is fetched by id). */
   waits?: ClientWait[];
+  /** Prompts sent with whenBusy "queue", oldest first (present when the session is fetched by id). */
+  queue?: ClientQueuedPrompt[];
+}
+
+/** A prompt on a session's queue. `reason` says why a `failed` one will not run. */
+export interface ClientQueuedPrompt {
+  turnId: string;
+  status: "queued" | "delivered" | "started" | "failed";
+  queuedAt: string;
+  reason: string | null;
 }
 
 /** A pull request linked to a session. */

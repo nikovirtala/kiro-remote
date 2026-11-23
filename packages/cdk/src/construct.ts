@@ -881,15 +881,13 @@ export class KiroRemote extends Construct {
         WORKSPACE_ROOT: "/tmp/workspace",
         // Consumer only: the caps publisher never detaches a turn. Set below,
         // once the alias exists.
-        // With the GitHub feature on, the consumer drains wake items and asks
-        // the GitHub consumer to harvest PR links when a turn settles. It holds
-        // no GitHub credentials.
-        ...(this.githubQueue
-          ? {
-              COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
-              GITHUB_QUEUE_URL: this.githubQueue.queueUrl,
-            }
-          : {}),
+        // The consumer sends prompt commands to the command queue itself: when
+        // a turn settles, the next queued prompt (whenBusy "queue") starts that
+        // way. With the GitHub feature on, it also drains wake items and asks
+        // the GitHub consumer to harvest PR links. It holds no GitHub
+        // credentials.
+        COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+        ...(this.githubQueue ? { GITHUB_QUEUE_URL: this.githubQueue.queueUrl } : {}),
       },
     });
 
@@ -950,12 +948,9 @@ export class KiroRemote extends Construct {
       environment: {
         ...bridgeLambdaEnv,
         WORKSPACE_ROOT: "/tmp/workspace",
-        ...(this.githubQueue
-          ? {
-              COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
-              GITHUB_QUEUE_URL: this.githubQueue.queueUrl,
-            }
-          : {}),
+        // A catch-up that settles a turn starts the next queued prompt (and wakes).
+        COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+        ...(this.githubQueue ? { GITHUB_QUEUE_URL: this.githubQueue.queueUrl } : {}),
       },
     });
 
@@ -1007,9 +1002,9 @@ export class KiroRemote extends Construct {
     this.table.grantReadWriteData(this.consumerFn);
     this.bucket.grantReadWrite(this.consumerFn);
     this.commandQueue.grantConsumeMessages(this.consumerFn);
+    this.commandQueue.grantSendMessages(this.consumerFn);
     this.kiroApiKeySecret.grantRead(this.consumerFn);
     if (this.githubQueue) {
-      this.commandQueue.grantSendMessages(this.consumerFn);
       this.githubQueue.grantSendMessages(this.consumerFn);
     }
 
@@ -1018,8 +1013,8 @@ export class KiroRemote extends Construct {
     this.table.grantReadWriteData(this.catchUpFn);
     this.bucket.grantReadWrite(this.catchUpFn);
     this.kiroApiKeySecret.grantRead(this.catchUpFn);
+    this.commandQueue.grantSendMessages(this.catchUpFn);
     if (this.githubQueue) {
-      this.commandQueue.grantSendMessages(this.catchUpFn);
       this.githubQueue.grantSendMessages(this.catchUpFn);
     }
 

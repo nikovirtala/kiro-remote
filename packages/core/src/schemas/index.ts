@@ -186,6 +186,25 @@ export const WaitSchema = z.object({
 });
 export type WaitView = z.infer<typeof WaitSchema>;
 
+/**
+ * A prompt sent with whenBusy "queue". `queued`: waiting for the turn in front of it. `delivered`:
+ * handed to the bridge, its turn is about to start. `started`: its turn exists under `turnId`
+ * (follow it on the event log). `failed`: it will not run, `reason` says why (`session_deleted`,
+ * `session_failed`, `not_sent`). The prompt's text is never part of it.
+ */
+export const QueuedPromptSchema = z.object({
+  turnId: z.string(),
+  status: z.union([
+    z.literal("queued"),
+    z.literal("delivered"),
+    z.literal("started"),
+    z.literal("failed"),
+  ]),
+  queuedAt: z.string(),
+  reason: z.string().nullable(),
+});
+export type QueuedPromptView = z.infer<typeof QueuedPromptSchema>;
+
 export const TurnTriggerSchema = z.object({
   source: z.union([z.literal("user"), z.literal("github")]),
   deliveryIds: z.array(z.string()),
@@ -221,6 +240,11 @@ export const SessionSchema = z.object({
   links: z.array(LinkSchema).optional(),
   /** Pull requests the session waits for (present when the session is fetched by id). */
   waits: z.array(WaitSchema).optional(),
+  /**
+   * The session's queue of prompts sent with whenBusy "queue", oldest first: every one still to run
+   * and the latest that started or failed. Present when the session is fetched by id.
+   */
+  queue: z.array(QueuedPromptSchema).optional(),
 });
 export type SessionView = z.infer<typeof SessionSchema>;
 

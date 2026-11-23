@@ -7,6 +7,7 @@ import {
   type GithubQueue,
   type InboxItem,
   inboxSk,
+  openQueuedPrompts,
   type Repository,
   sessionPk,
 } from "@nikovirtala/kiro-remote-core";
@@ -258,7 +259,8 @@ function unionChecks(a: readonly FailedCheck[], b: readonly FailedCheck[]): Fail
  * session is deleted only when none of its linked PRs is still open (or of
  * unknown state, as a manual link starts), so a session that opened a
  * follow-up PR keeps running. A kept session gets the inbox drain the bridge
- * skipped.
+ * skipped. A session with queued prompts is never closed: the close is owed
+ * (META `closeAfterQueue`) and the settle of the last queued turn asks again.
  */
 export async function autoCloseIfDone(
   deps: WakeDeps,
@@ -267,6 +269,13 @@ export async function autoCloseIfDone(
   const session = await deps.repo.getSession(sessionId);
   if (!session || session.status === "deleted") {
     return "gone";
+  }
+  const queued = await openQueuedPrompts(deps, sessionId);
+  if (queued.length > 0) {
+    await deps.repo.patchSession(sessionId, { closeAfterQueue: true });
+    deps.logger.info("auto_close_deferred_queue", { sessionId, queued: queued.length });
+    deps.metrics.count("AutoCloseSkipped", 1);
+    return "kept";
   }
   const links = await deps.repo.queryLinks(sessionId);
   const open = links.filter((l) => l.prState === "open" || l.prState === "unknown");

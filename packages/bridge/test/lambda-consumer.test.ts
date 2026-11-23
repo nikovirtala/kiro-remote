@@ -1016,7 +1016,7 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
     expect(inner(rej).operation).toBe("cancel");
   });
 
-  test("a whenBusy=queue follow-up is persisted as a rejection and NOT a batch failure", async () => {
+  test("a whenBusy=queue follow-up is kept on the queue, not rejected, and starts no engine", async () => {
     const w = await wire([LAUNCH]);
     await busy(w, "squ");
 
@@ -1032,9 +1032,15 @@ describe("LambdaConsumer unsupported operations (permanent, acked)", () => {
     const res = await w.consumer.handleEvent(event(queued, "m-queue"));
     expect(res.batchItemFailures).toEqual([]);
     const events = await w.repo.queryEvents("squ", 0, { limit: 100 });
-    const rej = events.find((e) => e.type === "turn.failed" && e.rawType === "operation_rejected");
-    expect(inner(rej).operation).toBe("queue");
+    expect(events.find((e) => e.rawType === "operation_rejected")).toBeUndefined();
     expect(w.spawner.specs).toHaveLength(0);
+    // This consumer has no command queue to start it with, so it fails the prompt where the
+    // caller can see it instead of leaving it queued.
+    expect(await w.repo.getQueuedPrompt("squ", "t-queue")).toMatchObject({
+      status: "failed",
+      failReason: "not_sent",
+    });
+    expect(events.find((e) => e.rawType === "queued_prompt_failed")?.turnId).toBe("t-queue");
   });
 
   test("adopt is rejected loudly as unsupported", async () => {

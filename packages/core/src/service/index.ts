@@ -20,9 +20,15 @@ import { trailerInstruction } from "../github/pr-ref.ts";
 import type { GithubQueue } from "../github/queue.ts";
 import { sessionPk } from "../repo/keys.ts";
 import { ConcurrentModificationError, type Repository } from "../repo/repository.ts";
-import type { PrWaitItem, SessionMetaItem } from "../repo/types.ts";
+import type { PrWaitItem, QueuedPromptItem, SessionMetaItem } from "../repo/types.ts";
 import type { FeedSource } from "../schemas/feed.ts";
-import type { EventView, SessionView, TurnView, WaitView } from "../schemas/index.ts";
+import type {
+  EventView,
+  QueuedPromptView,
+  SessionView,
+  TurnView,
+  WaitView,
+} from "../schemas/index.ts";
 import { matchesAllowList } from "./allowlist.ts";
 import type { CommandQueue } from "./commands.ts";
 import {
@@ -31,6 +37,7 @@ import {
   RepoNotAllowedError,
   SessionNotFoundError,
 } from "./errors.ts";
+import { failOpenQueuedPrompts, failQueuedPrompt, openQueuedPrompts } from "./queue.ts";
 
 export interface ServiceDeps {
   repo: Repository;
@@ -82,6 +89,13 @@ function toSessionView(item: SessionMetaItem): SessionView {
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
+}
+
+/** How many of a session's queued prompts GET /v1/sessions/{id} lists, newest last (the open ones are always in it). */
+const QUEUE_VIEW_MAX = 50;
+
+export function toQueuedPromptView(q: QueuedPromptItem): QueuedPromptView {
+  return { turnId: q.id, status: q.status, queuedAt: q.queuedAt, reason: q.failReason };
 }
 
 export function toWaitView(w: PrWaitItem): WaitView {
@@ -221,21 +235,52 @@ export async function adoptSession(
   return toSessionView(meta);
 }
 
+/**
+ * Send a prompt. `whenBusy` says what a busy session does with it. A session is busy while a turn
+ * runs and while prompts are queued (they run first, in order):
+ *
+ *  - `reject`: refused here with a 409.
+ *  - `queue`: the prompt is stored on the session's queue under the turn id returned, and runs as
+ *    its own turn after the turn in front of it. It ends as a turn, or as a visible failure
+ *    (`turn.failed` on the event log, `prompt.failed` on the change feed, `status: "failed"` in the
+ *    `queue` of the session). It is never dropped silently.
+ *  - `steer` (the default): a cloud session cannot take a prompt mid-turn, so a steer for a busy
+ *    session is refused here like `reject` (409 over REST, a tool error over MCP, reason
+ *    `steer_unsupported`, with a hint to use `queue`). Nothing is stored and the queue is not
+ *    touched. On an idle session with an empty queue it is an ordinary prompt. If the session turns
+ *    busy between this check and the bridge reading the command, the bridge keeps the prompt on
+ *    the queue (it runs after the turn in front of it) rather than rejecting it.
+ */
 export async function sendPrompt(
   deps: ServiceDeps,
   principal: Principal,
   sessionId: string,
   args: { prompt: string; whenBusy: "steer" | "queue" | "reject" },
+  opts: { source?: FeedSource } = {},
 ): Promise<TurnView> {
   authorize(principal, "prompt", { createdBy: undefined });
   const session = await loadOwned(deps, principal, sessionId);
   authorize(principal, "prompt", { createdBy: session.createdBy });
 
-  // A busy session only accepts a new prompt per the whenBusy policy; "reject"
-  // short-circuits here, the bridge enforces steer/queue semantics in order.
-  const busy = session.status === "running" || session.status === "awaiting_permission";
+  const queued = await openQueuedPrompts(deps, sessionId);
+  const running = session.status === "running" || session.status === "awaiting_permission";
+  const busy = running || queued.length > 0;
   if (busy && args.whenBusy === "reject") {
-    throw new InvalidStateError("session is busy and whenBusy=reject");
+    throw new InvalidStateError(
+      running
+        ? "session is busy and whenBusy=reject"
+        : "session has queued prompts and whenBusy=reject",
+    );
+  }
+  if (busy && args.whenBusy === "steer") {
+    throw new InvalidStateError(
+      `steer_unsupported: ${
+        running ? "a turn is running" : "prompts are queued"
+      } and a cloud session cannot take a steer; send the prompt with whenBusy "queue" to run it after ${
+        running ? "the turn" : "them"
+      }`,
+      "steer_unsupported",
+    );
   }
 
   // A manual prompt wins over a GitHub wake: bumping META's version makes a
@@ -251,15 +296,31 @@ export async function sendPrompt(
   }
 
   const turnId = genId(deps);
-  await deps.queue.enqueue({
-    kind: "prompt",
-    sub: principal.sub,
-    sessionId,
-    commandId: genId(deps),
-    turnId,
-    prompt: args.prompt,
-    whenBusy: args.whenBusy,
-  });
+  // The prompt is stored before the command is sent, so it is on the session's queue (and in
+  // GET /v1/sessions/{id}) while the command waits behind a running turn in the command queue.
+  if (args.whenBusy === "queue") {
+    await deps.repo.putQueuedPrompt({ sessionId, id: turnId, prompt: args.prompt });
+  }
+  try {
+    await deps.queue.enqueue({
+      kind: "prompt",
+      sub: principal.sub,
+      sessionId,
+      commandId: genId(deps),
+      turnId,
+      prompt: args.prompt,
+      whenBusy: args.whenBusy,
+    });
+  } catch (err) {
+    // The caller is told the call failed, so the prompt must not run later.
+    if (args.whenBusy === "queue") {
+      await failQueuedPrompt(deps, sessionId, turnId, {
+        reason: "not_sent",
+        source: opts.source ?? "rest",
+      }).catch(() => undefined);
+    }
+    throw err;
+  }
 
   return {
     id: turnId,
@@ -369,6 +430,13 @@ export async function deleteSession(
 ): Promise<void> {
   const session = await loadOwned(deps, principal, sessionId);
   authorize(principal, "delete", { createdBy: session.createdBy });
+  // A deleted session runs nothing, so each prompt still waiting fails now, visibly, instead of
+  // when the delete command reaches the bridge (which can be after a long turn). The bridge fails
+  // whatever was queued meanwhile.
+  await failOpenQueuedPrompts(deps, sessionId, {
+    reason: "session_deleted",
+    source: opts.source ?? "rest",
+  });
   await deps.queue.enqueue({
     kind: "delete",
     sub: principal.sub,
@@ -385,9 +453,10 @@ export async function getSession(
 ): Promise<SessionView> {
   authorize(principal, "read");
   const session = await loadOwned(deps, principal, sessionId);
-  const [links, waits] = await Promise.all([
+  const [links, waits, queue] = await Promise.all([
     deps.repo.queryLinks(sessionId),
     deps.repo.queryWaits(sessionId),
+    deps.repo.listQueuedPrompts(sessionId),
   ]);
   return {
     ...toSessionView(session),
@@ -401,6 +470,15 @@ export async function getSession(
       headSha: l.headSha,
     })),
     waits: waits.map(toWaitView),
+    // Every open prompt, and the latest ones that started or failed.
+    queue: [
+      ...queue
+        .filter((q) => q.status === "started" || q.status === "failed")
+        .slice(-QUEUE_VIEW_MAX),
+      ...queue.filter((q) => q.status === "queued" || q.status === "delivered"),
+    ]
+      .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt) || a.id.localeCompare(b.id))
+      .map(toQueuedPromptView),
   };
 }
 
