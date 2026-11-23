@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "ts": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effect": {
+      "type": "string",
+      "enum": ["state", "annotation"]
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pr": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[^/\\s]+\\/[^#\\s]+#[1-9][0-9]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["mcp", "rest", "trailer", "webhook", "harvest", "sweep"]
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60
+    },
+    "payload": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "required": ["v", "id", "seq", "ts", "effect", "sessionId", "pr", "source", "type", "payload"],
+  "additionalProperties": false
+}

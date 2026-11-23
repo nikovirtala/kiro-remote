@@ -5,6 +5,7 @@
  */
 
 import type { SessionStatus, TurnStatus } from "../domain.ts";
+import type { FeedSource } from "../schemas/feed.ts";
 
 /** Pointer to a value spilled to S3 when it exceeds the inline threshold. */
 export interface S3Pointer {
@@ -162,6 +163,8 @@ export interface InboxItem {
   dropReason: string | null;
   deliveredTurnId: string | null;
   autoClose: boolean;
+  /** What caused the wake (the change feed's `source`). Absent on items written before the feed. */
+  origin?: FeedSource;
   ttl: number;
 }
 

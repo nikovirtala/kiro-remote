@@ -150,6 +150,10 @@ describe("harvestTurn", () => {
       headSha: "1".repeat(40),
     });
     expect(await w.repo.getPrLink("octo/repo#3")).toBeNull();
+    // Only the link made is in the change feed, as a harvest.
+    expect(
+      (await w.repo.readFeed("user-sub-1", 0, 10)).events.map((e) => [e.type, e.pr, e.source]),
+    ).toEqual([["link.added", "octo/repo#7", "harvest"]]);
 
     const info = await infoEvents(w);
     const rejected = info.filter((e) => e.rawType === "pr_link_rejected");

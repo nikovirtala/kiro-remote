@@ -60,7 +60,7 @@ export async function waitForPullRequest(
     await deps.githubQueue.send({ kind: "wait_check", sessionId, pr });
   } catch (err) {
     // Without the check the wait could miss a PR that already merged: do not leave it half made.
-    await deps.repo.deleteWait(sessionId, pr);
+    await deps.repo.deleteWait(sessionId, pr, { reason: "registration_failed", source });
     throw err;
   }
   return { wait: toWaitView(result.wait), created: true };
@@ -75,6 +75,7 @@ export async function stopWaitingForPullRequest(
   principal: Principal,
   sessionId: string,
   input: string,
+  source: "mcp" | "rest" = "rest",
 ): Promise<void> {
   authorize(principal, "link");
   const session = await deps.repo.getSession(sessionId);
@@ -85,7 +86,7 @@ export async function stopWaitingForPullRequest(
   if (!ref) {
     throw new InvalidStateError("invalid pull request reference");
   }
-  const removed = await deps.repo.deleteWait(sessionId, prKeyOf(ref));
+  const removed = await deps.repo.deleteWait(sessionId, prKeyOf(ref), { source });
   if (!removed) {
     throw new InvalidStateError(`this session is not waiting for pull request ${prKeyOf(ref)}`);
   }

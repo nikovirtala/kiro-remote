@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "ts": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effect": {
+      "type": "string",
+      "const": "annotation"
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pr": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[^/\\s]+\\/[^#\\s]+#[1-9][0-9]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["mcp", "rest", "trailer", "webhook", "harvest", "sweep"]
+    },
+    "type": {
+      "type": "string",
+      "const": "wake.released"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "itemId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "cause": {
+          "type": "string",
+          "enum": ["linked_pr_event", "conflict", "wait"]
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["itemId", "kind", "cause", "turnId"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["v", "id", "seq", "ts", "effect", "sessionId", "pr", "source", "type", "payload"],
+  "additionalProperties": false
+}

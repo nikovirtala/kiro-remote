@@ -3,6 +3,7 @@
 import {
   type CommandQueue,
   drainInbox,
+  type FeedSource,
   type GithubQueue,
   type InboxItem,
   inboxSk,
@@ -45,7 +46,13 @@ const isBaseMoveKind = (kind: string): boolean => kind === "pr_conflict" || kind
 export async function enqueueWake(
   deps: WakeDeps,
   a: WakeAction,
-): Promise<{ merged: boolean; id: string }> {
+  opts: {
+    /** What caused the wake (the change feed's `source`). Defaults to a webhook. */
+    source?: FeedSource;
+    /** This wake fires a wait: the wait is removed with the wake, in one transaction. */
+    fires?: { reason: "merged" | "closed" | "unreadable" };
+  } = {},
+): Promise<{ merged: boolean; id: string; claimed: boolean }> {
   const nowMs = deps.now();
   const waitWake = isWaitKind(a.kind);
   const baseMoveWake = isBaseMoveKind(a.kind);
@@ -60,7 +67,7 @@ export async function enqueueWake(
     if (baseMoveWake) {
       const folded = await foldBaseMoveWake(deps, a, pending, target);
       if (folded) {
-        return folded;
+        return { ...folded, claimed: true };
       }
     } else if (target && a.kind === "checks_failed") {
       const checks = unionChecks(
@@ -80,7 +87,7 @@ export async function enqueueWake(
         }),
       });
       if (merged) {
-        return { merged: true, id: target.id };
+        return { merged: true, id: target.id, claimed: true };
       }
       // It was drained meanwhile: fall through and start a new item.
     }
@@ -115,7 +122,21 @@ export async function enqueueWake(
     autoClose: a.autoClose,
     ttl: Math.floor((nowMs + INBOX_TTL_MS) / 1000),
   };
-  await deps.repo.putInboxItem(item);
+  const source = opts.source ?? "webhook";
+  if (opts.fires) {
+    const fired = await deps.repo.fireWait({
+      sessionId: a.sessionId,
+      pr: a.key,
+      reason: opts.fires.reason,
+      item,
+      source,
+    });
+    if (!fired) {
+      return { merged: false, id, claimed: false };
+    }
+  } else {
+    await deps.repo.putInboxItem(item, { source });
+  }
   if (waitWake) {
     for (const i of pending) {
       if (isBaseMoveKind(i.kind) && Date.parse(i.notBefore) < notBeforeMs) {
@@ -130,7 +151,7 @@ export async function enqueueWake(
       Math.ceil((notBeforeMs - nowMs) / 1000) + 2,
     );
   }
-  return { merged: false, id };
+  return { merged: false, id, claimed: true };
 }
 
 /**

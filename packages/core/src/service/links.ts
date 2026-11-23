@@ -55,6 +55,7 @@ export async function linkPullRequest(
   principal: Principal,
   sessionId: string,
   input: string,
+  source: "mcp" | "rest" = "rest",
 ): Promise<{ link: LinkView; created: boolean }> {
   authorize(principal, "link");
   const session = await loadOwned(deps, principal, sessionId);
@@ -74,6 +75,7 @@ export async function linkPullRequest(
     linkedBy: "manual",
     prState: "unknown",
     headSha: null,
+    source,
   });
   if (result.created) {
     return { link: toLinkView(result.link), created: true };
@@ -93,6 +95,7 @@ export async function unlinkPullRequest(
   principal: Principal,
   sessionId: string,
   input: string,
+  source: "mcp" | "rest" = "rest",
 ): Promise<void> {
   authorize(principal, "link");
   const session = await deps.repo.getSession(sessionId);
@@ -103,7 +106,7 @@ export async function unlinkPullRequest(
   if (!ref) {
     throw new InvalidStateError("invalid pull request reference");
   }
-  const removed = await deps.repo.deleteLink(prKeyOf(ref), sessionId);
+  const removed = await deps.repo.deleteLink(prKeyOf(ref), sessionId, { source });
   if (!removed) {
     throw new InvalidStateError(`pull request ${prKeyOf(ref)} is not linked to this session`);
   }

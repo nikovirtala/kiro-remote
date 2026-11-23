@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "vitest run",
-    "lint": "biome check ."
+    "lint": "biome check .",
+    "gen:feed-schemas": "node scripts/gen-feed-schemas.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1163.0",
@@ -20,5 +21,8 @@
     "aws-jwt-verify": "^5.2.1",
     "ulid": "^3.0.2",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0"
   }
 }

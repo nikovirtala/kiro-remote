@@ -15,7 +15,6 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
-  TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
@@ -31,6 +30,8 @@ import {
   OAUTH_TX_TTL_MS,
   PERMISSION_TIMEOUT_MS,
 } from "../config.ts";
+import type { FeedPage, FeedSource, WakeCause } from "../schemas/feed.ts";
+import { FeedConflictError, type FeedDraft, FeedWriter, type TransactOp } from "./feed.ts";
 import {
   CAPS_SK,
   CONFIG_PK,
@@ -120,12 +121,36 @@ function isS3Pointer(value: unknown): value is S3Pointer {
   return typeof value === "object" && value !== null && (value as S3Pointer).s3 === true;
 }
 
+/** Why a session is woken, by the kind of wake item. */
+function wakeCauseOf(kind: string): WakeCause {
+  if (kind === "pr_conflict" || kind === "pr_behind") {
+    return "conflict";
+  }
+  return kind.startsWith("pr_wait_") ? "wait" : "linked_pr_event";
+}
+
+/** A wake event for an inbox item. The prompt and the data of the item never go into it. */
+function wakeDraft(
+  item: InboxItem,
+  type: "wake.queued" | "wake.delivered" | "wake.released" | "wake.dropped",
+  extra: Record<string, unknown>,
+): FeedDraft {
+  return {
+    sessionId: item.sessionId,
+    pr: item.key,
+    type,
+    source: item.origin ?? "webhook",
+    payload: { itemId: item.id, kind: item.kind, cause: wakeCauseOf(item.kind), ...extra },
+  };
+}
+
 export class Repository {
   private readonly ddb: DynamoDBDocumentClient;
   private readonly s3: S3Client;
   private readonly table: string;
   private readonly bucket: string;
   private readonly now: () => number;
+  private readonly feed: FeedWriter;
 
   constructor(deps: RepositoryDeps) {
     this.ddb = deps.ddb;
@@ -133,6 +158,20 @@ export class Repository {
     this.table = deps.tableName;
     this.bucket = deps.bucketName;
     this.now = deps.now ?? (() => Date.now());
+    this.feed = new FeedWriter(deps.ddb, deps.tableName, this.now);
+  }
+
+  /**
+   * The account a session's feed events go to: the owner of the session. Null when the session no
+   * longer exists, in which case the change is made without an event (nobody could read it).
+   */
+  private async ownerOf(sessionId: string): Promise<string | null> {
+    return (await this.getSession(sessionId))?.createdBy ?? null;
+  }
+
+  /** The owner's change feed after `after`, oldest first. */
+  async readFeed(owner: string, after: number, limit: number): Promise<FeedPage> {
+    return this.feed.read(owner, after, limit);
   }
 
   private nowIso(): string {
@@ -727,6 +766,8 @@ export class Repository {
     prState: PrState;
     headSha: string | null;
     baseRef?: string | null;
+    /** What caused the link, for the change feed. Defaults to the method (a manual link: rest). */
+    source?: FeedSource;
   }): Promise<{ created: true; link: PrLinkItem } | { created: false; existing: PrLinkItem }> {
     const pr = `${args.repo}#${args.number}`;
     const linkedAt = this.nowIso();
@@ -756,23 +797,31 @@ export class Repository {
       linkedAt,
     };
     try {
-      await this.ddb.send(
-        new TransactWriteCommand({
-          TransactItems: [
-            {
-              Put: {
-                TableName: this.table,
-                Item: link,
-                ConditionExpression: "attribute_not_exists(PK)",
-              },
+      await this.feed.transact(
+        await this.ownerOf(args.sessionId),
+        [
+          {
+            Put: {
+              TableName: this.table,
+              Item: link,
+              ConditionExpression: "attribute_not_exists(PK)",
             },
-            { Put: { TableName: this.table, Item: reverse } },
-          ],
-        }),
+          },
+          { Put: { TableName: this.table, Item: reverse } },
+        ],
+        [
+          {
+            sessionId: args.sessionId,
+            pr,
+            type: "link.added",
+            source: args.source ?? (args.linkedBy === "manual" ? "rest" : args.linkedBy),
+            payload: { method: args.linkedBy, prState: args.prState },
+          },
+        ],
       );
       return { created: true, link };
     } catch (err) {
-      if ((err as { name?: string }).name !== "TransactionCanceledException") {
+      if (!(err instanceof FeedConflictError)) {
         throw err;
       }
       const existing = await this.getPrLink(pr);
@@ -822,41 +871,58 @@ export class Repository {
   }
 
   /** Remove a link. Only the owning session can remove it. Returns false when there was none. */
-  async deleteLink(key: string, sessionId: string): Promise<boolean> {
+  async deleteLink(
+    key: string,
+    sessionId: string,
+    opts: { source?: FeedSource } = {},
+  ): Promise<boolean> {
     try {
-      await this.ddb.send(
-        new TransactWriteCommand({
-          TransactItems: [
-            {
-              Delete: {
-                TableName: this.table,
-                Key: { PK: ghPrPk(key), SK: GH_LINK_SK },
-                ConditionExpression: "sessionId = :sessionId",
-                ExpressionAttributeValues: { ":sessionId": sessionId },
-              },
+      await this.feed.transact(
+        await this.ownerOf(sessionId),
+        [
+          {
+            Delete: {
+              TableName: this.table,
+              Key: { PK: ghPrPk(key), SK: GH_LINK_SK },
+              ConditionExpression: "sessionId = :sessionId",
+              ExpressionAttributeValues: { ":sessionId": sessionId },
             },
-            {
-              Delete: {
-                TableName: this.table,
-                Key: { PK: sessionPk(sessionId), SK: sessionLinkSk(key) },
-              },
+          },
+          {
+            Delete: {
+              TableName: this.table,
+              Key: { PK: sessionPk(sessionId), SK: sessionLinkSk(key) },
             },
-          ],
-        }),
+          },
+        ],
+        [
+          {
+            sessionId,
+            pr: key,
+            type: "link.removed",
+            source: opts.source ?? "rest",
+            payload: { reason: "unlinked" },
+          },
+        ],
       );
       return true;
     } catch (err) {
-      if ((err as { name?: string }).name === "TransactionCanceledException") {
+      if (err instanceof FeedConflictError) {
         return false;
       }
       throw err;
     }
   }
 
-  /** Refresh the PR-side state of an existing link (from webhook payloads). */
+  /**
+   * Refresh the PR-side state of an existing link (from webhook payloads). A change of `prState` is
+   * written with its `link.state_changed` event in one transaction; a refresh of the head or base
+   * alone, or of the same state, is not a change a reader follows and writes no event.
+   */
   async updateLinkState(
     key: string,
     patch: { prState?: PrState; headSha?: string | null; baseRef?: string | null },
+    opts: { source?: FeedSource } = {},
   ): Promise<void> {
     const sets: string[] = [];
     const values: Record<string, unknown> = {};
@@ -883,19 +949,60 @@ export class Repository {
     if (sets.length === 0) {
       return;
     }
-    try {
-      await this.ddb.send(
-        new UpdateCommand({
-          TableName: this.table,
-          Key: { PK: ghPrPk(key), SK: GH_LINK_SK },
-          UpdateExpression: `SET ${sets.join(", ")}`,
-          ConditionExpression: "attribute_exists(PK)",
-          ExpressionAttributeValues: values,
-        }),
-      );
-    } catch (err) {
-      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
-        throw err;
+    const Key = { PK: ghPrPk(key), SK: GH_LINK_SK };
+    for (let attempt = 1; ; attempt++) {
+      const current = patch.prState !== undefined ? await this.getPrLink(key) : null;
+      const changes = current !== null && patch.prState !== current.prState;
+      try {
+        if (changes && current) {
+          await this.feed.transact(
+            await this.ownerOf(current.sessionId),
+            [
+              {
+                Update: {
+                  TableName: this.table,
+                  Key,
+                  UpdateExpression: `SET ${sets.join(", ")}`,
+                  ConditionExpression: "attribute_exists(PK) AND prState = :prevState",
+                  ExpressionAttributeValues: { ...values, ":prevState": current.prState },
+                },
+              },
+            ],
+            [
+              {
+                sessionId: current.sessionId,
+                pr: key,
+                type: "link.state_changed",
+                source: opts.source ?? "webhook",
+                payload: { from: current.prState, to: patch.prState },
+              },
+            ],
+          );
+        } else {
+          await this.ddb.send(
+            new UpdateCommand({
+              TableName: this.table,
+              Key,
+              UpdateExpression: `SET ${sets.join(", ")}`,
+              ConditionExpression: "attribute_exists(PK)",
+              ExpressionAttributeValues: values,
+            }),
+          );
+        }
+        return;
+      } catch (err) {
+        // The link is gone, or (with an event) its state moved under us: read it again.
+        const name = (err as { name?: string }).name;
+        if (err instanceof FeedConflictError) {
+          if (attempt >= 3 || (await this.getPrLink(key)) === null) {
+            return;
+          }
+          continue;
+        }
+        if (name !== "ConditionalCheckFailedException") {
+          throw err;
+        }
+        return;
       }
     }
   }
@@ -926,16 +1033,30 @@ export class Repository {
       GSI1SK: args.sessionId,
     };
     try {
-      await this.ddb.send(
-        new PutCommand({
-          TableName: this.table,
-          Item: wait,
-          ConditionExpression: "attribute_not_exists(PK)",
-        }),
+      await this.feed.transact(
+        await this.ownerOf(args.sessionId),
+        [
+          {
+            Put: {
+              TableName: this.table,
+              Item: wait,
+              ConditionExpression: "attribute_not_exists(PK)",
+            },
+          },
+        ],
+        [
+          {
+            sessionId: args.sessionId,
+            pr: args.pr,
+            type: "wait.registered",
+            source: args.source,
+            payload: { waitSource: args.source },
+          },
+        ],
       );
       return { created: true, wait };
     } catch (err) {
-      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
+      if (!(err instanceof FeedConflictError)) {
         throw err;
       }
       const existing = await this.getWait(args.sessionId, args.pr);
@@ -1002,21 +1123,92 @@ export class Repository {
   }
 
   /**
-   * Remove a wait. True for the one caller whose delete removed it, false when there was none,
-   * so a wait fired by a webhook and by a re-check at once wakes the session once.
+   * Remove a wait, with its `wait.removed` event. True for the one caller whose delete removed it,
+   * false when there was none, so a wait removed by a webhook and by a re-check at once is removed
+   * once. `reason` is why: `stopped` by the caller (the default), or `registration_failed`. A wait
+   * that fires goes through {@link fireWait}, which also writes the wake.
    */
-  async deleteWait(sessionId: string, pr: string): Promise<boolean> {
+  async deleteWait(
+    sessionId: string,
+    pr: string,
+    opts: { reason?: "stopped" | "registration_failed"; source?: FeedSource } = {},
+  ): Promise<boolean> {
     try {
-      await this.ddb.send(
-        new DeleteCommand({
-          TableName: this.table,
-          Key: { PK: sessionPk(sessionId), SK: waitSk(pr) },
-          ConditionExpression: "attribute_exists(PK)",
-        }),
+      await this.feed.transact(
+        await this.ownerOf(sessionId),
+        [this.waitDelete(sessionId, pr)],
+        [
+          {
+            sessionId,
+            pr,
+            type: "wait.removed",
+            source: opts.source ?? "rest",
+            payload: { reason: opts.reason ?? "stopped" },
+          },
+        ],
       );
       return true;
     } catch (err) {
-      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
+      if (err instanceof FeedConflictError) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  private waitDelete(sessionId: string, pr: string): TransactOp {
+    return {
+      Delete: {
+        TableName: this.table,
+        Key: { PK: sessionPk(sessionId), SK: waitSk(pr) },
+        ConditionExpression: "attribute_exists(PK)",
+      },
+    };
+  }
+
+  /**
+   * Fire a wait: remove it and write the wake that tells the session, with both events, in one
+   * transaction. The delete is the claim: of a webhook and a check that fire the same wait at once,
+   * only one commits, and a wake that cannot be written leaves the wait where it was. False when
+   * the wait was already gone (nothing is written).
+   */
+  async fireWait(args: {
+    sessionId: string;
+    pr: string;
+    /** Why it fired: the awaited PR merged, was closed, or could not be read. */
+    reason: "merged" | "closed" | "unreadable";
+    item: InboxItem;
+    /** What read GitHub: a webhook, or the check made on registration (a sweep). */
+    source: FeedSource;
+  }): Promise<boolean> {
+    const item: InboxItem = { ...args.item, origin: args.source };
+    try {
+      await this.feed.transact(
+        await this.ownerOf(args.sessionId),
+        [
+          this.waitDelete(args.sessionId, args.pr),
+          {
+            Put: {
+              TableName: this.table,
+              Item: item,
+              ConditionExpression: "attribute_not_exists(PK)",
+            },
+          },
+        ],
+        [
+          {
+            sessionId: args.sessionId,
+            pr: args.pr,
+            type: "wait.removed",
+            source: args.source,
+            payload: { reason: args.reason },
+          },
+          wakeDraft(item, "wake.queued", { merged: false }),
+        ],
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof FeedConflictError && err.index === 0) {
         return false;
       }
       throw err;
@@ -1121,14 +1313,33 @@ export class Repository {
 
   /* -------------------------------- Inbox -------------------------------- */
 
-  async putInboxItem(item: InboxItem): Promise<void> {
-    await this.ddb.send(
-      new PutCommand({
+  /** Add a wake to the session's inbox, with its `wake.queued` event. */
+  async putInboxItem(item: InboxItem, opts: { source?: FeedSource } = {}): Promise<void> {
+    const stored: InboxItem = { ...item, origin: opts.source ?? item.origin ?? "webhook" };
+    await this.feed.transact(
+      await this.ownerOf(item.sessionId),
+      [
+        {
+          Put: {
+            TableName: this.table,
+            Item: stored,
+            ConditionExpression: "attribute_not_exists(PK)",
+          },
+        },
+      ],
+      [wakeDraft(stored, "wake.queued", { merged: false })],
+    );
+  }
+
+  async getInboxItem(sessionId: string, id: string): Promise<InboxItem | null> {
+    const res = await this.ddb.send(
+      new GetCommand({
         TableName: this.table,
-        Item: item,
-        ConditionExpression: "attribute_not_exists(PK)",
+        Key: { PK: sessionPk(sessionId), SK: `${INBOX_PREFIX}${id}` },
+        ConsistentRead: true,
       }),
     );
+    return (res.Item as InboxItem | undefined) ?? null;
   }
 
   /** A session's inbox items, oldest first, optionally only one status. */
@@ -1151,12 +1362,17 @@ export class Repository {
     return items;
   }
 
+  /**
+   * Move an inbox item from one status to another. With `event`, the item is read first and the
+   * update is written with the event it returns (null for none) in one transaction.
+   */
   private async inboxTransition(
     sessionId: string,
     id: string,
     from: InboxItem["status"],
     set: Record<string, unknown>,
     extraCondition?: { name: string; value: unknown },
+    event?: (item: InboxItem) => FeedDraft | null,
   ): Promise<boolean> {
     const sets: string[] = [];
     const names: Record<string, string> = { "#status": "status" };
@@ -1172,20 +1388,49 @@ export class Repository {
       values[`:c_${extraCondition.name}`] = extraCondition.value;
       condition += ` AND #${extraCondition.name} = :c_${extraCondition.name}`;
     }
+    const Key = { PK: sessionPk(sessionId), SK: `${INBOX_PREFIX}${id}` };
     try {
-      await this.ddb.send(
-        new UpdateCommand({
-          TableName: this.table,
-          Key: { PK: sessionPk(sessionId), SK: `${INBOX_PREFIX}${id}` },
-          UpdateExpression: `SET ${sets.join(", ")}`,
-          ConditionExpression: condition,
-          ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
-        }),
-      );
+      const item = event ? await this.getInboxItem(sessionId, id) : null;
+      const draft = item && event ? event(item) : null;
+      if (event && !item) {
+        return false;
+      }
+      if (draft) {
+        // ExpressionAttributeNames are only valid when a name is used, which they all are.
+        await this.feed.transact(
+          await this.ownerOf(sessionId),
+          [
+            {
+              Update: {
+                TableName: this.table,
+                Key,
+                UpdateExpression: `SET ${sets.join(", ")}`,
+                ConditionExpression: condition,
+                ExpressionAttributeNames: names,
+                ExpressionAttributeValues: values,
+              },
+            },
+          ],
+          [draft],
+        );
+      } else {
+        await this.ddb.send(
+          new UpdateCommand({
+            TableName: this.table,
+            Key,
+            UpdateExpression: `SET ${sets.join(", ")}`,
+            ConditionExpression: condition,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+          }),
+        );
+      }
       return true;
     } catch (err) {
-      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
+      if (
+        err instanceof FeedConflictError ||
+        (err as { name?: string }).name === "ConditionalCheckFailedException"
+      ) {
         return false;
       }
       throw err;
@@ -1197,10 +1442,14 @@ export class Repository {
     const claimed: string[] = [];
     for (const id of ids) {
       if (
-        await this.inboxTransition(sessionId, id, "pending", {
-          status: "delivered",
-          deliveredTurnId: turnId,
-        })
+        await this.inboxTransition(
+          sessionId,
+          id,
+          "pending",
+          { status: "delivered", deliveredTurnId: turnId },
+          undefined,
+          (item) => wakeDraft(item, "wake.delivered", { turnId }),
+        )
       ) {
         claimed.push(id);
       }
@@ -1217,6 +1466,7 @@ export class Repository {
         "delivered",
         { status: "pending", deliveredTurnId: null },
         { name: "deliveredTurnId", value: turnId },
+        (item) => wakeDraft(item, "wake.released", { turnId }),
       );
     }
   }
@@ -1226,10 +1476,14 @@ export class Repository {
     let dropped = 0;
     for (const id of ids) {
       if (
-        await this.inboxTransition(sessionId, id, "pending", {
-          status: "dropped",
-          dropReason: reason,
-        })
+        await this.inboxTransition(
+          sessionId,
+          id,
+          "pending",
+          { status: "dropped", dropReason: reason },
+          undefined,
+          (item) => wakeDraft(item, "wake.dropped", { reason }),
+        )
       ) {
         dropped++;
       }
@@ -1243,11 +1497,14 @@ export class Repository {
     id: string,
     patch: { deliveryIds: string[]; prompt: string; data: Record<string, unknown> | null },
   ): Promise<boolean> {
-    return this.inboxTransition(sessionId, id, "pending", {
-      deliveryIds: patch.deliveryIds,
-      prompt: patch.prompt,
-      data: patch.data,
-    });
+    return this.inboxTransition(
+      sessionId,
+      id,
+      "pending",
+      { deliveryIds: patch.deliveryIds, prompt: patch.prompt, data: patch.data },
+      undefined,
+      (item) => wakeDraft(item, "wake.queued", { merged: true }),
+    );
   }
 
   /** Move a still-pending item's due time (ISO-8601). False when it was drained meanwhile. */

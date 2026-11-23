@@ -65,10 +65,61 @@ export class FakeDdb {
     if (name === "UpdateCommand") {
       return this.update(input);
     }
+    if (name === "TransactWriteCommand") {
+      return this.transact(input.TransactItems);
+    }
     if (name === "QueryCommand") {
       return this.query(input);
     }
     throw new Error(`FakeDdb: unsupported command ${name}`);
+  }
+
+  /** All-or-nothing put/delete/update with the few conditions the repository writes. */
+  // biome-ignore lint/suspicious/noExplicitAny: DynamoDB transaction input is dynamic.
+  private transact(ops: any[]): Record<string, unknown> {
+    const reasons: Array<{ Code: string }> = [];
+    for (const op of ops) {
+      const body = op.Put ?? op.Delete ?? op.Update;
+      const key = op.Put ? body.Item : body.Key;
+      const existing = this.items.get(this.key(key.PK, key.SK));
+      const cond: string | undefined = body.ConditionExpression;
+      const values = body.ExpressionAttributeValues ?? {};
+      let ok = true;
+      if (cond === "attribute_not_exists(PK)") {
+        ok = existing === undefined;
+      } else if (cond === "attribute_exists(PK)") {
+        ok = existing !== undefined;
+      } else if (cond === "attribute_not_exists(seq)") {
+        ok = existing === undefined || existing.seq === undefined;
+      } else if (cond === "seq = :cur") {
+        ok = existing?.seq === values[":cur"];
+      } else if (cond === "sessionId = :sessionId") {
+        ok = existing?.sessionId === values[":sessionId"];
+      } else if (cond !== undefined) {
+        throw new Error(`FakeDdb: unsupported transaction condition ${cond}`);
+      }
+      reasons.push({ Code: ok ? "None" : "ConditionalCheckFailed" });
+    }
+    if (reasons.some((r) => r.Code !== "None")) {
+      throw Object.assign(new Error("transaction cancelled"), {
+        name: "TransactionCanceledException",
+        CancellationReasons: reasons,
+      });
+    }
+    for (const op of ops) {
+      if (op.Put) {
+        this.items.set(this.key(op.Put.Item.PK, op.Put.Item.SK), op.Put.Item);
+      } else if (op.Delete) {
+        this.items.delete(this.key(op.Delete.Key.PK, op.Delete.Key.SK));
+      } else {
+        const k = this.key(op.Update.Key.PK, op.Update.Key.SK);
+        this.items.set(k, {
+          ...(this.items.get(k) ?? op.Update.Key),
+          seq: op.Update.ExpressionAttributeValues[":next"],
+        });
+      }
+    }
+    return {};
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: DynamoDB update input is dynamic.
