@@ -313,8 +313,8 @@ When the check made at registration finds the PR already closed, the header has
 no delivery (`... was already merged when the wait was checked on octo/repo#7.`).
 
 **A fired wait is removed**, and the removal is the claim: of a webhook and a check
-that fire it at the same moment, only the delete that succeeds writes the wake. If
-the wake cannot be written the wait is put back and the message is retried.
+that fire it at the same moment, only the transaction that deletes it commits, and it writes the
+wake in the same transaction. If the wake cannot be written the wait stays where it was and the message is retried.
 
 **One turn for a wait and the waiter's own conflict.** The drain folds all _due_
 inbox items of a session into one turn, so the two wakes only share a turn when
@@ -332,6 +332,109 @@ already delivered, and the read is `GET /pulls/{n}`. They cost one GSI1 query pe
 `pull_request.closed` delivery (and one `queryLinks` per waiter of a merged PR),
 and one read per registered wait. The API function gains
 `GITHUB_QUEUE_URL` and permission to send to the GitHub queue.
+
+## The change feed
+
+kiro-remote decides from its own state: which PR belongs to which session, what a
+session waits for, which session to wake and why. It **publishes each of those
+decisions as an event**, so that other readers (draft's map, ark's folds) can show
+what a session waits for and why it woke without a second copy of the state. This
+is ark ADR 9t6n5jc6 ("Publish every decision a system makes as events others can
+read"): the rule is "no state that only one reader can see".
+
+**One feed per account**, the owner of the session an event is about, append-only
+and ordered. Read it with a cursor:
+
+- `GET /v1/events?after=<cursor>&limit=<n>` and the tool `kiro_list_events`
+  `{ after, limit }`. `after` is the `seq` of the last event you read (`0` to start);
+  `limit` defaults to 50, at most 200. The answer is
+  `{ events, nextCursor, hasMore }`; pass `nextCursor` as `after` to continue, and
+  stop when `hasMore` is false. With nothing new, `nextCursor` is the `after` you sent.
+- It needs `sessions:read` and returns your events only. Events are filed under the
+  owner of their session, so another account's events are in another partition,
+  not hidden by a filter.
+
+**An event:**
+
+```json
+{
+  "v": 1,
+  "id": "01M8...",
+  "seq": 2,
+  "ts": "2026-11-24T08:01:12.000Z",
+  "type": "wait.removed",
+  "effect": "state",
+  "sessionId": "01M8...",
+  "pr": "octo/repo#7",
+  "source": "webhook",
+  "payload": { "reason": "merged" }
+}
+```
+
+| Type                 | Effect       | When, and the payload                                                                                                                                                                         |
+| -------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `link.added`         | `state`      | A PR was linked. `{ method: harvest\|trailer\|manual, prState }`.                                                                                                                             |
+| `link.removed`       | `state`      | A link was removed. `{ reason: "unlinked" }`.                                                                                                                                                 |
+| `link.state_changed` | `state`      | The linked PR opened, closed or merged. `{ from, to }`. A refresh of the head or base alone writes no event.                                                                                  |
+| `wait.registered`    | `state`      | A session started waiting for a PR. `{ waitSource: mcp\|rest\|trailer }`.                                                                                                                     |
+| `wait.removed`       | `state`      | A wait ended. `{ reason }`: `merged`, `closed`, `unreadable` (it **fired**), `stopped` (the caller removed it) or `registration_failed` (stored, but its first check could not be requested). |
+| `wake.queued`        | `annotation` | A wake was written to the session's inbox, or folded into a pending one (`merged: true`). `{ itemId, kind, cause, merged }`.                                                                  |
+| `wake.delivered`     | `annotation` | The wake was sent to the session as a prompt turn. `{ itemId, kind, cause, turnId }`.                                                                                                         |
+| `wake.released`      | `annotation` | The turn did not start, the wake is pending again. Same payload as delivered.                                                                                                                 |
+| `wake.dropped`       | `annotation` | The wake was not sent (session failed or deleted, auto-closed). `{ itemId, kind, cause, reason }`.                                                                                            |
+
+`cause` is why the session was woken: `linked_pr_event` (its own PR merged, closed,
+was reviewed or commented on, or failed checks), `conflict` (its PR no longer merges
+or is behind) or `wait` (a PR it waits for closed). `kind` is the wake's own name
+(`pr_merged`, `pr_conflict`, `pr_wait_merged`, ...). A fired wait is two events in one
+commit, `wait.removed` and the `wake.queued` it caused.
+
+`source` is who caused the change: `mcp` or `rest` (a caller), `trailer` (a
+`Kiro-Remote-*` line in a PR body), `webhook` (a GitHub delivery and the delayed
+re-checks it started), `harvest` (the PR URL the agent printed in a turn) or `sweep`
+(a read of GitHub kiro-remote made on its own initiative: the check made when a wait
+is registered, and any later scheduled sweep). A reader treats an unknown `source` as
+opaque.
+
+**Never in an event:** prompt text, transcript content, PR titles or bodies, tokens.
+Only ids, PR references, enums and counts.
+
+**Atomic with the change.** An event is written in the same DynamoDB transaction
+(`TransactWriteItems`) as the state change it records, so a change cannot exist without
+its event or the other way round. `packages/core/src/repo/feed.ts` numbers the events:
+a transaction reads the account's counter and writes `seq = last + 1` guarded by the
+value it read, together with the change and the events. Two writers that read the same
+counter cannot both commit, the second is cancelled and reads again, so commits are
+serialised in `seq` order. **`seq` has no gaps** and an event with a lower `seq` is
+never committed after a higher one: a reader that holds a cursor cannot miss an event,
+and a jump in `seq` means the events in between have expired. A test
+(`feedViolations()` over the commands of every write path, in the unit and emulator
+tests) fails when a link or a wait changes without an event.
+
+**The contract is versioned.** The zod objects in
+[`packages/core/src/schemas/feed.ts`](../packages/core/src/schemas/feed.ts) are
+the source of truth. The JSON Schemas generated from them are checked in under
+[`packages/core/schemas/feed/`](../packages/core/schemas/feed/): `envelope.json`,
+`page.json` and one file per type (`pnpm --filter @nikovirtala/kiro-remote-core
+gen:feed-schemas`, then `pnpm lint:fix`). A test fails when they drift from the code
+and when an emitted event does not validate against them. A change that only adds an
+optional payload field or a type stays in `v: 1`; anything else is `v: 2`.
+
+**Skipping what you do not know.** `effect` says whether an event moves state a reader
+follows (`state`: a link or a wait) or only records a decision (`annotation`: a wake).
+A reader that meets a type it does not know may **skip it when it is an annotation**
+and must **stop when it is `state`**, since the state it rebuilds would be wrong
+(`feedEventDisposition()` does this). Readers ignore fields they do not know.
+
+**Retention.** Events are kept **35 days** (DynamoDB TTL): at least 30, with 5 days of
+margin for a reader that comes back about monthly. DynamoDB deletes late, never early. A reader that is away longer finds a jump in `seq` after its cursor.
+
+**Where the feed starts.** Links and waits that exist before the feed was deployed have
+no event, so a fold takes its starting state from `GET /v1/sessions/{id}`
+(`links[]`, `waits[]`) and follows the feed from there, and says which cursor its view
+was built from. The one thing the feed does not publish is the due time of a pending
+wake being moved (a wait wake and a conflict wake are held to the same time), which is
+not a decision to wake.
 
 ### The agent's GitHub identity
 
@@ -471,6 +574,7 @@ settles turns.
 
 ## Where it shows up
 
+- `GET /v1/events` and `kiro_list_events`: [the change feed](#the-change-feed), every link, wait and wake with its cause.
 - `GET /v1/sessions/{id}`: `links[]` (`pr`, `linkedBy`, `prState`, `headSha`) and `waits[]` (`pr`, `source`, `createdAt`).
 - `GET /v1/sessions/{id}/turns/{turnId}`: `trigger` (`{ source: "user" | "github", deliveryIds }`)
   and `prompt`, the exact wake prompt the agent got.
