@@ -38,9 +38,11 @@ import {
   clientPk,
   EVENT_SK_MAX,
   eventSk,
+  GH_BASE_TIP_SK,
   GH_LINK_OPEN_PREFIX,
   GH_LINK_SK,
   GH_UNMATCHED_PK,
+  ghBaseTipPk,
   ghDeliveryPk,
   ghLinkGsi1Sk,
   ghPrPk,
@@ -56,8 +58,12 @@ import {
   permSk,
   SESSION_LINK_PREFIX,
   SINGLETON_SK,
+  SWEEP_LINK_PK,
+  SWEEP_WAIT_PK,
   sessionLinkSk,
   sessionPk,
+  sweepLinkSk,
+  sweepWaitSk,
   ttlFromNow,
   turnSk,
   userGsi1Pk,
@@ -65,6 +71,7 @@ import {
   waitSk,
 } from "./keys.ts";
 import type {
+  BaseTipItem,
   CapsItem,
   DeliveryItem,
   DeliveryStatus,
@@ -785,6 +792,7 @@ export class Repository {
       baseRef: args.baseRef ?? null,
       GSI1PK: ghRepoGsi1Pk(args.repo),
       GSI1SK: ghLinkGsi1Sk(isOpenState(args.prState), args.number),
+      ...(isOpenState(args.prState) ? { GSI2PK: SWEEP_LINK_PK, GSI2SK: sweepLinkSk(pr) } : {}),
     };
     const reverse: SessionLinkItem = {
       PK: sessionPk(args.sessionId),
@@ -925,6 +933,7 @@ export class Repository {
     opts: { source?: FeedSource } = {},
   ): Promise<void> {
     const sets: string[] = [];
+    const removes: string[] = [];
     const values: Record<string, unknown> = {};
     if (patch.prState !== undefined) {
       sets.push("prState = :prState");
@@ -936,6 +945,14 @@ export class Repository {
         sets.push("GSI1PK = :gsi1pk", "GSI1SK = :gsi1sk");
         values[":gsi1pk"] = ghRepoGsi1Pk(key.slice(0, hash));
         values[":gsi1sk"] = ghLinkGsi1Sk(isOpenState(patch.prState), number);
+        // The sweep's index holds a link only while its PR is open (or not known yet).
+        if (isOpenState(patch.prState)) {
+          sets.push("GSI2PK = :gsi2pk", "GSI2SK = :gsi2sk");
+          values[":gsi2pk"] = SWEEP_LINK_PK;
+          values[":gsi2sk"] = sweepLinkSk(key);
+        } else {
+          removes.push("GSI2PK", "GSI2SK");
+        }
       }
     }
     if (patch.baseRef !== undefined) {
@@ -949,6 +966,7 @@ export class Repository {
     if (sets.length === 0) {
       return;
     }
+    const updateExpression = `SET ${sets.join(", ")}${removes.length > 0 ? ` REMOVE ${removes.join(", ")}` : ""}`;
     const Key = { PK: ghPrPk(key), SK: GH_LINK_SK };
     for (let attempt = 1; ; attempt++) {
       const current = patch.prState !== undefined ? await this.getPrLink(key) : null;
@@ -962,7 +980,7 @@ export class Repository {
                 Update: {
                   TableName: this.table,
                   Key,
-                  UpdateExpression: `SET ${sets.join(", ")}`,
+                  UpdateExpression: updateExpression,
                   ConditionExpression: "attribute_exists(PK) AND prState = :prevState",
                   ExpressionAttributeValues: { ...values, ":prevState": current.prState },
                 },
@@ -983,7 +1001,7 @@ export class Repository {
             new UpdateCommand({
               TableName: this.table,
               Key,
-              UpdateExpression: `SET ${sets.join(", ")}`,
+              UpdateExpression: updateExpression,
               ConditionExpression: "attribute_exists(PK)",
               ExpressionAttributeValues: values,
             }),
@@ -1031,6 +1049,8 @@ export class Repository {
       createdAt: this.nowIso(),
       GSI1PK: ghWaitGsi1Pk(args.pr),
       GSI1SK: args.sessionId,
+      GSI2PK: SWEEP_WAIT_PK,
+      GSI2SK: sweepWaitSk(args.pr, args.sessionId),
     };
     try {
       await this.feed.transact(
@@ -1123,15 +1143,103 @@ export class Repository {
   }
 
   /**
+   * Every open wait, across accounts, from the sweep's sparse index (GSI2), sorted by PR so that
+   * the waits for one PR are adjacent. A global index read is eventually consistent: a wait written
+   * a moment ago may be missing, and the next run finds it. Waits written before the index existed
+   * are not in it until `backfillSweepIndex` has run (tasks/).
+   */
+  async queryOpenWaits(): Promise<PrWaitItem[]> {
+    return this.querySweepIndex<PrWaitItem>(SWEEP_WAIT_PK);
+  }
+
+  /**
+   * Every linked PR that is open or not known yet, across accounts and repos, from GSI2. The
+   * sweep groups them by repo and base branch.
+   */
+  async queryOpenLinkIndex(): Promise<PrLinkItem[]> {
+    const links = await this.querySweepIndex<PrLinkItem>(SWEEP_LINK_PK);
+    return links.filter((l) => isOpenState(l.prState));
+  }
+
+  private async querySweepIndex<T>(pk: string): Promise<T[]> {
+    const items: T[] = [];
+    let cursor: Record<string, unknown> | undefined;
+    do {
+      const res = await this.ddb.send(
+        new QueryCommand({
+          TableName: this.table,
+          IndexName: "GSI2",
+          KeyConditionExpression: "GSI2PK = :pk",
+          ExpressionAttributeValues: { ":pk": pk },
+          ExclusiveStartKey: cursor,
+        }),
+      );
+      items.push(...((res.Items as T[] | undefined) ?? []));
+      cursor = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (cursor);
+    return items;
+  }
+
+  /**
+   * Remove every wait of a session, each with its `wait.removed` event (`session_deleted`) in one
+   * transaction. A wait that went meanwhile (it fired, or the caller removed it) is not counted.
+   * Returns the number removed. Called when a session is deleted, so no wait outlives its session.
+   */
+  async deleteSessionWaits(sessionId: string, opts: { source?: FeedSource } = {}): Promise<number> {
+    let removed = 0;
+    for (const wait of await this.queryWaits(sessionId)) {
+      if (await this.deleteWait(sessionId, wait.pr, { reason: "session_deleted", ...opts })) {
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** The tip a base branch had when it was last checked, or null. */
+  async getBaseTip(repo: string, base: string): Promise<BaseTipItem | null> {
+    const res = await this.ddb.send(
+      new GetCommand({
+        TableName: this.table,
+        Key: { PK: ghBaseTipPk(repo, base), SK: GH_BASE_TIP_SK },
+        ConsistentRead: true,
+      }),
+    );
+    return (res.Item as BaseTipItem | undefined) ?? null;
+  }
+
+  /** Record the tip a base branch had when it was checked. Last write wins. */
+  async putBaseTip(args: {
+    repo: string;
+    base: string;
+    sha: string;
+    afterPr: number | null;
+  }): Promise<void> {
+    const item: BaseTipItem = {
+      PK: ghBaseTipPk(args.repo, args.base),
+      SK: GH_BASE_TIP_SK,
+      repo: args.repo.toLowerCase(),
+      base: args.base,
+      sha: args.sha,
+      afterPr: args.afterPr,
+      checkedAt: this.nowIso(),
+    };
+    await this.ddb.send(new PutCommand({ TableName: this.table, Item: item }));
+  }
+
+  /**
    * Remove a wait, with its `wait.removed` event. True for the one caller whose delete removed it,
    * false when there was none, so a wait removed by a webhook and by a re-check at once is removed
-   * once. `reason` is why: `stopped` by the caller (the default), or `registration_failed`. A wait
-   * that fires goes through {@link fireWait}, which also writes the wake.
+   * once. `reason` is why: `stopped` by the caller (the default), `registration_failed`, or
+   * `session_deleted` (the session is gone, so nothing is left to wake). A wait that fires goes
+   * through {@link fireWait}, which also writes the wake.
    */
   async deleteWait(
     sessionId: string,
     pr: string,
-    opts: { reason?: "stopped" | "registration_failed"; source?: FeedSource } = {},
+    opts: {
+      reason?: "stopped" | "registration_failed" | "session_deleted";
+      source?: FeedSource;
+    } = {},
   ): Promise<boolean> {
     try {
       await this.feed.transact(

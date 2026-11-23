@@ -181,7 +181,7 @@ export class InProcessClient implements KiroRemoteClient {
 
   async deleteSession(principal: Principal, sessionId: string, opts?: WriteOptions): Promise<void> {
     await this.write(principal, opts, "deleteSession", { sessionId }, () =>
-      svcDelete(this.service, principal, sessionId),
+      svcDelete(this.service, principal, sessionId, { source: "mcp" }),
     );
   }
 

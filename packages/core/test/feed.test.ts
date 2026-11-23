@@ -140,6 +140,8 @@ describe("the contract", () => {
     await w.repo.deleteLink("octo/repo#1", "S1");
     await w.repo.createWait({ sessionId: "S1", pr: "octo/repo#2", source: "trailer" });
     await w.repo.deleteWait("S1", "octo/repo#2");
+    await w.repo.createWait({ sessionId: "S1", pr: "octo/repo#3", source: "rest" });
+    await w.repo.deleteSessionWaits("S1", { source: "mcp" });
     const a = wakeItem();
     await w.repo.putInboxItem(a);
     await w.repo.mergeInboxItem("S1", "i1", { deliveryIds: ["d1", "d2"], prompt: "p", data: null });
@@ -148,6 +150,12 @@ describe("the contract", () => {
     await w.repo.dropInbox("S1", ["i1"], "session_deleted");
     const events = await w.feed();
     expect(new Set(types(events))).toEqual(new Set(FEED_TYPE_NAMES));
+    // A session's deleted waits are published under the reason the schema lists for it.
+    expect(
+      events
+        .filter((e) => e.type === "wait.removed")
+        .map((e) => (e.payload as { reason: string }).reason),
+    ).toContain("session_deleted");
     const envelope = ajv.compile(checkedIn("envelope.json"));
     for (const e of events) {
       expect(envelope(e), JSON.stringify(envelope.errors)).toBe(true);
@@ -594,6 +602,8 @@ describe("no state change without its event", () => {
       source: "webhook",
     });
     await w.repo.deleteWait("S1", "octo/repo#4");
+    await w.repo.createWait({ sessionId: "S1", pr: "octo/repo#5", source: "mcp" });
+    await w.repo.deleteSessionWaits("S1", { source: "rest" });
     return w;
   };
 
@@ -613,6 +623,8 @@ describe("no state change without its event", () => {
         "wait.registered",
         "wait.removed",
         "wake.queued",
+        "wait.registered",
+        "wait.removed",
       ].sort(),
     );
   });

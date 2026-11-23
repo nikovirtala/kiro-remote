@@ -84,6 +84,9 @@ export interface PrLinkItem {
   /** GSI1: all links of a repo (see ghRepoGsi1Pk). Absent on links written before the index existed. */
   GSI1PK?: string;
   GSI1SK?: string;
+  /** GSI2 (the sweep's index, see SWEEP_LINK_PK): present while the PR is open or not known yet. */
+  GSI2PK?: string;
+  GSI2SK?: string;
 }
 
 /** PK SESSION#<id>, SK LINK#<owner>/<repo>#<n>: the reverse lookup. */
@@ -118,6 +121,26 @@ export interface PrWaitItem {
   createdAt: string;
   GSI1PK: string; // GHWAIT#<pr>
   GSI1SK: string; // <sessionId>
+  /** GSI2 (the sweep's index, see SWEEP_WAIT_PK). Absent on waits written before the index existed. */
+  GSI2PK?: string;
+  GSI2SK?: string;
+}
+
+/**
+ * PK GHBASE#<owner>/<repo>#<branch>, SK TIP: the tip of a base branch as the last check of it saw
+ * it, so the sweep can tell that a base moved while no webhook said so. It is bookkeeping, not
+ * state a reader of the change feed follows.
+ */
+export interface BaseTipItem {
+  PK: string;
+  SK: "TIP";
+  repo: string;
+  base: string;
+  /** The sha of the merge that last moved the branch, hex. */
+  sha: string;
+  /** The PR that merge belonged to, or null (a push). */
+  afterPr: number | null;
+  checkedAt: string;
 }
 
 export type DeliveryStatus = "received" | "processed" | "unmatched" | "ignored" | "failed";

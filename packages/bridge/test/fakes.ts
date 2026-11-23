@@ -9,6 +9,7 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
@@ -60,7 +61,45 @@ export class FakeDocClient {
       return this.handleQuery(command);
     }
 
+    if (command instanceof TransactWriteCommand) {
+      return this.handleTransact(command);
+    }
+
     throw new Error(`FakeDocClient: unsupported command ${command.constructor?.name}`);
+  }
+
+  /** Put, Delete and Update with the conditions the feed writer uses; all or nothing. */
+  // biome-ignore lint/suspicious/noExplicitAny: TransactWriteCommand input is dynamic.
+  private handleTransact(command: any): Record<string, never> {
+    const ops = command.input.TransactItems as Array<Record<string, Record<string, unknown>>>;
+    const reasons = ops.map((op) => {
+      const body = (op.Put ?? op.Delete ?? op.Update) as Record<string, Item>;
+      const key = (op.Put ? body.Item : body.Key) as Item;
+      const exists = this.store.has(this.key(key.PK, key.SK));
+      const cond = String(body.ConditionExpression ?? "");
+      const failed =
+        (cond.includes("attribute_not_exists(PK)") && exists) ||
+        (cond.startsWith("attribute_exists(PK)") && !exists);
+      return { Code: failed ? "ConditionalCheckFailed" : "None" };
+    });
+    if (reasons.some((r) => r.Code !== "None")) {
+      throw Object.assign(new Error("transaction cancelled"), {
+        name: "TransactionCanceledException",
+        CancellationReasons: reasons,
+      });
+    }
+    for (const op of ops) {
+      if (op.Put) {
+        const item = op.Put.Item as Item;
+        this.store.set(this.key(item.PK, item.SK), { ...item });
+      } else if (op.Delete) {
+        const key = op.Delete.Key as Item;
+        this.store.delete(this.key(key.PK, key.SK));
+      } else if (op.Update) {
+        this.handleUpdate({ input: op.Update });
+      }
+    }
+    return {};
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: UpdateCommand input is dynamic.
@@ -137,6 +176,11 @@ export class FakeDocClient {
     let items = all.filter((i) => i.PK === pk);
     if (from !== undefined && to !== undefined) {
       items = items.filter((i) => String(i.SK) >= from && String(i.SK) <= to);
+    }
+    // PK = :pk AND begins_with(SK, :p)
+    const prefix = /begins_with\(SK, (:\w+)\)/.exec(String(input.KeyConditionExpression ?? ""));
+    if (prefix) {
+      items = items.filter((i) => String(i.SK).startsWith(String(values[prefix[1]])));
     }
     items = items.sort((a, b) => String(a.SK).localeCompare(String(b.SK)));
     return { Items: input.Limit ? items.slice(0, input.Limit) : items };

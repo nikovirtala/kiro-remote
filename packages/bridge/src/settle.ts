@@ -160,6 +160,7 @@ export class TurnSettler {
       sub: session.createdBy,
       sessionId,
       commandId: this.d.newId?.() ?? crypto.randomUUID(),
+      source: "webhook",
     });
     logger.info("auto_close_on_merge", { sessionId });
   }

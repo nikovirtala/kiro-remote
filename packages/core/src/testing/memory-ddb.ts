@@ -54,8 +54,8 @@ function holds(
 }
 
 function applyUpdate(expr: string, item: Item, names: Names, values: Values): void {
-  const body = expr.replace(/^\s*SET\s+/i, "");
-  for (const assignment of body.split(/,\s*(?=[#\w]+\s*=)/)) {
+  const [setPart, removePart] = expr.replace(/^\s*SET\s+/i, "").split(/\s+REMOVE\s+/i);
+  for (const assignment of setPart.split(/,\s*(?=[#\w]+\s*=)/)) {
     const m = /^\s*([#\w]+)\s*=\s*(.+?)\s*$/.exec(assignment);
     if (!m) {
       throw new Error(`MemoryDdb: unsupported update clause: ${assignment}`);
@@ -69,6 +69,11 @@ function applyUpdate(expr: string, item: Item, names: Names, values: Values): vo
       item[target] = structuredClone(values[rhs]);
     } else {
       throw new Error(`MemoryDdb: unsupported update value: ${rhs}`);
+    }
+  }
+  for (const attr of (removePart ?? "").split(",")) {
+    if (attr.trim()) {
+      delete item[resolveName(attr.trim(), names)];
     }
   }
 }
@@ -200,6 +205,8 @@ export class MemoryDdb {
       }
       case "QueryCommand":
         return this.query(input, values);
+      case "ScanCommand":
+        return this.scan(input);
       case "TransactWriteCommand":
         return this.transact(input.TransactItems as Record<string, Record<string, unknown>>[]);
       default:
@@ -214,7 +221,7 @@ export class MemoryDdb {
     const expr = input.KeyConditionExpression as string;
     const pk = values[":pk"];
     let rows = this.items().filter((i) => i[pkAttr] === pk);
-    const begins = /begins_with\((?:GSI1)?SK, (:\w+)\)/.exec(expr);
+    const begins = /begins_with\((?:GSI\d)?SK, (:\w+)\)/.exec(expr);
     const between = /SK BETWEEN (:\w+) AND (:\w+)/.exec(expr);
     if (begins) {
       const prefix = String(values[begins[1]]);
@@ -232,6 +239,29 @@ export class MemoryDdb {
       rows = rows.slice(0, input.Limit);
     }
     return { Items: rows.map((r) => structuredClone(r)) };
+  }
+
+  /** A scan of the table or of one index, with pages (`Limit`) and a projection of attribute names. */
+  private scan(input: Record<string, unknown>): unknown {
+    const index = input.IndexName as string | undefined;
+    const rows = this.items()
+      .filter((i) => !index || i[`${index}PK`] !== undefined)
+      .sort((a, b) => `${a.PK}\u0000${a.SK}`.localeCompare(`${b.PK}\u0000${b.SK}`));
+    const start = Number((input.ExclusiveStartKey as { offset?: number } | undefined)?.offset ?? 0);
+    const limit = typeof input.Limit === "number" ? input.Limit : rows.length;
+    const page = rows.slice(start, start + limit);
+    const names =
+      typeof input.ProjectionExpression === "string"
+        ? input.ProjectionExpression.split(",").map((n) => n.trim())
+        : null;
+    return {
+      Items: page.map((r) =>
+        structuredClone(
+          names ? Object.fromEntries(names.filter((n) => n in r).map((n) => [n, r[n]])) : r,
+        ),
+      ),
+      ...(start + limit < rows.length ? { LastEvaluatedKey: { offset: start + limit } } : {}),
+    };
   }
 
   private transact(ops: Record<string, Record<string, unknown>>[]): unknown {

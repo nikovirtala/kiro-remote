@@ -5,6 +5,7 @@
  */
 
 import type { TurnTrigger } from "../repo/types.ts";
+import type { FeedSource } from "../schemas/feed.ts";
 
 export interface CommandBase {
   /** Cognito sub of the caller who issued the command. */
@@ -63,6 +64,11 @@ export interface SetConfigCommand extends CommandBase {
 
 export interface DeleteCommand extends CommandBase {
   kind: "delete";
+  /**
+   * What asked for the deletion, for the change feed events the deletion writes (the removal of the
+   * session's waits). Absent on commands queued before this field existed: read as `rest`.
+   */
+  source?: FeedSource;
 }
 
 export interface AdoptCommand extends CommandBase {

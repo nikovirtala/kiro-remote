@@ -343,7 +343,13 @@ describe("harvestTurn", () => {
       await handleQueueMessage(w.deps, autoCloseMsg);
 
       expect(w.commands.commands).toEqual([
-        { kind: "delete", sub: "user-sub-1", sessionId: SESSION, commandId: expect.any(String) },
+        {
+          kind: "delete",
+          sub: "user-sub-1",
+          sessionId: SESSION,
+          commandId: expect.any(String),
+          source: "webhook",
+        },
       ]);
       expect((await w.repo.queryInbox(SESSION))[0]).toMatchObject({
         status: "dropped",

@@ -880,6 +880,78 @@ describe("LambdaConsumer catch-up start", () => {
   });
 });
 
+describe("LambdaConsumer delete: the session's waits", () => {
+  const sessionWaits = async (w: Wired, id: string) =>
+    (await w.repo.queryWaits(id)).map((x) => x.pr);
+  const removedEvents = async (w: Wired) =>
+    (await w.repo.readFeed("user-sub-1", 0, 50)).events.filter((e) => e.type === "wait.removed");
+
+  test("removes every wait of the session with its wait.removed event, from the command's source", async () => {
+    const w = await wire([LAUNCH, { initialize: initResult() }]);
+    await w.seed("sx");
+    await w.seed("sy");
+    await w.consumer.handleEvent(event(launchCmd("sx")));
+    await w.repo.createWait({ sessionId: "sx", pr: "octo/repo#7", source: "mcp" });
+    await w.repo.createWait({ sessionId: "sx", pr: "ark/ark#5", source: "trailer" });
+    await w.repo.createWait({ sessionId: "sy", pr: "octo/repo#7", source: "rest" });
+
+    const del: Command = {
+      kind: "delete",
+      sub: "user-sub-1",
+      sessionId: "sx",
+      commandId: "cmd-del",
+      source: "mcp",
+    };
+    const res = await w.consumer.handleEvent(event(del, "m-del"));
+
+    expect(res.batchItemFailures).toEqual([]);
+    expect(await sessionWaits(w, "sx")).toEqual([]);
+    expect(await sessionWaits(w, "sy")).toEqual(["octo/repo#7"]);
+    expect(
+      (await removedEvents(w)).map((e) => [e.sessionId, e.pr, e.source, e.payload.reason]),
+    ).toEqual([
+      ["sx", "ark/ark#5", "mcp", "session_deleted"],
+      ["sx", "octo/repo#7", "mcp", "session_deleted"],
+    ]);
+  });
+
+  test("a command from before the source field existed is attributed to rest", async () => {
+    const w = await wire([LAUNCH, { initialize: initResult() }]);
+    await w.seed("sx");
+    await w.consumer.handleEvent(event(launchCmd("sx")));
+    await w.repo.createWait({ sessionId: "sx", pr: "octo/repo#7", source: "mcp" });
+    await w.consumer.handleEvent(
+      event({ kind: "delete", sub: "user-sub-1", sessionId: "sx", commandId: "c" }, "m-del"),
+    );
+    expect((await removedEvents(w)).map((e) => e.source)).toEqual(["rest"]);
+  });
+
+  test("a wait that cannot be removed does not fail the deletion: the sweep removes it later", async () => {
+    const w = await wire([LAUNCH, { initialize: initResult() }], {
+      // The consumer's own view of the table cannot run a transaction; the test's repo can.
+      wrapDdb: (inner) =>
+        ({
+          send: (cmd: { constructor: { name: string } }) =>
+            cmd.constructor.name === "TransactWriteCommand"
+              ? Promise.reject(new Error("dynamodb down"))
+              : (inner as unknown as { send(c: unknown): Promise<unknown> }).send(cmd),
+        }) as unknown as DynamoDBDocumentClient,
+    });
+    await w.seed("sx");
+    await w.consumer.handleEvent(event(launchCmd("sx")));
+    await w.repo.createWait({ sessionId: "sx", pr: "octo/repo#7", source: "mcp" });
+
+    const res = await w.consumer.handleEvent(
+      event({ kind: "delete", sub: "user-sub-1", sessionId: "sx", commandId: "c" }, "m-del"),
+    );
+
+    expect(res.batchItemFailures).toEqual([]);
+    expect((await w.repo.getSession("sx"))?.status).toBe("deleted");
+    expect(await sessionWaits(w, "sx")).toEqual(["octo/repo#7"]);
+    expect(w.logLines.some((l) => l.includes("session_waits_remove_failed"))).toBe(true);
+  });
+});
+
 describe("LambdaConsumer delete", () => {
   test("a delete sends the remote session/delete and marks the row deleted", async () => {
     const w = await wire([LAUNCH, { initialize: initResult() }]);
