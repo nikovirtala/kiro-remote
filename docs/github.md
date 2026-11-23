@@ -9,10 +9,12 @@ The feature is **optional and off by default**. Without `GITHUB_APP_SECRET_ARN`
 nothing is deployed for it: no webhook route, queues, functions or schedule.
 
 kiro-remote never opens PRs itself. Kiro's agent does, through Kiro's own GitHub
-app. kiro-remote only does two things:
+app. kiro-remote only does three things:
 
 1. **Link** the PR to the session that opened it.
 2. **Turn GitHub events into prompts**, at a time the session can accept them.
+3. **Wake a session when a PR it waits for merges or closes**, though the session
+   does not own that PR ([waiting for a pull request](#waiting-for-a-pull-request)).
 
 ## How it works
 
@@ -96,6 +98,8 @@ A trailer is accepted only if the named session exists and is not deleted, the P
 repo is in its `repos[]`, the PR was created after the session, and (when
 `GITHUB_AGENT_LOGINS` is set) the PR is authored by the agent. A forged trailer
 fails one of these and is logged (`trailer_rejected`) and counted, never linked.
+`Kiro-Remote-Waits-For` lines in the same body are read under these same rules
+(see [Waiting for a pull request](#waiting-for-a-pull-request)).
 
 A delivery for an unlinked PR is stored as **unmatched**. `GET
 /v1/github/unmatched?limit=20` (`sessions:read`) lists the recent ones for repos
@@ -121,6 +125,8 @@ transcript know why the turn started:
 | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pull_request.closed`, merged                                                                                         | "PR #n was merged into `<base>` at `<sha>`. Finish any remaining work and summarise what's left, or say you're done."                                                                                                                                                                                            |
 | `pull_request.closed`, not merged                                                                                     | "PR #n was closed without merging."                                                                                                                                                                                                                                                                              |
+| `pull_request.closed`, merged, on a PR a session **waits for**                                                        | "PR #m, which this session waits for, was merged into `<base>` at `<sha>`. Rebase onto `<base>` (never merge it in), continue the work it unblocked, push with --force-with-lease and say what changed." One per waiting session, linked or not. See [Waiting for a pull request](#waiting-for-a-pull-request).  |
+| `pull_request.closed`, not merged, on a PR a session **waits for**                                                    | "PR #m, which this session waits for, was closed without merging. Say whether your work can go on without it."                                                                                                                                                                                                   |
 | `pull_request_review.submitted`: `changes_requested` or `commented`                                                   | Who and which state. A trusted reviewer's review body and inline comments are also quoted.                                                                                                                                                                                                                       |
 | `issue_comment.created` on a linked PR                                                                                | Who commented. A trusted commenter's text is quoted. Bots, the agent's logins and comments posted through the agent's app are ignored ([why](#the-agents-github-identity)).                                                                                                                                      |
 | `check_suite.completed` / `workflow_run.completed`, `failure` or `timed_out`, on the PR's head sha                    | The failing check names and URLs. **Debounced 2 minutes per PR**: one wake for the whole batch.                                                                                                                                                                                                                  |
@@ -238,6 +244,94 @@ and keeps the PRs it named.
 **Links made before this feature** join the index the next time a
 `pull_request` webhook for them is processed (any push to the PR, an edit, a
 label). Until then a merge does not check them.
+
+## Waiting for a pull request
+
+A session is woken by its own linked PR. It is not woken by a PR it merely
+**depends on**: a stacked PR it must rebase onto, or another repo's change it
+needs. A **wait** says "wake me once when that PR merges or closes". A session can
+wait for any number of PRs, and a PR can be waited for by any number of sessions.
+A wait is **not a link**: the PR may belong to another session or to none, and it
+may be in a repo the session does not use (a draft session can wait for an ark PR).
+Its repo only has to match `ALLOWED_REPOS`.
+
+| Method    | How                                                                                                                                                                                                       |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp`     | `kiro_wait_for_pull_request { sessionId, pr }`; remove with `kiro_stop_waiting_for_pull_request`. Both take `idempotencyKey`.                                                                             |
+| `rest`    | `POST /v1/sessions/{id}/waits { pr }`; remove with `DELETE /v1/sessions/{id}/waits/{owner}/{repo}/{n}`. `sessions:write`, the scope of linking.                                                           |
+| `trailer` | A linked PR's body carries one `Kiro-Remote-Waits-For: owner/repo#n` line per awaited PR. The launch prompt line that asks for `Kiro-Remote-Session` asks for these too (when `GITHUB_PR_TRAILER` is on). |
+
+`GET /v1/sessions/{id}` and `kiro_get_session` list the session's `waits[]` (`pr`,
+`repo`, `number`, `source`, `createdAt`).
+
+**What is stored.** One item per wait: `SESSION#<id>` / `WAIT#<owner>/<repo>#<n>`
+with the source (`mcp`, `rest` or `trailer`) and the time, and
+`GSI1PK = GHWAIT#<owner>/<repo>#<n>`, `GSI1SK = <session id>`. The session's key
+answers "what does this session wait for", GSI1 answers "who waits for this PR",
+and each is one query. One item means one conditional write, with no second row
+to keep in step. The source is a field of the wait, not of a link, so a later
+producer (an ark issue's depends-on link, a map in draft) adds a value to
+`source` and uses the same two queries.
+
+**Registering.** The call stores the wait with `attribute_not_exists`, so
+registering twice is a no-op (`200`, the first source stays), then sends a
+`wait_check` message on the GitHub queue. The API holds no GitHub credentials, so
+the GitHub consumer reads the PR once: **merged or closed fires the wait now,
+open leaves it stored** for the webhook. The wait is stored first and read
+second, so a PR that merges between the two is still found. A PR the App cannot
+read (a typo, or a repo it is not installed on) removes the wait and wakes the
+session once with "could not be read from GitHub", rather than waiting forever.
+Without the GitHub feature the calls answer `501`.
+
+**A trailer** is read where `Kiro-Remote-Session` is read (`pull_request.opened`
+and `edited`, in `linkFromTrailer`), and counts only when that trailer is
+accepted, under the same rules (session exists and is not deleted, the PR's repo
+is in its `repos[]`, the PR is newer than the session, author is the agent when
+`GITHUB_AGENT_LOGINS` is set). A PR already linked to the same session is read
+again only when it carries waits lines, so an edit can add them. Each awaited repo
+must match `ALLOWED_REPOS`. A malformed line, a line not at the start of a line, a
+PR waiting for itself and anything past 20 lines are ignored; refusals are logged
+(`wait_rejected`) and counted (`WaitsRejected`, by `reason`).
+
+**The wake.** `route()` turns `pull_request.closed` into one wake per waiting
+session, whether or not the PR is linked to anyone, using the pure
+`decideWait()` (`packages/github/src/waits.ts`). The webhook and the check above
+both call it, and so can a later scheduled sweep for waits whose PR merged while
+webhooks were down. Only structured facts are forwarded, never the PR's text.
+
+```text
+[GitHub webhook] This turn was started by GitHub, not by the user: pull_request.closed (merged), awaited by this session on octo/repo#7 (delivery <id>).
+PR #7, which this session waits for, was merged into main at <sha>. Rebase onto main (never merge it in), continue the work it unblocked, push with --force-with-lease and say what changed.
+```
+
+```text
+[GitHub webhook] This turn was started by GitHub, not by the user: pull_request.closed (not merged), awaited by this session on octo/repo#7 (delivery <id>).
+PR #7, which this session waits for, was closed without merging. Say whether your work can go on without it.
+```
+
+When the check made at registration finds the PR already closed, the header has
+no delivery (`... was already merged when the wait was checked on octo/repo#7.`).
+
+**A fired wait is removed**, and the removal is the claim: of a webhook and a check
+that fire it at the same moment, only the delete that succeeds writes the wake. If
+the wake cannot be written the wait is put back and the message is retried.
+
+**One turn for a wait and the waiter's own conflict.** The drain folds all _due_
+inbox items of a session into one turn, so the two wakes only share a turn when
+both are due at the drain. A merge can make the waiter's own open PR in the same
+repo conflict, and that check takes a 2 minute debounce plus up to two re-checks
+(see [Conflicting PRs](#conflicting-prs)). For such a waiter (an open linked PR in
+the merged PR's repo, on the same base or one not yet known) the merge wake is
+**held** for the debounce, all re-check delays and 30 s, about 4.5 minutes, and a
+conflict wake is never due before a pending wait wake: whichever is written second
+moves the other's due time. They then fold into one turn, the conflict first. A
+waiter with no such PR, and every closed-unmerged wake, goes out at once.
+
+Waits need **no new GitHub App permission or event**: `pull_request.closed` is
+already delivered, and the read is `GET /pulls/{n}`. They cost one GSI1 query per
+`pull_request.closed` delivery (and one `queryLinks` per waiter of a merged PR),
+and one read per registered wait. The API function gains
+`GITHUB_QUEUE_URL` and permission to send to the GitHub queue.
 
 ### The agent's GitHub identity
 
@@ -362,6 +456,8 @@ The GitHub Lambdas use the same Powertools Logger, Metrics and Tracer as the res
 (`reason=repo_not_allowed`), `WebhooksUnmatched`, `LinksCreated` (by `method`),
 `LinksRejected` (by `reason`), `WakesDelivered`, `WakesDropped` (by `reason`),
 `Redelivered`, `AutoClosed`, `AutoCloseSkipped` (a linked PR was still open),
+and for [waits](#waiting-for-a-pull-request): `WaitsRegistered` (by `source`; only the trailer path, which runs in the consumer), `WaitsRejected` (by `reason`: `repo_not_allowed`, `own_pull_request`) and
+`WaitsFired` (by `outcome`: `merged`, `closed`, `gone`; a log line `wait_fired` names the PR and session),
 and for [conflicting PRs](#conflicting-prs): `ConflictChecks` (first tries, one per
 PR read), `ConflictRechecks` (later tries), `ConflictsFound`, `BehindFound`
 (only counted when `GITHUB_WAKE_ON_BEHIND=on`),
@@ -375,7 +471,7 @@ settles turns.
 
 ## Where it shows up
 
-- `GET /v1/sessions/{id}`: `links[]` (`pr`, `linkedBy`, `prState`, `headSha`).
+- `GET /v1/sessions/{id}`: `links[]` (`pr`, `linkedBy`, `prState`, `headSha`) and `waits[]` (`pr`, `source`, `createdAt`).
 - `GET /v1/sessions/{id}/turns/{turnId}`: `trigger` (`{ source: "user" | "github", deliveryIds }`)
   and `prompt`, the exact wake prompt the agent got.
 - `GET /v1/sessions/{id}/events`: a wake turn begins with a `session.info` event,
