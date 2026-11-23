@@ -65,6 +65,7 @@ import {
   type Command,
   type CommandQueue,
   type EventItem,
+  type FeedSource,
   type GithubQueue,
   type NormalizedEvent,
   normalizeUpdate,
@@ -562,7 +563,7 @@ export class LambdaConsumer {
         log.info("set_config_noop_cloud");
         return;
       case "delete":
-        await this.markDeleted(command.sessionId);
+        await this.markDeleted(command.sessionId, command.source ?? "rest");
         return;
       case "adopt":
         // adopt is not supported; reject it LOUDLY so it is logged + persisted
@@ -1076,7 +1077,7 @@ export class LambdaConsumer {
   /* -------------------------------- delete --------------------------------- */
 
   /** Delete the cloud session (remote session/delete, best-effort) and mark the row deleted. */
-  private async markDeleted(id: string): Promise<void> {
+  private async markDeleted(id: string, source: FeedSource): Promise<void> {
     const { rt, item } = await this.refresh(id);
     const kiroSessionId = rt.kiroSessionId;
     if (kiroSessionId) {
@@ -1098,6 +1099,17 @@ export class LambdaConsumer {
       this.kiroToLocal.delete(kiroSessionId);
     }
     await this.settler.dropPending(id, "session_deleted");
+    // No wait outlives its session: each goes with its own wait.removed event (docs/github.md). A
+    // failure here must not fail the deletion: the scheduled sweep removes the waits of a deleted
+    // session on its next run.
+    try {
+      const removed = await this.repo.deleteSessionWaits(id, { source });
+      if (removed > 0) {
+        this.logger.info("session_waits_removed", { sessionId: id, waits: removed });
+      }
+    } catch (err) {
+      this.logger.warn("session_waits_remove_failed", { sessionId: id, error: String(err) });
+    }
   }
 
   /* ------------------------- unsupported rejection ------------------------- */

@@ -11,6 +11,14 @@
  * them (`pnpm --filter @nikovirtala/kiro-remote-core gen:feed-schemas`) and checked in; a test fails
  * when they drift and when an emitted event does not validate against them.
  *
+ * Enum values. A payload's enum (such as the `reason` of `wait.removed`) and the envelope's
+ * `source` may gain values within `v: 1`: a reader treats a value it does not know as opaque (shows
+ * it, groups by it, never fails on it), exactly as it already does for `source`. Adding a type or an
+ * optional field is also `v: 1`. `v: 2` is for removing or renaming a value, changing what one
+ * means, or adding a required field. The checked-in JSON Schemas list the values known at the
+ * commit they were generated from, so a reader that validates against its own copy must not
+ * reject an event because of an enum value its copy lacks.
+ *
  * Never in an event: prompt text, transcript content, PR titles or bodies, tokens. Only ids, PR
  * references, enums and counts.
  */
@@ -88,8 +96,17 @@ export const FEED_TYPES = {
       /**
        * merged, closed, unreadable: the wait fired. stopped: the caller removed it.
        * registration_failed: it was stored but its first check could not be requested.
+       * session_deleted: the session was deleted, so nothing is left to wake (added within v: 1,
+       * under the rule on enum values in the header).
        */
-      reason: z.enum(["merged", "closed", "unreadable", "stopped", "registration_failed"]),
+      reason: z.enum([
+        "merged",
+        "closed",
+        "unreadable",
+        "stopped",
+        "registration_failed",
+        "session_deleted",
+      ]),
     }),
   },
   "wake.queued": {

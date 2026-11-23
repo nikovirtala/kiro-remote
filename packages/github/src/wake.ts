@@ -290,6 +290,7 @@ export async function autoCloseIfDone(
     sub: session.createdBy,
     sessionId,
     commandId: deps.newId?.() ?? crypto.randomUUID(),
+    source: "webhook",
   });
   deps.metrics.count("AutoClosed", 1);
   deps.logger.info("auto_close_on_merge", { sessionId });

@@ -259,7 +259,7 @@ export async function deleteSessionRoute(
 ): Promise<HttpResponse> {
   const key = requireIdempotencyKey(req);
   return withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req), async () => {
-    await deleteSession(ctx.service, principal, req.params.id);
+    await deleteSession(ctx.service, principal, req.params.id, { source: "rest" });
     return acceptedResponse({ sessionId: req.params.id, status: "deleting" });
   });
 }

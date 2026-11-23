@@ -21,6 +21,7 @@ import type { GithubQueue } from "../github/queue.ts";
 import { sessionPk } from "../repo/keys.ts";
 import { ConcurrentModificationError, type Repository } from "../repo/repository.ts";
 import type { PrWaitItem, SessionMetaItem } from "../repo/types.ts";
+import type { FeedSource } from "../schemas/feed.ts";
 import type { EventView, SessionView, TurnView, WaitView } from "../schemas/index.ts";
 import { matchesAllowList } from "./allowlist.ts";
 import type { CommandQueue } from "./commands.ts";
@@ -364,6 +365,7 @@ export async function deleteSession(
   deps: ServiceDeps,
   principal: Principal,
   sessionId: string,
+  opts: { source?: FeedSource } = {},
 ): Promise<void> {
   const session = await loadOwned(deps, principal, sessionId);
   authorize(principal, "delete", { createdBy: session.createdBy });
@@ -372,6 +374,7 @@ export async function deleteSession(
     sub: principal.sub,
     sessionId,
     commandId: genId(deps),
+    ...(opts.source ? { source: opts.source } : {}),
   });
 }
 

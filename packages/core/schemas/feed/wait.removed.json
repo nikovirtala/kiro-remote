@@ -51,7 +51,14 @@
       "properties": {
         "reason": {
           "type": "string",
-          "enum": ["merged", "closed", "unreadable", "stopped", "registration_failed"]
+          "enum": [
+            "merged",
+            "closed",
+            "unreadable",
+            "stopped",
+            "registration_failed",
+            "session_deleted"
+          ]
         }
       },
       "required": ["reason"],

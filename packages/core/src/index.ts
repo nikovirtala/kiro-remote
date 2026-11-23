@@ -29,6 +29,7 @@ export * from "./github/pr-ref.ts";
 export * from "./github/queue.ts";
 export * from "./provenance.ts";
 export * from "./redact.ts";
+export * from "./repo/backfill.ts";
 export { FEED_COUNTER_SK, feedPk, feedSk } from "./repo/feed.ts";
 export * from "./repo/keys.ts";
 export * from "./repo/repository.ts";
