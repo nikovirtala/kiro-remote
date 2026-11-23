@@ -63,6 +63,7 @@ const image = (logicalId: string) => ({
     TZ: "UTC",
     KIRO_API_KEY_SECRET_ARN:
       "arn:aws:secretsmanager:eu-north-1:827333031966:secret:kiro-remote/kiro-api-key-x1y2z3",
+    COMMAND_QUEUE_URL: "https://sqs.eu-north-1.amazonaws.com/827333031966/command.fifo",
     OTEL_RESOURCE_ATTRIBUTES: OTEL,
   },
 });
@@ -377,6 +378,12 @@ describe("the smoke checks", () => {
       "functions",
     ],
     [
+      "a bridge function that cannot start a queued prompt (no COMMAND_QUEUE_URL)",
+      (w: World) =>
+        void delete (w.functions[3] as { env: Record<string, string> }).env.COMMAND_QUEUE_URL,
+      "queued-prompts",
+    ],
+    [
       "a function with the Kiro API key as a plain variable",
       (w: World) => {
         (w.functions[0] as { env: Record<string, string> }).env.KIRO_API_KEY = "ksk_x";
@@ -456,6 +463,7 @@ describe("the smoke role and the checks", () => {
       "functions",
       "secrets",
       "provenance",
+      "queued-prompts",
       "queues",
       "sweep",
     ]);

@@ -366,6 +366,33 @@ export const CHECKS: readonly SmokeCheck[] = [
     },
   },
   {
+    task: "queued-prompts",
+    name: "the bridge functions can start a queued prompt",
+    run: ({ aws, add }) => {
+      // The settle of a turn (the consumer, and the catch-up that finishes a detached turn) sends the
+      // next queued prompt to the command queue, so both need its URL (docs/deploy.md).
+      const fns = serviceFunctions(aws).filter((f) =>
+        /BridgeConsumerFn|CatchUpFn/.test(f.logicalId),
+      );
+      if (fns.length === 0)
+        return add(
+          "queued-prompts",
+          "the bridge consumer and catch-up functions exist",
+          "FAIL",
+          "none in the stack",
+        );
+      for (const { logicalId, config } of fns) {
+        const url = config.Environment?.Variables?.COMMAND_QUEUE_URL;
+        add(
+          "queued-prompts",
+          `${logicalId}: COMMAND_QUEUE_URL is set`,
+          url ? "PASS" : "FAIL",
+          url ? "" : "unset",
+        );
+      }
+    },
+  },
+  {
     task: "queues",
     name: "the GitHub dead-letter queue",
     run: ({ aws, add }) => {
