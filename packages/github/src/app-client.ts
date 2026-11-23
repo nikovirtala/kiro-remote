@@ -62,6 +62,8 @@ export interface PullInfo {
   authorLogin: string | null;
   body: string | null;
   baseRef: string | null;
+  /** The merge commit once merged, hex, else null. */
+  mergeCommitSha?: string | null;
   /** `null` while GitHub is still computing it (a background job was started). */
   mergeable: boolean | null;
   /** dirty, behind, clean, blocked, unstable, has_hooks, draft or unknown. */
@@ -197,6 +199,7 @@ export class GithubClient {
         created_at: string;
         head: { sha: string; ref: string };
         base?: { ref?: string } | null;
+        merge_commit_sha?: string | null;
         mergeable?: boolean | null;
         mergeable_state?: string | null;
         user?: { login?: string } | null;
@@ -212,6 +215,7 @@ export class GithubClient {
         authorLogin: d.user?.login ?? null,
         body: d.body ?? null,
         baseRef: d.base?.ref ?? null,
+        mergeCommitSha: d.merge_commit_sha ?? null,
         mergeable: d.mergeable ?? null,
         mergeableState: d.mergeable_state ?? null,
       };

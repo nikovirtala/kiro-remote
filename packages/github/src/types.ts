@@ -76,7 +76,17 @@ export type WakeKind =
   | "comment"
   | "checks_failed"
   | "pr_conflict"
-  | "pr_behind";
+  | "pr_behind"
+  | "pr_wait_merged"
+  | "pr_wait_closed"
+  | "pr_wait_gone";
+
+/** The wakes that fire a wait: the consumer removes the wait when it writes one of these. */
+export const WAIT_WAKE_KINDS: readonly WakeKind[] = [
+  "pr_wait_merged",
+  "pr_wait_closed",
+  "pr_wait_gone",
+];
 
 export interface FailedCheck {
   name: string;

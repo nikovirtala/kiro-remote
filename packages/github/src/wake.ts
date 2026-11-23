@@ -12,7 +12,7 @@ import {
 import { ulid } from "ulid";
 import type { Logger, Metrics } from "./log.ts";
 import { checksPrompt, conflictPrompt } from "./render.ts";
-import type { Action, ConflictData, FailedCheck } from "./types.ts";
+import { type Action, type ConflictData, type FailedCheck, WAIT_WAKE_KINDS } from "./types.ts";
 
 type WakeAction = Extract<Action, { type: "wake" }>;
 
@@ -28,27 +28,41 @@ export interface WakeDeps {
 
 const INBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+const isWaitKind = (kind: string): boolean => (WAIT_WAKE_KINDS as readonly string[]).includes(kind);
+const isBaseMoveKind = (kind: string): boolean => kind === "pr_conflict" || kind === "pr_behind";
+
 /**
  * Add a wake to the session's inbox. Inside the debounce window an existing
  * pending item for the same PR and kind absorbs it (failing checks are united
  * and the prompt re-rendered), so a burst of failures becomes one wake.
+ *
+ * A wake for a PR the session waits for is never folded (one wait, one wake), but it is held
+ * together with the session's conflict wakes: a merge can make the waiter's own PR conflict, and
+ * the drain folds only items that are due, so both are due at the same time and reach the session
+ * as one turn. A conflict wake is never due before a pending wait wake, and a wait wake moves
+ * pending conflict wakes that are due earlier to its own due time.
  */
 export async function enqueueWake(
   deps: WakeDeps,
   a: WakeAction,
 ): Promise<{ merged: boolean; id: string }> {
   const nowMs = deps.now();
-  if (a.debounceMs > 0) {
-    const pending = await deps.repo.queryInbox(a.sessionId, { status: "pending" });
+  const waitWake = isWaitKind(a.kind);
+  const baseMoveWake = isBaseMoveKind(a.kind);
+  let pending: InboxItem[] = [];
+  if (a.debounceMs > 0 || baseMoveWake || waitWake) {
+    pending = await deps.repo.queryInbox(a.sessionId, { status: "pending" });
+  }
+  if (a.debounceMs > 0 && !waitWake) {
     const target = pending.find(
       (i) => i.key === a.key && i.kind === a.kind && nowMs - Date.parse(i.createdAt) < a.debounceMs,
     );
-    if (a.kind === "pr_conflict" || a.kind === "pr_behind") {
+    if (baseMoveWake) {
       const folded = await foldBaseMoveWake(deps, a, pending, target);
       if (folded) {
         return folded;
       }
-    } else if (target) {
+    } else if (target && a.kind === "checks_failed") {
       const checks = unionChecks(
         (target.data as { checks?: FailedCheck[] } | null)?.checks ?? [],
         a.data?.checks ?? [],
@@ -71,6 +85,14 @@ export async function enqueueWake(
       // It was drained meanwhile: fall through and start a new item.
     }
   }
+  let notBeforeMs = nowMs + a.debounceMs;
+  if (baseMoveWake) {
+    for (const i of pending) {
+      if (isWaitKind(i.kind)) {
+        notBeforeMs = Math.max(notBeforeMs, Date.parse(i.notBefore));
+      }
+    }
+  }
   const id = deps.newId?.() ?? ulid(nowMs);
   const createdAt = new Date(nowMs).toISOString();
   const item: InboxItem = {
@@ -80,13 +102,13 @@ export async function enqueueWake(
     sessionId: a.sessionId,
     source: "github",
     deliveryId: a.deliveryId,
-    deliveryIds: [a.deliveryId],
+    deliveryIds: a.deliveryId ? [a.deliveryId] : [],
     kind: a.kind,
     key: a.key,
     prompt: a.prompt,
     data: a.data,
     createdAt,
-    notBefore: new Date(nowMs + a.debounceMs).toISOString(),
+    notBefore: new Date(notBeforeMs).toISOString(),
     status: "pending",
     dropReason: null,
     deliveredTurnId: null,
@@ -94,11 +116,18 @@ export async function enqueueWake(
     ttl: Math.floor((nowMs + INBOX_TTL_MS) / 1000),
   };
   await deps.repo.putInboxItem(item);
-  if (a.debounceMs > 0) {
-    // A debounced item is not due yet; make sure something drains it when it is.
+  if (waitWake) {
+    for (const i of pending) {
+      if (isBaseMoveKind(i.kind) && Date.parse(i.notBefore) < notBeforeMs) {
+        await deps.repo.setInboxNotBefore(a.sessionId, i.id, item.notBefore);
+      }
+    }
+  }
+  if (notBeforeMs > nowMs) {
+    // A held item is not due yet; make sure something drains it when it is.
     await deps.githubQueue.send(
       { kind: "drain", sessionId: a.sessionId },
-      Math.ceil(a.debounceMs / 1000) + 2,
+      Math.ceil((notBeforeMs - nowMs) / 1000) + 2,
     );
   }
   return { merged: false, id };

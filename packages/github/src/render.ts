@@ -29,8 +29,10 @@ export function header(args: {
   number: number;
   deliveryIds: string[];
 }): string {
-  const ids = args.deliveryIds.map((d) => d.replace(/[^A-Za-z0-9-]/g, "")).join(", ");
-  return `${WAKE_HEADER_PREFIX} This turn was started by GitHub, not by the user: ${args.event} on ${args.repo}#${args.number} (delivery ${ids}).`;
+  const ids = args.deliveryIds.map((d) => d.replace(/[^A-Za-z0-9-]/g, "")).filter(Boolean);
+  // A wake that did not come from a webhook (a wait checked when it was registered) has no delivery.
+  const delivery = ids.length > 0 ? ` (delivery ${ids.join(", ")})` : "";
+  return `${WAKE_HEADER_PREFIX} This turn was started by GitHub, not by the user: ${args.event} on ${args.repo}#${args.number}${delivery}.`;
 }
 
 /** Strip control characters (keeping newline and tab) and any text that looks like our quote markers. */
@@ -160,4 +162,40 @@ export function conflictPrompt(args: {
     }),
     line,
   ].join("\n");
+}
+
+/**
+ * The prompt for a pull request the session waits for that merged or closed. Only structured
+ * facts: the number, the base branch name and the merge sha, never the PR's title or body.
+ */
+export function waitPrompt(args: {
+  repo: string;
+  number: number;
+  outcome: "merged" | "closed" | "gone";
+  /** The base branch and merge sha, for "merged". */
+  base?: string;
+  sha?: string;
+  deliveryIds: string[];
+  /** Why the turn started, for the header. */
+  event?: string;
+}): string {
+  const base = safeLabel(args.base, 100).replace(/`/g, "'");
+  const sha = (args.sha ?? "").replace(/[^0-9a-f]/gi, "") || "unknown";
+  const n = args.number;
+  const line =
+    args.outcome === "merged"
+      ? `PR #${n}, which this session waits for, was merged into ${base} at ${sha}. Rebase onto ${base} (never merge it in), continue the work it unblocked, push with --force-with-lease and say what changed.`
+      : args.outcome === "closed"
+        ? `PR #${n}, which this session waits for, was closed without merging. Say whether your work can go on without it.`
+        : `PR #${n}, which this session waits for, could not be read from GitHub: it does not exist, or kiro-remote cannot see it. The wait was removed. Say whether your work can go on without it.`;
+  const event =
+    args.event ??
+    (args.outcome === "merged"
+      ? "pull_request.closed (merged), awaited by this session"
+      : args.outcome === "closed"
+        ? "pull_request.closed (not merged), awaited by this session"
+        : "awaited pull request not found");
+  return [header({ event, repo: args.repo, number: n, deliveryIds: args.deliveryIds }), line].join(
+    "\n",
+  );
 }

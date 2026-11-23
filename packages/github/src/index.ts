@@ -8,4 +8,5 @@ export * from "./render.ts";
 export * from "./route.ts";
 export * from "./signature.ts";
 export * from "./types.ts";
+export * from "./waits.ts";
 export * from "./wake.ts";
