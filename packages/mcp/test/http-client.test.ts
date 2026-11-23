@@ -65,3 +65,32 @@ describe("HttpClient", () => {
     await expect(client.getSession(P, "x")).rejects.toBeInstanceOf(HttpClientError);
   });
 });
+
+describe("HttpClient: waits", () => {
+  it("POSTs the wait to /waits with an Idempotency-Key", async () => {
+    const wait = { pr: "octo/repo#7", source: "rest" };
+    const { client, recorded } = clientWith({
+      "POST /v1/sessions/s1/waits": { status: 201, body: wait },
+    });
+    expect(await client.waitForPullRequest(P, "s1", { pr: "octo/repo#7" })).toEqual(wait);
+    expect(recorded[0].headers["idempotency-key"]).toBe("idem-1");
+    expect(JSON.parse(recorded[0].body ?? "{}")).toEqual({ pr: "octo/repo#7" });
+  });
+
+  it("DELETEs /waits/{owner}/{repo}/{n} for a PR URL", async () => {
+    const { client, recorded } = clientWith({
+      "DELETE /v1/sessions/s1/waits/octo/repo/7": { status: 204, body: "" },
+    });
+    await client.stopWaitingForPullRequest(P, "s1", {
+      pr: "https://github.com/octo/repo/pull/7",
+    });
+    expect(recorded[0].method).toBe("DELETE");
+    expect(recorded[0].url).toBe("https://host/v1/sessions/s1/waits/octo/repo/7");
+  });
+
+  it("refuses something that is not a PR before calling", async () => {
+    const { client, recorded } = clientWith({});
+    await expect(client.stopWaitingForPullRequest(P, "s1", { pr: "nope" })).rejects.toThrow();
+    expect(recorded).toEqual([]);
+  });
+});

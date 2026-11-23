@@ -1,5 +1,5 @@
 /**
- * The 16 MCP tools.
+ * The 18 MCP tools.
  *
  * Each tool is defined ONCE here with its name, description, required core
  * {@link Action} (which authorize() turns into a scope), MCP annotations
@@ -34,6 +34,7 @@ import {
   ListSessionsQuerySchema,
   type Principal,
   toMcpInputSchema,
+  WaitForPullRequestSchema,
   z,
 } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
@@ -120,6 +121,9 @@ const SetConfigToolSchema = ConfigPatchSchema.safeExtend({
 /** kiro_link_pull_request / kiro_unlink_pull_request: the link body plus the session. */
 const LinkToolSchema = LinkPullRequestSchema.extend({ ...SessionIdField, ...IdempotencyField });
 
+/** kiro_wait_for_pull_request / kiro_stop_waiting_for_pull_request: the PR body plus the session. */
+const WaitToolSchema = WaitForPullRequestSchema.extend({ ...SessionIdField, ...IdempotencyField });
+
 /** kiro_list_permissions. */
 const ListPermissionsSchema = z.object({
   ...SessionIdField,
@@ -145,10 +149,12 @@ export const CORE_SCHEMA_FOR_TOOL: Readonly<Record<string, z.ZodType>> = {
   kiro_set_config: ConfigPatchSchema,
   kiro_link_pull_request: LinkPullRequestSchema,
   kiro_unlink_pull_request: LinkPullRequestSchema,
+  kiro_wait_for_pull_request: WaitForPullRequestSchema,
+  kiro_stop_waiting_for_pull_request: WaitForPullRequestSchema,
 };
 
 /**
- * The canonical list of the 16 tools, in a stable order. Each handler calls
+ * The canonical list of the 18 tools, in a stable order. Each handler calls
  * only the client interface, so the SAME definitions serve both transports.
  */
 export const TOOL_DEFS: readonly ToolDef[] = [
@@ -218,7 +224,8 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "kiro_get_session",
-    description: "Fetch a single session the caller owns.",
+    description:
+      "Fetch a single session the caller owns, with its linked pull requests (links) and the pull requests it waits for (waits).",
     action: "read",
     inputZod: SessionIdSchema,
     annotations: { title: "Get Session", readOnlyHint: true, openWorldHint: false },
@@ -366,6 +373,45 @@ export const TOOL_DEFS: readonly ToolDef[] = [
     },
   },
   {
+    name: "kiro_wait_for_pull_request",
+    description: `Wake a session once when a pull request it depends on, but does not own, is merged or closed (owner/repo#n or a github.com URL). The PR's repo must be allowed but need not be one of the session's repos. A PR already merged or closed wakes the session at once. Any number of sessions can wait for one PR. kiro_get_session lists a session's waits.${IDEMPOTENCY_SENTENCE}`,
+    action: "link",
+    inputZod: WaitToolSchema,
+    annotations: { title: "Wait For Pull Request", readOnlyHint: false, openWorldHint: true },
+    async run(client, principal, args) {
+      const input = WaitToolSchema.parse(args);
+      const wait = await client.waitForPullRequest(
+        principal,
+        input.sessionId,
+        { pr: input.pr },
+        writeOptions(input.idempotencyKey),
+      );
+      return { sessionId: input.sessionId, wait };
+    },
+  },
+  {
+    name: "kiro_stop_waiting_for_pull_request",
+    description: `Remove a session's wait for a pull request.${IDEMPOTENCY_SENTENCE}`,
+    action: "link",
+    inputZod: WaitToolSchema,
+    // Not destructive: a wait is reversible (wait again).
+    annotations: {
+      title: "Stop Waiting For Pull Request",
+      readOnlyHint: false,
+      openWorldHint: true,
+    },
+    async run(client, principal, args) {
+      const input = WaitToolSchema.parse(args);
+      await client.stopWaitingForPullRequest(
+        principal,
+        input.sessionId,
+        { pr: input.pr },
+        writeOptions(input.idempotencyKey),
+      );
+      return { sessionId: input.sessionId, pr: input.pr, status: "stopped" };
+    },
+  },
+  {
     name: "kiro_cancel_turn",
     description: `Cancel the active turn on a session.${IDEMPOTENCY_SENTENCE}`,
     action: "cancel",
@@ -401,7 +447,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
 ];
 
-/** The 16 tool names, in order. */
+/** The 18 tool names, in order. */
 export const TOOL_NAMES: readonly string[] = TOOL_DEFS.map((t) => t.name);
 
 /** Look up a tool definition by name. */

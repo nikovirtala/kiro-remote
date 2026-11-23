@@ -46,6 +46,7 @@ export type {
   ClientPermission,
   ClientSession,
   ClientTurn,
+  ClientWait,
   KiroRemoteClient,
   McpTransportHandler,
   McpTransportRequest,

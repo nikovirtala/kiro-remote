@@ -81,3 +81,52 @@ describe("InProcessClient (direct core service)", () => {
     expect(serialized).not.toContain("tok");
   });
 });
+
+describe("InProcessClient: waits", () => {
+  it("waitForPullRequest stores the wait as source mcp and asks for one read", async () => {
+    const h = buildInProcess();
+    const id = h.seedSession({ id: "s1" });
+    const wait = await h.client.waitForPullRequest(principal(), id, { pr: "other/repo#43" });
+    expect(wait).toMatchObject({
+      pr: "other/repo#43",
+      repo: "other/repo",
+      number: 43,
+      source: "mcp",
+    });
+    expect(h.githubSent).toEqual([{ kind: "wait_check", sessionId: "s1", pr: "other/repo#43" }]);
+    // The PR is in a repo the session does not use; getSession lists it.
+    const session = await h.client.getSession(principal(), id);
+    expect(session.waits).toMatchObject([{ pr: "other/repo#43", source: "mcp" }]);
+  });
+
+  it("an idempotencyKey replays the first answer and sends one read", async () => {
+    const h = buildInProcess();
+    const id = h.seedSession({ id: "s1" });
+    const args = { pr: "other/repo#43" };
+    const a = await h.client.waitForPullRequest(principal(), id, args, { idempotencyKey: "k-1" });
+    const b = await h.client.waitForPullRequest(principal(), id, args, { idempotencyKey: "k-1" });
+    expect(b).toEqual(a);
+    expect(h.githubSent).toHaveLength(1);
+  });
+
+  it("stopWaitingForPullRequest removes it", async () => {
+    const h = buildInProcess();
+    const id = h.seedSession({ id: "s1" });
+    await h.client.waitForPullRequest(principal(), id, { pr: "other/repo#43" });
+    await h.client.stopWaitingForPullRequest(principal(), id, { pr: "other/repo#43" });
+    expect((await h.client.getSession(principal(), id)).waits).toEqual([]);
+  });
+
+  it("is refused without the GitHub feature, and for another user's session", async () => {
+    const off = buildInProcess({ noGithubQueue: true });
+    const id = off.seedSession({ id: "s1" });
+    await expect(
+      off.client.waitForPullRequest(principal(), id, { pr: "other/repo#43" }),
+    ).rejects.toThrow(/not enabled/);
+    const h = buildInProcess();
+    h.seedSession({ id: "s2", createdBy: "user-1" });
+    await expect(
+      h.client.waitForPullRequest(principal({ sub: "intruder" }), "s2", { pr: "o/r#1" }),
+    ).rejects.toThrow(/session not found/);
+  });
+});

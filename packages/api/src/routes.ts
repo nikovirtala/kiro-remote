@@ -35,10 +35,13 @@ import {
   readEvents,
   sendPrompt,
   setConfig,
+  stopWaitingForPullRequest,
   getSession as svcGetSession,
   listSessions as svcListSessions,
   UnmatchedQuerySchema,
   unlinkPullRequest,
+  WaitForPullRequestSchema,
+  waitForPullRequest,
 } from "@nikovirtala/kiro-remote-core";
 import type { ApiContext } from "./context.ts";
 import {
@@ -387,6 +390,49 @@ export async function deleteLink(
     return noContentResponse();
   };
   // Optional key, as for PATCH config: DELETE of a link never required one.
+  const key = optionalIdempotencyKey(req);
+  return key === undefined
+    ? apply()
+    : withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req), apply);
+}
+
+/** POST /v1/sessions/{id}/waits */
+export async function postWait(
+  ctx: ApiContext,
+  req: HttpRequest,
+  principal: Principal,
+): Promise<HttpResponse> {
+  const key = requireIdempotencyKey(req);
+  const body = WaitForPullRequestSchema.parse(parseJsonBody(req));
+  return withIdempotency(
+    ctx.repo,
+    principal.sub,
+    key,
+    fingerprintRestRequest(req, body),
+    async () => {
+      const { wait, created } = await waitForPullRequest(
+        ctx.service,
+        principal,
+        req.params.id,
+        body.pr,
+        "rest",
+      );
+      return jsonResponse(created ? 201 : 200, wait);
+    },
+  );
+}
+
+/** DELETE /v1/sessions/{id}/waits/{owner}/{repo}/{n} */
+export async function deleteWait(
+  ctx: ApiContext,
+  req: HttpRequest,
+  principal: Principal,
+): Promise<HttpResponse> {
+  const { owner, repo, n } = req.params;
+  const apply = async (): Promise<HttpResponse> => {
+    await stopWaitingForPullRequest(ctx.service, principal, req.params.id, `${owner}/${repo}#${n}`);
+    return noContentResponse();
+  };
   const key = optionalIdempotencyKey(req);
   return key === undefined
     ? apply()

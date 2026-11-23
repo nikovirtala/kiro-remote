@@ -41,6 +41,7 @@ import {
 import {
   deleteLink,
   deleteSessionRoute,
+  deleteWait,
   getCapabilities,
   getEvents,
   getSession,
@@ -56,6 +57,7 @@ import {
   postLaunchSession,
   postLink,
   postTurn,
+  postWait,
 } from "./routes.ts";
 
 const V1_PREFIX = "/v1";
@@ -94,6 +96,8 @@ const ROUTES: RouteDef[] = [
   { method: "PATCH", template: "/sessions/{id}/config", handler: patchConfig },
   { method: "POST", template: "/sessions/{id}/links", handler: postLink },
   { method: "DELETE", template: "/sessions/{id}/links/{owner}/{repo}/{n}", handler: deleteLink },
+  { method: "POST", template: "/sessions/{id}/waits", handler: postWait },
+  { method: "DELETE", template: "/sessions/{id}/waits/{owner}/{repo}/{n}", handler: deleteWait },
   { method: "GET", template: "/github/unmatched", handler: getUnmatched },
 ];
 

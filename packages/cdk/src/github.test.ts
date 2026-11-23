@@ -118,6 +118,25 @@ describe("GitHub feature ON", () => {
     expect(JSON.stringify(api)).not.toContain("GITHUB_APP_SECRET_ARN");
   });
 
+  test("the API can send to the GitHub queue (to have a wait's PR read) and has no secret", () => {
+    const api = functionsByLogicalIdPart(t, "ApiFn")[0][1] as {
+      Properties: { Environment: { Variables: Record<string, unknown> } };
+    };
+    expect(api.Properties.Environment.Variables).toHaveProperty("GITHUB_QUEUE_URL");
+    const policy = Object.entries(t.findResources("AWS::IAM::Policy")).find(([id]) =>
+      id.includes("ApiFnServiceRoleDefaultPolicy"),
+    );
+    const text = JSON.stringify(policy);
+    expect(text).toContain("sqs:SendMessage");
+    expect(text).toContain("GithubQueue");
+    expect(text).not.toContain("secretsmanager");
+    // The OAuth handlers do not get it.
+    for (const part of ["OAuthCallbackFn", "OAuthTokenFn"]) {
+      const fn = functionsByLogicalIdPart(t, part)[0][1];
+      expect(JSON.stringify(fn)).not.toContain("GITHUB_QUEUE_URL");
+    }
+  });
+
   test("prTrailer, autoCloseOnMerge and wakeOnBehind are configurable", () => {
     const t2 = synthStack({
       githubAppSecretArn: SECRET_ARN,

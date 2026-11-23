@@ -49,6 +49,8 @@ export interface ClientSession {
   updatedAt: string;
   /** Linked pull requests (present when the session is fetched by id). */
   links?: ClientLink[];
+  /** Pull requests the session waits for (present when the session is fetched by id). */
+  waits?: ClientWait[];
 }
 
 /** A pull request linked to a session. */
@@ -60,6 +62,15 @@ export interface ClientLink {
   linkedAt: string;
   prState: "open" | "closed" | "merged" | "unknown";
   headSha: string | null;
+}
+
+/** A pull request a session waits for: it is woken once when the PR merges or closes. */
+export interface ClientWait {
+  pr: string;
+  repo: string;
+  number: number;
+  source: "mcp" | "rest" | "trailer";
+  createdAt: string;
 }
 
 /** A single normalized event row. */
@@ -211,6 +222,22 @@ export interface KiroRemoteClient {
 
   /** Remove a pull request link from a session. */
   unlinkPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    opts?: WriteOptions,
+  ): Promise<void>;
+
+  /** Wake the session once when a pull request (`owner/repo#n` or a URL) merges or closes. */
+  waitForPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    opts?: WriteOptions,
+  ): Promise<ClientWait>;
+
+  /** Stop waiting for a pull request. */
+  stopWaitingForPullRequest(
     principal: Principal,
     sessionId: string,
     args: { pr: string },

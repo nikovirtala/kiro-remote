@@ -101,8 +101,8 @@ describe("one client interface, two implementations, no transport branching", ()
     expect(http).toBeInstanceOf(HttpClient);
   });
 
-  it("listTools advertises all 16 tools", () => {
-    expect(listTools().tools).toHaveLength(16);
+  it("listTools advertises all 18 tools", () => {
+    expect(listTools().tools).toHaveLength(18);
   });
 });
 
@@ -127,7 +127,7 @@ describe("HTTP transport handler (stateless JSON-RPC)", () => {
       headers: {},
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
     });
-    expect(JSON.parse(list.body).result.tools).toHaveLength(16);
+    expect(JSON.parse(list.body).result.tools).toHaveLength(18);
 
     const call = await handler.handle({
       principal: p,
