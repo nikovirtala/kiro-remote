@@ -19,6 +19,8 @@
  *   a base branch moves (a PR merged into it, or a push to it)
  *                                       -> checkBase: the consumer reads the open linked PRs
  *                                          on that branch and wakes the ones that now conflict
+ *   pull_request.closed on a PR that sessions wait for
+ *                                       -> one wake per waiting session, linked or not
  * Everything else changes no session; the delivery is simply kept in the store.
  */
 
@@ -30,6 +32,7 @@ import {
   quoteBlock,
   safeLabel,
   safeLogin,
+  waitPrompt,
 } from "./render.ts";
 import type {
   Action,
@@ -39,6 +42,7 @@ import type {
   RouteConfig,
   RouteLink,
 } from "./types.ts";
+import { decideWait, type RouteWait } from "./waits.ts";
 
 type Json = Record<string, unknown>;
 
@@ -166,11 +170,65 @@ export function baseMoveOf(event: GithubEvent): BaseMove | null {
   return null;
 }
 
-/** Route one delivery. `links` are the stored links for the PRs the event names. */
+/**
+ * What a closed pull request means for the sessions waiting for it: one wake each, whether or not
+ * the PR is linked to anyone. The decision is {@link decideWait}, shared with the check made when
+ * a wait is registered.
+ */
+function routeWaiters(
+  event: GithubEvent,
+  waits: readonly RouteWait[],
+  repo: string,
+  number: number,
+): Action[] {
+  if (event.name !== "pull_request" || str(event.payload.action) !== "closed") {
+    return [];
+  }
+  const pr = obj(event.payload.pull_request);
+  const decision = decideWait({
+    state: "closed",
+    merged: pr.merged === true,
+    baseRef: str(obj(pr.base).ref),
+    mergeCommitSha: str(pr.merge_commit_sha),
+  });
+  if (decision.type !== "fire" || decision.outcome === "gone") {
+    return [];
+  }
+  const key = `${repo}#${number}`;
+  return waits
+    .filter((w) => w.pr.toLowerCase() === key)
+    .map((w) => ({
+      type: "wake" as const,
+      sessionId: w.sessionId,
+      kind:
+        decision.outcome === "merged" ? ("pr_wait_merged" as const) : ("pr_wait_closed" as const),
+      key,
+      repo,
+      number,
+      deliveryId: event.deliveryId,
+      data: null,
+      // Only a merge moves a base, so only a merge can make the waiter's own PR conflict.
+      debounceMs: decision.outcome === "merged" ? w.holdMs : 0,
+      autoClose: false,
+      prompt: waitPrompt({
+        repo,
+        number,
+        outcome: decision.outcome,
+        ...(decision.outcome === "merged" ? { base: decision.base, sha: decision.sha } : {}),
+        deliveryIds: [event.deliveryId],
+      }),
+    }));
+}
+
+/**
+ * Route one delivery. `links` are the stored links for the PRs the event names, `waits` the
+ * stored waits for them (sessions that asked to be woken when a PR closes, linked or not).
+ */
 export function route(
   event: GithubEvent,
   links: readonly RouteLink[],
   config: RouteConfig,
+  waits: readonly RouteWait[] = [],
 ): Action[] {
   const repo = eventRepo(event);
   const numbers = eventPrNumbers(event);
@@ -195,7 +253,9 @@ export function route(
     anyLinked = true;
     actions.push(...routeLinked(event, link, repo, number, config));
   }
-  if (!anyLinked && wouldWake(event, config)) {
+  const waiterWakes = routeWaiters(event, waits, repo, numbers[0]);
+  // A session that waits for the PR claims it, so it is not "unmatched" either.
+  if (!anyLinked && waiterWakes.length === 0 && wouldWake(event, config)) {
     const pr = obj(event.payload.pull_request);
     const issue = obj(event.payload.issue);
     actions.push({
@@ -207,6 +267,8 @@ export function route(
     });
   }
   actions.push(...moved);
+  // After the base check, so the conflict wake of a waiter's own PR is written before the wait's.
+  actions.push(...waiterWakes);
   return actions.length > 0 ? actions : [{ type: "ignore", reason: "no_action" }];
 }
 

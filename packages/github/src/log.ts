@@ -61,6 +61,9 @@ export const METRIC_NAMES = [
   "ConflictChecksSkipped",
   "ConflictChecksGaveUp",
   "ConflictWakes",
+  "WaitsRegistered",
+  "WaitsRejected",
+  "WaitsFired",
 ] as const;
 export type MetricName = (typeof METRIC_NAMES)[number];
 

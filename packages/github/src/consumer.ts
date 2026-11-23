@@ -13,20 +13,32 @@ import {
   type CommandQueue,
   type ConflictCheckMessage,
   type GithubQueue,
+  matchesAllowList,
   type PrLinkItem,
   type PrState,
   parseTrailer,
+  parseWaitTrailers,
   prKeyOf,
   type Repository,
+  repoOf,
   sessionHasRepo,
+  type WaitCheckMessage,
 } from "@nikovirtala/kiro-remote-core";
 import type { GithubClient } from "./app-client.ts";
 import { type ConflictDecision, decideConflict } from "./conflicts.ts";
 import { harvestTurn } from "./harvest.ts";
 import type { Logger, Metrics } from "./log.ts";
-import { conflictPrompt } from "./render.ts";
+import { conflictPrompt, waitPrompt } from "./render.ts";
 import { eventPrNumbers, eventRepo, route } from "./route.ts";
-import type { Action, GithubEvent, ReviewComment, RouteConfig, RouteLink } from "./types.ts";
+import {
+  type Action,
+  type GithubEvent,
+  type ReviewComment,
+  type RouteConfig,
+  type RouteLink,
+  WAIT_WAKE_KINDS,
+} from "./types.ts";
+import { decideWait, type RouteWait } from "./waits.ts";
 import { autoCloseIfDone, drainAndCount, enqueueWake, type WakeDeps } from "./wake.ts";
 
 export interface ConsumerConfig {
@@ -47,6 +59,8 @@ export interface ConsumerConfig {
   conflictRecheckDelaysSec: readonly number[];
   /** Also wake when a PR merges but is behind a base that requires up-to-date branches. */
   wakeOnBehind: boolean;
+  /** ALLOWED_REPOS: the repos a wait may name (a trailer is checked against it, as the API checks a call). */
+  allowedRepos: readonly string[];
 }
 
 export interface ConsumerDeps {
@@ -98,10 +112,16 @@ function wakeDeps(deps: ConsumerDeps): WakeDeps {
  * repos[], the PR is not already linked, the PR was created after the session,
  * and (when agent logins are configured) the PR author is the agent. A forged
  * trailer fails one of these and is logged, never linked.
+ *
+ * `Kiro-Remote-Waits-For: owner/repo#n` lines are read here too, under the same rules: they
+ * count only when the session trailer is accepted. A PR that is already linked to the session
+ * (by harvest, say) is checked again only when it carries such lines, so a later edit can add
+ * them. Each awaited repo must also match ALLOWED_REPOS.
  */
 export async function linkFromTrailer(deps: ConsumerDeps, event: GithubEvent): Promise<void> {
   const pr = obj(event.payload.pull_request);
-  const sessionId = parseTrailer(typeof pr.body === "string" ? pr.body : null);
+  const body = typeof pr.body === "string" ? pr.body : null;
+  const sessionId = parseTrailer(body);
   const repoName = eventRepo(event);
   const number = typeof pr.number === "number" ? pr.number : null;
   if (!sessionId || !repoName || number === null) {
@@ -117,7 +137,9 @@ export async function linkFromTrailer(deps: ConsumerDeps, event: GithubEvent): P
       deliveryId: event.deliveryId,
     });
   };
-  if (await deps.repo.getPrLink(key)) {
+  const waits = parseWaitTrailers(body);
+  const existing = await deps.repo.getPrLink(key);
+  if (existing && (waits.length === 0 || existing.sessionId !== sessionId)) {
     return;
   }
   const session = await deps.repo.getSession(sessionId);
@@ -138,18 +160,67 @@ export async function linkFromTrailer(deps: ConsumerDeps, event: GithubEvent): P
   ) {
     return reject("author_not_agent");
   }
-  const created = await deps.repo.createLink({
-    repo: repoName,
-    number,
-    sessionId,
-    linkedBy: "trailer",
-    prState: prStateOfPayload(pr),
-    headSha: typeof obj(pr.head).sha === "string" ? (obj(pr.head).sha as string) : null,
-    baseRef: typeof obj(pr.base).ref === "string" ? (obj(pr.base).ref as string) : null,
-  });
-  if (created.created) {
-    deps.metrics.count("LinksCreated", 1, { method: "trailer" });
-    deps.logger.info("pr_linked", { pr: key, sessionId, method: "trailer" });
+  if (!existing) {
+    const created = await deps.repo.createLink({
+      repo: repoName,
+      number,
+      sessionId,
+      linkedBy: "trailer",
+      prState: prStateOfPayload(pr),
+      headSha: typeof obj(pr.head).sha === "string" ? (obj(pr.head).sha as string) : null,
+      baseRef: typeof obj(pr.base).ref === "string" ? (obj(pr.base).ref as string) : null,
+    });
+    if (created.created) {
+      deps.metrics.count("LinksCreated", 1, { method: "trailer" });
+      deps.logger.info("pr_linked", { pr: key, sessionId, method: "trailer" });
+    } else if (created.existing.sessionId !== sessionId) {
+      return; // linked to another session meanwhile: the trailer's waits are not ours to add
+    }
+  }
+  await registerTrailerWaits(deps, event, { sessionId, key, waits });
+}
+
+/** Store the waits a PR body asked for and have each read once (the `wait_check` message). */
+async function registerTrailerWaits(
+  deps: ConsumerDeps,
+  event: GithubEvent,
+  args: { sessionId: string; key: string; waits: ReturnType<typeof parseWaitTrailers> },
+): Promise<void> {
+  for (const ref of args.waits) {
+    const awaited = prKeyOf(ref);
+    const reject = (reason: string): void => {
+      deps.metrics.count("WaitsRejected", 1, { reason, source: "trailer" });
+      deps.logger.warn("wait_rejected", {
+        pr: args.key,
+        awaited,
+        sessionId: args.sessionId,
+        reason,
+        deliveryId: event.deliveryId,
+      });
+    };
+    if (awaited === args.key) {
+      reject("own_pull_request");
+      continue;
+    }
+    if (!matchesAllowList(repoOf(ref), deps.config.allowedRepos)) {
+      reject("repo_not_allowed");
+      continue;
+    }
+    const created = await deps.repo.createWait({
+      sessionId: args.sessionId,
+      pr: awaited,
+      source: "trailer",
+    });
+    if (created.created) {
+      deps.metrics.count("WaitsRegistered", 1, { source: "trailer" });
+      deps.logger.info("wait_registered", {
+        pr: args.key,
+        awaited,
+        sessionId: args.sessionId,
+        source: "trailer",
+      });
+      await deps.githubQueue.send({ kind: "wait_check", sessionId: args.sessionId, pr: awaited });
+    }
   }
 }
 
@@ -185,6 +256,8 @@ export async function processDelivery(
       links.push(toRouteLink(link));
     }
   }
+
+  const waits = await loadWaits(deps, event, repoName, numbers[0] ?? null);
 
   const trusted =
     deps.config.trustedLogins.length > 0
@@ -230,7 +303,7 @@ export async function processDelivery(
     }
   }
 
-  const actions = route(event, links, routeConfig);
+  const actions = route(event, links, routeConfig, waits);
   const touched = new Set<string>();
   let unmatched = false;
   let woke = false;
@@ -250,7 +323,13 @@ export async function processDelivery(
         }
         break;
       case "wake":
-        await enqueueWake(wd, a);
+        if (isWaitKind(a.kind)) {
+          if (!(await fireWait(deps, a))) {
+            break;
+          }
+        } else {
+          await enqueueWake(wd, a);
+        }
         touched.add(a.sessionId);
         woke = true;
         break;
@@ -278,6 +357,151 @@ export async function processDelivery(
   const status = woke ? "processed" : unmatched ? "unmatched" : "ignored";
   await deps.repo.setDeliveryStatus(deliveryId, status);
   return { status, actions: actions.map((a) => a.type) };
+}
+
+const isWaitKind = (kind: string): boolean => (WAIT_WAKE_KINDS as readonly string[]).includes(kind);
+
+/**
+ * The sessions waiting for the PR a `pull_request.closed` delivery is about. A waiter whose own
+ * open PR in the same repo may now conflict (its base is the merged PR's base, or not known) is
+ * held for as long as the conflict check can take, so the conflict wake and the wait wake are due
+ * together and the drain folds them into one turn (see enqueueWake).
+ */
+async function loadWaits(
+  deps: ConsumerDeps,
+  event: GithubEvent,
+  repoName: string | null,
+  number: number | null,
+): Promise<RouteWait[]> {
+  const payload = event.payload;
+  if (
+    event.name !== "pull_request" ||
+    payload.action !== "closed" ||
+    !repoName ||
+    number === null
+  ) {
+    return [];
+  }
+  const rows = await deps.repo.queryWaiters(`${repoName}#${number}`);
+  if (rows.length === 0) {
+    return [];
+  }
+  const pr = obj(payload.pull_request);
+  const merged = pr.merged === true;
+  const base = typeof obj(pr.base).ref === "string" ? (obj(pr.base).ref as string) : null;
+  const holdMs =
+    deps.config.conflictDebounceMs +
+    deps.config.conflictRecheckDelaysSec.reduce((sum, d) => sum + d, 0) * 1000 +
+    WAIT_HOLD_SLACK_MS;
+  const out: RouteWait[] = [];
+  for (const w of rows) {
+    let hold = 0;
+    if (merged) {
+      const own = await deps.repo.queryLinks(w.sessionId);
+      const mayConflict = own.some(
+        (l) =>
+          (l.prState === "open" || l.prState === "unknown") &&
+          l.repo === repoName &&
+          l.number !== number &&
+          (!l.baseRef || !base || l.baseRef === base),
+      );
+      hold = mayConflict ? holdMs : 0;
+    }
+    out.push({ sessionId: w.sessionId, pr: w.pr, source: w.source, holdMs: hold });
+  }
+  return out;
+}
+
+/** Slack on top of the conflict check's own timing, for SQS delay and processing time. */
+const WAIT_HOLD_SLACK_MS = 30_000;
+
+/**
+ * Fire a wait: remove it, then write the wake. The delete is the claim: of a webhook and a
+ * re-check that fire the same wait at once only one deletes it and wakes the session. When the
+ * wake cannot be written the wait is put back, so the retry finds it.
+ */
+async function fireWait(
+  deps: ConsumerDeps,
+  a: Extract<Action, { type: "wake" }>,
+): Promise<boolean> {
+  const wait = await deps.repo.getWait(a.sessionId, a.key);
+  if (!wait || !(await deps.repo.deleteWait(a.sessionId, a.key))) {
+    deps.logger.info("wait_already_fired", { pr: a.key, sessionId: a.sessionId });
+    return false;
+  }
+  try {
+    await enqueueWake(wakeDeps(deps), a);
+  } catch (err) {
+    await deps.repo.createWait({ sessionId: a.sessionId, pr: a.key, source: wait.source });
+    throw err;
+  }
+  deps.metrics.count("WaitsFired", 1, { outcome: a.kind.slice("pr_wait_".length) });
+  deps.logger.info("wait_fired", {
+    pr: a.key,
+    sessionId: a.sessionId,
+    kind: a.kind,
+    source: wait.source,
+    deliveryId: a.deliveryId,
+  });
+  return true;
+}
+
+/**
+ * Read an awaited PR once, for a wait that was just registered (or by a later sweep): merged or
+ * closed fires the wait, open leaves it for the webhook. A read that fails throws, so SQS retries.
+ * Returns the session to drain when a wake was written.
+ */
+async function checkWait(deps: ConsumerDeps, msg: WaitCheckMessage): Promise<string | null> {
+  if (!(await deps.repo.getWait(msg.sessionId, msg.pr))) {
+    deps.logger.info("wait_check_skipped", { pr: msg.pr, sessionId: msg.sessionId });
+    return null;
+  }
+  const hash = msg.pr.lastIndexOf("#");
+  const repoName = msg.pr.slice(0, hash);
+  const number = Number(msg.pr.slice(hash + 1));
+  const pull = await deps.github.getPull(repoName, number);
+  const decision = decideWait(
+    pull && {
+      state: pull.state,
+      merged: pull.merged,
+      baseRef: pull.baseRef ?? null,
+      mergeCommitSha: pull.mergeCommitSha ?? null,
+    },
+  );
+  if (decision.type === "keep") {
+    deps.logger.info("wait_check_open", { pr: msg.pr, sessionId: msg.sessionId });
+    return null;
+  }
+  const kind =
+    decision.outcome === "merged"
+      ? "pr_wait_merged"
+      : decision.outcome === "closed"
+        ? "pr_wait_closed"
+        : "pr_wait_gone";
+  const fired = await fireWait(deps, {
+    type: "wake",
+    sessionId: msg.sessionId,
+    kind,
+    key: msg.pr,
+    repo: repoName,
+    number,
+    deliveryId: "",
+    data: null,
+    debounceMs: 0,
+    autoClose: false,
+    prompt: waitPrompt({
+      repo: repoName,
+      number,
+      outcome: decision.outcome,
+      ...(decision.outcome === "merged" ? { base: decision.base, sha: decision.sha } : {}),
+      deliveryIds: [],
+      event:
+        decision.outcome === "gone"
+          ? "awaited pull request not found"
+          : `awaited pull request was already ${decision.outcome === "merged" ? "merged" : "closed"} when the wait was checked`,
+    }),
+  });
+  return fired ? msg.sessionId : null;
 }
 
 /**
@@ -463,6 +687,13 @@ export async function handleQueueMessage(
       return;
     case "conflict_check": {
       const sessionId = await checkConflict(deps, message);
+      if (sessionId) {
+        await drainAndCount(wakeDeps(deps), sessionId);
+      }
+      return;
+    }
+    case "wait_check": {
+      const sessionId = await checkWait(deps, message);
       if (sessionId) {
         await drainAndCount(wakeDeps(deps), sessionId);
       }

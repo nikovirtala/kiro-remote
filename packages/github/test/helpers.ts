@@ -132,6 +132,7 @@ export function world(config: Partial<ConsumerDeps["config"]> = {}): World {
       conflictDebounceMs: 120_000,
       conflictRecheckDelaysSec: [40, 80],
       wakeOnBehind: false,
+      allowedRepos: ["*/*"],
       ...config,
     },
     metrics,
