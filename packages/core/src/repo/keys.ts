@@ -29,6 +29,15 @@ export const GH_LINK_OPEN_PREFIX = "OPEN#";
 export const ghRepoGsi1Pk = (repo: string): string => `GHREPO#${repo.toLowerCase()}`;
 export const ghLinkGsi1Sk = (open: boolean, number: number): string =>
   `${open ? GH_LINK_OPEN_PREFIX : "DONE#"}${number}`;
+/**
+ * A session's wait for a pull request (PK SESSION#<id>, SK WAIT#<owner>/<repo>#<n>). One item
+ * per wait: the session side is the table key, the PR side is GSI1 (below), so both "what does
+ * this session wait for" and "who waits for this PR" are one query and nothing is written twice.
+ */
+export const waitSk = (key: string): string => `WAIT#${key}`;
+export const WAIT_PREFIX = "WAIT#";
+/** GSI1 key of a wait: every wait for one PR shares a partition, sorted by session id. */
+export const ghWaitGsi1Pk = (key: string): string => `GHWAIT#${key.toLowerCase()}`;
 /** Webhook delivery record + dedupe marker (GHDLV#<X-GitHub-Delivery>). */
 export const ghDeliveryPk = (deliveryId: string): string => `GHDLV#${deliveryId}`;
 /** Per-session inbox of typed wake items (SESSION#<id>, INBOX#<ulid>). */

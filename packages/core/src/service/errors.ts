@@ -55,3 +55,12 @@ export class LinkConflictError extends InvalidStateError {
     this.existingSessionId = existingSessionId;
   }
 }
+
+/** The GitHub feature is not deployed, so there is nothing to wait with -> 501. */
+export class GithubNotEnabledError extends Error {
+  readonly status = 501;
+  constructor() {
+    super("GitHub wake is not enabled on this deployment");
+    this.name = "GithubNotEnabledError";
+  }
+}

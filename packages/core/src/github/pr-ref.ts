@@ -70,9 +70,15 @@ export function trailerLine(sessionId: string): string {
   return `${SESSION_TRAILER_KEY}: ${sessionId}`;
 }
 
-/** What the launch prompt appends so the agent puts the trailer in the PR body. */
+/** The PR body trailer that registers a wait: one line per awaited pull request. */
+export const WAITS_FOR_TRAILER_KEY = "Kiro-Remote-Waits-For";
+
+/**
+ * What the launch prompt appends so the agent puts the trailer in the PR body: one line, the
+ * optional waits-for trailer first, and the session trailer last and unchanged.
+ */
 export function trailerInstruction(sessionId: string): string {
-  return `When you open a pull request, put this exact line on its own line in the pull request description (body): ${trailerLine(sessionId)}`;
+  return `If your work cannot go on until other pull requests are merged, add one line "${WAITS_FOR_TRAILER_KEY}: owner/repo#number" per pull request to the description of the pull request you open, so this session is woken when it merges or closes. When you open a pull request, put this exact line on its own line in the pull request description (body): ${trailerLine(sessionId)}`;
 }
 
 const TRAILER_RE = new RegExp(
@@ -93,4 +99,37 @@ export function parseTrailer(body: string | null | undefined): string | null {
     ids.add(m[1]);
   }
   return ids.size === 1 ? [...ids][0] : null;
+}
+
+/** The most waits one PR body may register; further lines are ignored. */
+export const MAX_WAIT_TRAILERS = 20;
+
+const WAITS_TRAILER_RE = new RegExp(
+  `^${WAITS_FOR_TRAILER_KEY}:[ \\t]*([^\\r\\n]*?)[ \\t]*\\r?$`,
+  "gm",
+);
+
+/**
+ * The pull requests a PR body asks to wait for, one `Kiro-Remote-Waits-For: owner/repo#n` line
+ * each, distinct and in order of appearance, at most {@link MAX_WAIT_TRAILERS}. A line that is not
+ * a PR reference is ignored (it never fails the others).
+ */
+export function parseWaitTrailers(body: string | null | undefined): PrRef[] {
+  if (!body) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: PrRef[] = [];
+  for (const m of body.matchAll(WAITS_TRAILER_RE)) {
+    const ref = parsePrRef(m[1]);
+    if (!ref || seen.has(prKeyOf(ref))) {
+      continue;
+    }
+    seen.add(prKeyOf(ref));
+    out.push(ref);
+    if (out.length === MAX_WAIT_TRAILERS) {
+      break;
+    }
+  }
+  return out;
 }

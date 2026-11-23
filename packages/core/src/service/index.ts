@@ -17,10 +17,11 @@ import type { Principal } from "../auth/authenticate.ts";
 import { authorize } from "../auth/authorize.ts";
 import { EVENTS_MAX_WAIT_SECONDS, EVENTS_POLL_INTERVAL_MS, MAX_CLOUD_SESSIONS } from "../config.ts";
 import { trailerInstruction } from "../github/pr-ref.ts";
+import type { GithubQueue } from "../github/queue.ts";
 import { sessionPk } from "../repo/keys.ts";
 import { ConcurrentModificationError, type Repository } from "../repo/repository.ts";
-import type { SessionMetaItem } from "../repo/types.ts";
-import type { EventView, SessionView, TurnView } from "../schemas/index.ts";
+import type { PrWaitItem, SessionMetaItem } from "../repo/types.ts";
+import type { EventView, SessionView, TurnView, WaitView } from "../schemas/index.ts";
 import { matchesAllowList } from "./allowlist.ts";
 import type { CommandQueue } from "./commands.ts";
 import {
@@ -47,6 +48,12 @@ export interface ServiceDeps {
    * construct only sets it when the GitHub feature is deployed.
    */
   prTrailer?: "on" | "off";
+  /**
+   * The GitHub queue, to ask the GitHub consumer to read an awaited PR when a wait is registered
+   * (the API holds no GitHub credentials). Absent when the GitHub feature is not deployed; waits
+   * are then refused.
+   */
+  githubQueue?: GithubQueue;
 }
 
 const ACTIVE_STATUSES = new Set(["provisioning", "running", "idle", "awaiting_permission"]);
@@ -74,6 +81,10 @@ function toSessionView(item: SessionMetaItem): SessionView {
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
+}
+
+export function toWaitView(w: PrWaitItem): WaitView {
+  return { pr: w.pr, repo: w.repo, number: w.number, source: w.source, createdAt: w.createdAt };
 }
 
 /** Load a session and assert the principal owns it, else 404 (hide existence). */
@@ -371,7 +382,10 @@ export async function getSession(
 ): Promise<SessionView> {
   authorize(principal, "read");
   const session = await loadOwned(deps, principal, sessionId);
-  const links = await deps.repo.queryLinks(sessionId);
+  const [links, waits] = await Promise.all([
+    deps.repo.queryLinks(sessionId),
+    deps.repo.queryWaits(sessionId),
+  ]);
   return {
     ...toSessionView(session),
     links: links.map((l) => ({
@@ -383,6 +397,7 @@ export async function getSession(
       prState: l.prState,
       headSha: l.headSha,
     })),
+    waits: waits.map(toWaitView),
   };
 }
 

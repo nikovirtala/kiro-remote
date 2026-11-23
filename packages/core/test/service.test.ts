@@ -51,6 +51,9 @@ class FakeRepo {
   async queryLinks(): Promise<never[]> {
     return [];
   }
+  async queryWaits(): Promise<never[]> {
+    return [];
+  }
   async getPermission(_sessionId: string, requestId: string) {
     return this.perms.get(requestId) ?? null;
   }

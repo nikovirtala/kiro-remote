@@ -97,6 +97,28 @@ export interface SessionLinkItem {
   linkedAt: string;
 }
 
+/** Who registered a wait. A later source (an ark issue's depends-on link) adds a value here. */
+export type WaitSource = "mcp" | "rest" | "trailer";
+
+/**
+ * PK SESSION#<id>, SK WAIT#<owner>/<repo>#<n>: the session waits for that pull request to merge
+ * or close. Not a link: the PR may belong to another session, or to none, and may be in a repo
+ * the session does not use. GSI1 lists the sessions waiting for a PR.
+ */
+export interface PrWaitItem {
+  PK: string;
+  SK: string;
+  sessionId: string;
+  /** The awaited PR, owner/repo#n, lower-cased. */
+  pr: string;
+  repo: string; // owner/repo, lower-cased
+  number: number;
+  source: WaitSource;
+  createdAt: string;
+  GSI1PK: string; // GHWAIT#<pr>
+  GSI1SK: string; // <sessionId>
+}
+
 export type DeliveryStatus = "received" | "processed" | "unmatched" | "ignored" | "failed";
 
 /** PK GHDLV#<delivery id>, SK A: dedupe marker + the raw delivery (S3 pointer when large). */
