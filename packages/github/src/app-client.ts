@@ -89,7 +89,26 @@ type AuthFn = (opts: {
   refresh?: boolean;
 }) => Promise<{ token: string; expiresAt?: string }>;
 
-type RequestFn = (route: string, params?: Record<string, unknown>) => Promise<{ data: unknown }>;
+type RequestFn = (
+  route: string,
+  params?: Record<string, unknown>,
+) => Promise<{ data: unknown; headers?: Record<string, string | number | undefined> }>;
+
+/** What GitHub's rate limit headers last said (https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api). */
+export interface RateLimit {
+  /** Requests left in the current window (`x-ratelimit-remaining`). */
+  remaining: number;
+  /** When the window resets, epoch milliseconds (`x-ratelimit-reset` is in seconds). */
+  resetAtMs: number;
+}
+
+/** The merge most recently made into a base branch, as the pull request list shows it. */
+export interface MergedPull {
+  number: number;
+  mergedAt: string;
+  /** The merge commit, hex. */
+  mergeCommitSha: string | null;
+}
 
 export interface GithubClientOptions {
   credentials: AppCredentials;
@@ -110,6 +129,7 @@ export class GithubClient {
   private readonly now: () => number;
   private readonly tokens = new Map<number, CachedToken>();
   private readonly repoInstallations = new Map<string, number>();
+  private lastRateLimit: RateLimit | null = null;
 
   constructor(opts: GithubClientOptions) {
     this.now = opts.now ?? (() => Date.now());
@@ -119,9 +139,34 @@ export class GithubClient {
         appId: opts.credentials.appId,
         privateKey: opts.credentials.privateKey,
       }) as unknown as AuthFn);
-    this.req =
-      opts.request ??
-      ((route, params) => request(route, params ?? {}) as Promise<{ data: unknown }>);
+    const send: RequestFn =
+      opts.request ?? ((route, params) => request(route, params ?? {}) as ReturnType<RequestFn>);
+    // Every response, an error's included, says how much of the rate limit is left.
+    this.req = async (route, params) => {
+      try {
+        const res = await send(route, params);
+        this.noteRateLimit(res.headers);
+        return res;
+      } catch (err) {
+        this.noteRateLimit(
+          (err as { response?: { headers?: Record<string, string> } }).response?.headers,
+        );
+        throw err;
+      }
+    };
+  }
+
+  private noteRateLimit(headers: Record<string, string | number | undefined> | undefined): void {
+    const remaining = Number(headers?.["x-ratelimit-remaining"]);
+    const reset = Number(headers?.["x-ratelimit-reset"]);
+    if (Number.isFinite(remaining) && Number.isFinite(reset)) {
+      this.lastRateLimit = { remaining, resetAtMs: reset * 1000 };
+    }
+  }
+
+  /** The rate limit as of the last response, or null before the first. */
+  rateLimit(): RateLimit | null {
+    return this.lastRateLimit;
   }
 
   /** A valid installation token, minted only when none is cached with 5+ minutes left. */
@@ -219,6 +264,50 @@ export class GithubClient {
         mergeable: d.mergeable ?? null,
         mergeableState: d.mergeable_state ?? null,
       };
+    } catch (err) {
+      if (statusOf(err) === 404) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * The merge most recently made into a base branch: the latest `merged_at` among the 30 most
+   * recently updated closed pull requests on it (the pulls permission the App already has; reading
+   * the branch itself needs Contents). Null when none merged, or the App cannot see the repo.
+   */
+  async latestMergedPull(repo: string, base: string): Promise<MergedPull | null> {
+    const id = await this.installationIdForRepo(repo);
+    if (id === null) {
+      return null;
+    }
+    const [owner, name] = repo.split("/");
+    try {
+      const res = await this.asInstallation(id, "GET /repos/{owner}/{repo}/pulls", {
+        owner,
+        repo: name,
+        state: "closed",
+        base,
+        sort: "updated",
+        direction: "desc",
+        per_page: 30,
+      });
+      let latest: MergedPull | null = null;
+      for (const p of res.data as Array<{
+        number: number;
+        merged_at?: string | null;
+        merge_commit_sha?: string | null;
+      }>) {
+        if (p.merged_at && (!latest || Date.parse(p.merged_at) > Date.parse(latest.mergedAt))) {
+          latest = {
+            number: p.number,
+            mergedAt: p.merged_at,
+            mergeCommitSha: p.merge_commit_sha?.replace(/[^0-9a-f]/gi, "") || null,
+          };
+        }
+      }
+      return latest;
     } catch (err) {
       if (statusOf(err) === 404) {
         return null;

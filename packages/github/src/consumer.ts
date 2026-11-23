@@ -38,7 +38,7 @@ import {
   type RouteLink,
   WAIT_WAKE_KINDS,
 } from "./types.ts";
-import { decideWait, type RouteWait } from "./waits.ts";
+import { decideWait, type RouteWait, type WaitDecision } from "./waits.ts";
 import { autoCloseIfDone, drainAndCount, enqueueWake, type WakeDeps } from "./wake.ts";
 
 export interface ConsumerConfig {
@@ -389,27 +389,39 @@ async function loadWaits(
   const pr = obj(payload.pull_request);
   const merged = pr.merged === true;
   const base = typeof obj(pr.base).ref === "string" ? (obj(pr.base).ref as string) : null;
-  const holdMs =
-    deps.config.conflictDebounceMs +
-    deps.config.conflictRecheckDelaysSec.reduce((sum, d) => sum + d, 0) * 1000 +
-    WAIT_HOLD_SLACK_MS;
   const out: RouteWait[] = [];
   for (const w of rows) {
-    let hold = 0;
-    if (merged) {
-      const own = await deps.repo.queryLinks(w.sessionId);
-      const mayConflict = own.some(
-        (l) =>
-          (l.prState === "open" || l.prState === "unknown") &&
-          l.repo === repoName &&
-          l.number !== number &&
-          (!l.baseRef || !base || l.baseRef === base),
-      );
-      hold = mayConflict ? holdMs : 0;
-    }
+    const hold = merged
+      ? await holdMsFor(deps, { sessionId: w.sessionId, repo: repoName, number, base })
+      : 0;
     out.push({ sessionId: w.sessionId, pr: w.pr, source: w.source, holdMs: hold });
   }
   return out;
+}
+
+/**
+ * How long to hold the wake of a wait whose PR merged: the whole time the waiter's own conflict
+ * check can take when the waiter has an open linked PR the merge may now conflict with (in the
+ * merged PR's repo, on the same base or one not yet known), else 0. Shared by the webhook and the
+ * sweep, so a wait fired by either folds into one turn with the waiter's own conflict wake.
+ */
+export async function holdMsFor(
+  deps: ConsumerDeps,
+  args: { sessionId: string; repo: string; number: number; base: string | null },
+): Promise<number> {
+  const own = await deps.repo.queryLinks(args.sessionId);
+  const mayConflict = own.some(
+    (l) =>
+      (l.prState === "open" || l.prState === "unknown") &&
+      l.repo === args.repo &&
+      l.number !== args.number &&
+      (!l.baseRef || !args.base || l.baseRef === args.base),
+  );
+  return mayConflict
+    ? deps.config.conflictDebounceMs +
+        deps.config.conflictRecheckDelaysSec.reduce((sum, d) => sum + d, 0) * 1000 +
+        WAIT_HOLD_SLACK_MS
+    : 0;
 }
 
 /** Slack on top of the conflict check's own timing, for SQS delay and processing time. */
@@ -471,24 +483,60 @@ async function checkWait(deps: ConsumerDeps, msg: WaitCheckMessage): Promise<str
     deps.logger.info("wait_check_open", { pr: msg.pr, sessionId: msg.sessionId });
     return null;
   }
+  const fired = await fireWaitDecision(deps, {
+    sessionId: msg.sessionId,
+    pr: msg.pr,
+    decision,
+    source: "sweep",
+    event:
+      decision.outcome === "gone"
+        ? "awaited pull request not found"
+        : `awaited pull request was already ${decision.outcome === "merged" ? "merged" : "closed"} when the wait was checked`,
+  });
+  return fired ? msg.sessionId : null;
+}
+
+/**
+ * Fire a wait whose PR was read (not delivered by a webhook): build the wake the decision means and
+ * write it with the removal of the wait, through the same {@link fireWait} the webhook uses. The
+ * registration check and the scheduled sweep both come here. `holdMs` holds a merge wake so it folds
+ * with the waiter's own conflict wake (see {@link holdMsFor}).
+ */
+export async function fireWaitDecision(
+  deps: ConsumerDeps,
+  args: {
+    sessionId: string;
+    /** The awaited PR, owner/repo#n, lower-cased. */
+    pr: string;
+    decision: Extract<WaitDecision, { type: "fire" }>;
+    source: "webhook" | "sweep";
+    /** Why the turn started, for the wake's header. */
+    event: string;
+    holdMs?: number;
+  },
+): Promise<boolean> {
+  const hash = args.pr.lastIndexOf("#");
+  const repoName = args.pr.slice(0, hash);
+  const number = Number(args.pr.slice(hash + 1));
+  const { decision } = args;
   const kind =
     decision.outcome === "merged"
       ? "pr_wait_merged"
       : decision.outcome === "closed"
         ? "pr_wait_closed"
         : "pr_wait_gone";
-  const fired = await fireWait(
+  return fireWait(
     deps,
     {
       type: "wake",
-      sessionId: msg.sessionId,
+      sessionId: args.sessionId,
       kind,
-      key: msg.pr,
+      key: args.pr,
       repo: repoName,
       number,
       deliveryId: "",
       data: null,
-      debounceMs: 0,
+      debounceMs: decision.outcome === "merged" ? (args.holdMs ?? 0) : 0,
       autoClose: false,
       prompt: waitPrompt({
         repo: repoName,
@@ -496,15 +544,11 @@ async function checkWait(deps: ConsumerDeps, msg: WaitCheckMessage): Promise<str
         outcome: decision.outcome,
         ...(decision.outcome === "merged" ? { base: decision.base, sha: decision.sha } : {}),
         deliveryIds: [],
-        event:
-          decision.outcome === "gone"
-            ? "awaited pull request not found"
-            : `awaited pull request was already ${decision.outcome === "merged" ? "merged" : "closed"} when the wait was checked`,
+        event: args.event,
       }),
     },
-    "sweep",
+    args.source,
   );
-  return fired ? msg.sessionId : null;
 }
 
 /**
@@ -514,10 +558,11 @@ async function checkWait(deps: ConsumerDeps, msg: WaitCheckMessage): Promise<str
  * Links without a known base are read and filtered by what GitHub says.
  * Returns whether any wake was written.
  */
-async function checkBase(
+export async function checkBase(
   deps: ConsumerDeps,
   move: Extract<Action, { type: "checkBase" }>,
   touched: Set<string>,
+  source: "webhook" | "sweep" = "webhook",
 ): Promise<boolean> {
   const links = await deps.repo.queryOpenLinks(move.repo);
   let woke = false;
@@ -535,11 +580,23 @@ async function checkBase(
       deliveryId: move.deliveryId,
       attempt: 1,
       headSha: null,
+      ...(source === "sweep" ? { source } : {}),
     });
     if (sessionId) {
       touched.add(sessionId);
       woke = true;
     }
+  }
+  // A merge moved the base and every candidate was checked (or queued for a re-check): remember the
+  // tip, so the scheduled sweep does not check the same move again. A push has no merge to compare
+  // with what the sweep reads, so it is not recorded.
+  if (move.afterPr !== null && /^[0-9a-f]{7,40}$/.test(move.baseSha)) {
+    await deps.repo.putBaseTip({
+      repo: move.repo,
+      base: move.base,
+      sha: move.baseSha,
+      afterPr: move.afterPr,
+    });
   }
   return woke;
 }
@@ -628,25 +685,29 @@ async function checkConflict(
           afterPush: msg.afterPr === null,
         },
       };
-      const wake = await enqueueWake(wakeDeps(deps), {
-        type: "wake",
-        sessionId: link.sessionId,
-        kind,
-        key: link.pr,
-        repo: msg.repo,
-        number: msg.number,
-        deliveryId: msg.deliveryId,
-        data,
-        debounceMs: deps.config.conflictDebounceMs,
-        autoClose: false,
-        prompt: conflictPrompt({
+      const wake = await enqueueWake(
+        wakeDeps(deps),
+        {
+          type: "wake",
+          sessionId: link.sessionId,
+          kind,
+          key: link.pr,
           repo: msg.repo,
           number: msg.number,
-          data: data.conflict,
-          deliveryIds: [msg.deliveryId],
-          kind,
-        }),
-      });
+          deliveryId: msg.deliveryId,
+          data,
+          debounceMs: deps.config.conflictDebounceMs,
+          autoClose: false,
+          prompt: conflictPrompt({
+            repo: msg.repo,
+            number: msg.number,
+            data: data.conflict,
+            deliveryIds: [msg.deliveryId],
+            kind,
+          }),
+        },
+        msg.source === "sweep" ? { source: "sweep" } : {},
+      );
       if (!wake.merged) {
         deps.metrics.count("ConflictWakes", 1, { state: decision.state });
       }
@@ -659,6 +720,11 @@ async function checkConflict(
       return link.sessionId;
     }
   }
+}
+
+/** Drain one session's inbox and count what happened (the sweep drains the sessions it woke). */
+export async function drainSession(deps: ConsumerDeps, sessionId: string): Promise<void> {
+  await drainAndCount(wakeDeps(deps), sessionId);
 }
 
 /** Handle a queue message of any kind. */

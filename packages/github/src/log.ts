@@ -64,6 +64,13 @@ export const METRIC_NAMES = [
   "WaitsRegistered",
   "WaitsRejected",
   "WaitsFired",
+  "SweepPrsRead",
+  "SweepWaitsFired",
+  "SweepWaitsRemoved",
+  "SweepBaseMovesFound",
+  "SweepSkippedForCap",
+  "SweepReadsFailed",
+  "SweepPassFailed",
 ] as const;
 export type MetricName = (typeof METRIC_NAMES)[number];
 

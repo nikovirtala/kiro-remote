@@ -12,7 +12,12 @@ import {
   SqsCommandQueue,
   SqsGithubQueue,
 } from "@nikovirtala/kiro-remote-core";
-import { type AppCredentials, GithubClient, parseAppSecret } from "../app-client.ts";
+import {
+  type AppCredentials,
+  GithubClient,
+  parseAppSecret,
+  type RateLimit,
+} from "../app-client.ts";
 import type { ConsumerConfig } from "../consumer.ts";
 import { traced } from "../tracer.ts";
 
@@ -105,11 +110,22 @@ export function lazyClient(load: () => Promise<AppCredentials>) {
 /** Defer-calling proxy so handlers can pass a client without awaiting the secret at import time. */
 export function deferredClient(
   get: () => Promise<GithubClient>,
-): Pick<GithubClient, "getPull" | "listReviewComments" | "listAppDeliveries" | "redeliver"> {
+): Pick<
+  GithubClient,
+  "getPull" | "listReviewComments" | "listAppDeliveries" | "redeliver" | "latestMergedPull"
+> & { rateLimit: () => RateLimit | null } {
+  let last: GithubClient | null = null;
+  const client = async (): Promise<GithubClient> => {
+    last = await get();
+    return last;
+  };
   return {
-    getPull: async (...a) => (await get()).getPull(...a),
-    listReviewComments: async (...a) => (await get()).listReviewComments(...a),
-    listAppDeliveries: async (...a) => (await get()).listAppDeliveries(...a),
-    redeliver: async (...a) => (await get()).redeliver(...a),
+    // What the last call through this proxy left of GitHub's rate limit.
+    rateLimit: () => last?.rateLimit() ?? null,
+    getPull: async (...a) => (await client()).getPull(...a),
+    latestMergedPull: async (...a) => (await client()).latestMergedPull(...a),
+    listReviewComments: async (...a) => (await client()).listReviewComments(...a),
+    listAppDeliveries: async (...a) => (await client()).listAppDeliveries(...a),
+    redeliver: async (...a) => (await client()).redeliver(...a),
   };
 }
