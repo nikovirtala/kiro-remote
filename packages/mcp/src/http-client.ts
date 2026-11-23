@@ -20,7 +20,7 @@ import type {
   KiroRemoteClient,
   WriteOptions,
 } from "@nikovirtala/kiro-remote-api";
-import { type Principal, parsePrRef } from "@nikovirtala/kiro-remote-core";
+import { type FeedPage, type Principal, parsePrRef } from "@nikovirtala/kiro-remote-core";
 
 /** A minimal fetch signature so tests inject a fake without a real network. */
 export type FetchLike = (
@@ -319,6 +319,14 @@ export class HttpClient implements KiroRemoteClient {
       `/sessions/${encodeURIComponent(sessionId)}/links/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`,
       key(write),
     );
+  }
+
+  async listFeedEvents(
+    _principal: Principal,
+    args: { after: number; limit: number },
+  ): Promise<FeedPage> {
+    const q = this.query({ after: args.after, limit: args.limit });
+    return (await this.request("GET", `/events${q}`)) as FeedPage;
   }
 
   async waitForPullRequest(

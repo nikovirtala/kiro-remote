@@ -44,6 +44,7 @@ import {
   deleteWait,
   getCapabilities,
   getEvents,
+  getFeed,
   getSession,
   getTurn,
   getUnmatched,
@@ -98,6 +99,7 @@ const ROUTES: RouteDef[] = [
   { method: "DELETE", template: "/sessions/{id}/links/{owner}/{repo}/{n}", handler: deleteLink },
   { method: "POST", template: "/sessions/{id}/waits", handler: postWait },
   { method: "DELETE", template: "/sessions/{id}/waits/{owner}/{repo}/{n}", handler: deleteWait },
+  { method: "GET", template: "/events", handler: getFeed },
   { method: "GET", template: "/github/unmatched", handler: getUnmatched },
 ];
 

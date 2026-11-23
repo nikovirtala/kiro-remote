@@ -27,7 +27,7 @@
  * the contract (auth boundary + protected-resource advertisement) is testable.
  */
 
-import type { Action, Principal, Resource } from "@nikovirtala/kiro-remote-core";
+import type { Action, FeedPage, Principal, Resource } from "@nikovirtala/kiro-remote-core";
 
 /* -------------------------------------------------------------------------- */
 /* Plain data shapes the client returns (transport-agnostic)                  */
@@ -227,6 +227,9 @@ export interface KiroRemoteClient {
     args: { pr: string },
     opts?: WriteOptions,
   ): Promise<void>;
+
+  /** The account's change feed after a cursor: link and wait changes and every wake with its cause. */
+  listFeedEvents(principal: Principal, args: { after: number; limit: number }): Promise<FeedPage>;
 
   /** Wake the session once when a pull request (`owner/repo#n` or a URL) merges or closes. */
   waitForPullRequest(

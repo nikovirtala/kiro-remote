@@ -277,3 +277,69 @@ describe("DELETE /v1/sessions/{id}/waits/{owner}/{repo}/{n}", () => {
     ).toBe(409);
   });
 });
+
+describe("GET /v1/events (the change feed)", () => {
+  const get = (query: Record<string, string> = {}) => ({
+    method: "GET",
+    path: "/v1/events",
+    query,
+  });
+
+  test("lists the account's link and wait changes in order, with the envelope", async () => {
+    const { call } = harness();
+    await call(link("octo/repo#7"));
+    await call(wait("ark/ark#2"));
+    await call({ method: "DELETE", path: "/v1/sessions/S1/waits/ark/ark/2" });
+    const res = await call(get());
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.events.map((e: { type: string }) => e.type)).toEqual([
+      "link.added",
+      "wait.registered",
+      "wait.removed",
+    ]);
+    expect(body.events[0]).toMatchObject({
+      v: 1,
+      seq: 1,
+      effect: "state",
+      sessionId: "S1",
+      pr: "octo/repo#7",
+      source: "rest",
+      payload: { method: "manual", prState: "unknown" },
+    });
+    expect(body).toMatchObject({ nextCursor: 3, hasMore: false });
+  });
+
+  test("resumes from a cursor, in pages", async () => {
+    const { call } = harness();
+    await call(link("octo/repo#7"));
+    await call(wait("ark/ark#2"));
+    await call(wait("octo/repo#9"));
+    const first = JSON.parse((await call(get({ limit: "2" }))).body);
+    expect(first.events.map((e: { seq: number }) => e.seq)).toEqual([1, 2]);
+    expect(first).toMatchObject({ nextCursor: 2, hasMore: true });
+    const next = JSON.parse(
+      (await call(get({ after: String(first.nextCursor), limit: "2" }))).body,
+    );
+    expect(next.events.map((e: { seq: number }) => e.seq)).toEqual([3]);
+    expect(next).toMatchObject({ nextCursor: 3, hasMore: false });
+  });
+
+  test("another account reads nothing of it", async () => {
+    const { h, call } = harness();
+    await call(link("octo/repo#7"));
+    const other = await route(h.ctx, {
+      ...req(get()),
+      headers: authHeader(mintToken({ sub: "user-2" })),
+    });
+    expect(JSON.parse(other.body)).toEqual({ events: [], nextCursor: 0, hasMore: false });
+  });
+
+  test("needs sessions:read, and validates the query", async () => {
+    const { call } = harness();
+    expect((await call(get(), ["sessions:write"])).status).toBe(403);
+    for (const q of [{ limit: "0" }, { limit: "500" }, { after: "-1" }, { after: "x" }]) {
+      expect((await call(get(q))).status, JSON.stringify(q)).toBe(400);
+    }
+  });
+});

@@ -130,3 +130,23 @@ describe("InProcessClient: waits", () => {
     ).rejects.toThrow(/session not found/);
   });
 });
+
+describe("InProcessClient: the change feed", () => {
+  it("lists what the caller changed over MCP, with the source mcp, and nothing of another account", async () => {
+    const h = buildInProcess();
+    const id = h.seedSession({ id: "s1" });
+    await h.client.waitForPullRequest(principal(), id, { pr: "other/repo#43" });
+    await h.client.stopWaitingForPullRequest(principal(), id, { pr: "other/repo#43" });
+    const page = await h.client.listFeedEvents(principal(), { after: 0, limit: 10 });
+    expect(page.events.map((e) => [e.type, e.source])).toEqual([
+      ["wait.registered", "mcp"],
+      ["wait.removed", "mcp"],
+    ]);
+    expect(page.nextCursor).toBe(2);
+    const other = await h.client.listFeedEvents(principal({ sub: "intruder" }), {
+      after: 0,
+      limit: 10,
+    });
+    expect(other.events).toEqual([]);
+  });
+});

@@ -324,6 +324,7 @@ export class FakeKiro {
       unlinkPullRequest: unsupported,
       waitForPullRequest: unsupported,
       stopWaitingForPullRequest: unsupported,
+      listFeedEvents: unsupported,
     };
   }
 }
