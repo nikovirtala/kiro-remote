@@ -13,7 +13,7 @@
  *
  * Two kinds of decision, with a REFUSAL next to every grant:
  *  - what each role may do (its identity policy): the runner, the deploy role and the smoke role
- *    (no read of session data), and each task role (none yet);
+ *    (no read of session data), and each task role;
  *  - who may become each role (its trust policy): the runner and no one else. The simulator does not
  *    evaluate trust policies (longplay found it answers implicitDeny for a named role too), so trust
  *    is decided by `trustAllows`, which handles exactly the two shapes the stack emits.
@@ -43,6 +43,8 @@ const role = (name: string): string => `arn:aws:iam::${ACCOUNT}:role/${name}`;
 
 const LEDGER = arn("dynamodb", `table/${LEDGER_TABLE_NAME}`);
 const SESSIONS = arn("dynamodb", "table/KiroRemoteStack-KiroRemoteTable897F2E95-PD0FG9HY0M7D");
+const SWEEP_RULE = arn("events", "rule/KiroRemoteStack-KiroRemoteGithubSweepSchedule-XyZ");
+const OTHER_RULE = arn("events", "rule/some-other-teams-rule");
 const TOPIC = arn("sns", NOTIFY_TOPIC_NAME);
 const OTHER_TOPIC = arn("sns", "somebody-elses-topic");
 const FREEZE = arn("ssm", `parameter${FREEZE_PARAMETER}`);
@@ -237,6 +239,30 @@ const DEPLOY_CASES: RoleCase[] = [
   deny(DEPLOY, "dynamodb:Scan", SESSIONS, "it reads no session"),
 ];
 
+const INDEX_TASK = `${TASK_ROLE_PREFIX}index-sweep`;
+const TASK_CASES: RoleCase[] = [
+  allow(
+    INDEX_TASK,
+    "dynamodb:Scan",
+    `${SESSIONS}/index/GSI1`,
+    "the scan runs on the index, for keys",
+  ),
+  allow(INDEX_TASK, "dynamodb:UpdateItem", SESSIONS, "it adds the two index keys"),
+  deny(INDEX_TASK, "dynamodb:Scan", SESSIONS, "never the table itself"),
+  deny(INDEX_TASK, "dynamodb:Scan", `${SESSIONS}/index/GSI2`, "no other index"),
+  ...["GetItem", "Query", "BatchGetItem"].map((a) =>
+    deny(INDEX_TASK, `dynamodb:${a}`, SESSIONS, "it reads no item"),
+  ),
+  deny(INDEX_TASK, "dynamodb:Query", `${SESSIONS}/index/GSI1`, "no query of the index either"),
+  deny(INDEX_TASK, "dynamodb:PutItem", SESSIONS, "it adds keys to items, it writes no item"),
+  deny(INDEX_TASK, "dynamodb:DeleteItem", SESSIONS, "it deletes nothing"),
+  deny(INDEX_TASK, "dynamodb:Scan", LEDGER, "no other table"),
+  deny(INDEX_TASK, "dynamodb:UpdateItem", LEDGER, "not the ledger"),
+  deny(INDEX_TASK, "s3:GetObject", `${BUCKET}/payloads/x`, "the payload bucket holds session data"),
+  deny(INDEX_TASK, "secretsmanager:GetSecretValue", GITHUB_APP, "no secret"),
+  deny(INDEX_TASK, "lambda:InvokeFunction", API_FN, "it invokes nothing"),
+];
+
 const SMOKE = ROLE_NAMES.smoke;
 const SMOKE_CASES: RoleCase[] = [
   allow(SMOKE, "cloudformation:DescribeStacks", SERVICE_STACK, "stack outputs and status"),
@@ -267,6 +293,15 @@ const SMOKE_CASES: RoleCase[] = [
   deny(SMOKE, "secretsmanager:DescribeSecret", OTHER_SECRET, "only kiro-remote's secrets"),
   allow(SMOKE, "sqs:GetQueueAttributes", DLQ, "how many messages wait in the dead-letter queue"),
   deny(SMOKE, "sqs:ReceiveMessage", DLQ, "never a message"),
+  allow(SMOKE, "events:DescribeRule", SWEEP_RULE, "the sweep's schedule: its rate and state"),
+  allow(SMOKE, "events:ListTargetsByRule", SWEEP_RULE, "and what it targets"),
+  deny(SMOKE, "events:DescribeRule", OTHER_RULE, "only the service's schedules"),
+  deny(SMOKE, "events:PutRule", SWEEP_RULE, "it changes no schedule"),
+  deny(SMOKE, "events:DisableRule", SWEEP_RULE, "it cannot switch one off"),
+  deny(SMOKE, "events:PutTargets", SWEEP_RULE, "or retarget it"),
+  allow(SMOKE, "cloudwatch:GetMetricStatistics", "*", "how often a function ran, as a count"),
+  deny(SMOKE, "cloudwatch:PutMetricData", "*", "it writes no metric"),
+  deny(SMOKE, "cloudwatch:GetMetricData", "*", "only the one read the sweep check makes"),
   deny(SMOKE, "sqs:ReceiveMessage", COMMAND_QUEUE, "never a command"),
   ...["GetItem", "Query", "Scan", "BatchGetItem"].map((a) =>
     deny(SMOKE, `dynamodb:${a}`, SESSIONS, "the sessions table holds session data"),
@@ -281,7 +316,12 @@ const SMOKE_CASES: RoleCase[] = [
   deny(SMOKE, "ssm:GetParameter", FREEZE, "the flag is the runner's"),
 ];
 
-export const CASES: readonly RoleCase[] = [...RUNNER_CASES, ...DEPLOY_CASES, ...SMOKE_CASES];
+export const CASES: readonly RoleCase[] = [
+  ...RUNNER_CASES,
+  ...DEPLOY_CASES,
+  ...SMOKE_CASES,
+  ...TASK_CASES,
+];
 export const ROLE_ORDER: readonly string[] = [
   RUNNER,
   DEPLOY,

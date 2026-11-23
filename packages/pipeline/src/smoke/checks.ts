@@ -12,6 +12,7 @@
 import {
   type AwsRunner,
   type CheckContext,
+  changedWithin,
   describeStack,
   isHealthyStackStatus,
   isNotFound,
@@ -48,6 +49,21 @@ interface FunctionConfig {
   readonly PackageType?: string;
   readonly TracingConfig?: { Mode?: string };
   readonly Environment?: { Variables?: Record<string, string> };
+}
+
+interface StackResource {
+  readonly LogicalResourceId: string;
+  readonly PhysicalResourceId?: string;
+  readonly ResourceType: string;
+}
+
+/** Every resource of the service stack, as CloudFormation lists them. */
+function stackResources(aws: AwsRunner): StackResource[] {
+  const res = aws("cloudformation", "list-stack-resources", [
+    "--stack-name",
+    SERVICE_STACK_NAME,
+  ]) as { StackResourceSummaries?: StackResource[] };
+  return res.StackResourceSummaries ?? [];
 }
 
 /** The service's own functions (not the CDK trigger provider), with their configuration. */
@@ -405,6 +421,107 @@ export const CHECKS: readonly SmokeCheck[] = [
         "the GitHub dead-letter queue",
         "INFO",
         `${a.Attributes?.ApproximateNumberOfMessages ?? "?"} message(s)`,
+      );
+    },
+  },
+  {
+    task: "sweep",
+    name: "the GitHub sweep's schedule and its runs",
+    run: ({ aws, add }) => {
+      const resources = stackResources(aws);
+      const hasGithub = resources.some(
+        (r) =>
+          r.ResourceType === "AWS::SQS::Queue" &&
+          r.LogicalResourceId.startsWith("KiroRemoteGithubQueue"),
+      );
+      if (!hasGithub)
+        return add("sweep", "the GitHub sweep", "INFO", "no GitHub wake in this stack");
+      const fn = resources.find(
+        (r) =>
+          r.ResourceType === "AWS::Lambda::Function" &&
+          r.LogicalResourceId.startsWith("KiroRemoteGithubSweepFn") &&
+          r.PhysicalResourceId,
+      );
+      const rule = resources.find(
+        (r) =>
+          r.ResourceType === "AWS::Events::Rule" &&
+          r.LogicalResourceId.startsWith("KiroRemoteGithubSweepSchedule") &&
+          r.PhysicalResourceId,
+      );
+      if (!fn?.PhysicalResourceId || !rule?.PhysicalResourceId)
+        return add(
+          "sweep",
+          "the sweep function and its schedule exist",
+          "FAIL",
+          `${fn ? "" : "no function"}${!fn && !rule ? ", " : ""}${rule ? "" : "no schedule"}`,
+        );
+      add("sweep", "the sweep function and its schedule exist", "PASS");
+
+      const described = aws("events", "describe-rule", ["--name", rule.PhysicalResourceId]) as {
+        State?: string;
+        ScheduleExpression?: string;
+      };
+      const interval = /^rate\((\d+) minutes?\)$/.exec(described.ScheduleExpression ?? "");
+      add(
+        "sweep",
+        "the schedule is enabled and runs at a fixed rate",
+        described.State === "ENABLED" && interval ? "PASS" : "FAIL",
+        `${described.ScheduleExpression ?? "no expression"}, ${described.State ?? "no state"}`,
+      );
+      const minutes = interval ? Number(interval[1]) : 15;
+
+      const config = aws("lambda", "get-function-configuration", [
+        "--function-name",
+        fn.PhysicalResourceId,
+      ]) as { FunctionArn?: string };
+      const targets = aws("events", "list-targets-by-rule", [
+        "--rule",
+        rule.PhysicalResourceId,
+      ]) as { Targets?: Array<{ Arn?: string }> };
+      const targeted =
+        config.FunctionArn !== undefined &&
+        (targets.Targets ?? []).some((t) => t.Arn === config.FunctionArn);
+      add(
+        "sweep",
+        "the schedule targets the sweep function",
+        targeted ? "PASS" : "FAIL",
+        targeted ? "" : "the function is not one of its targets",
+      );
+
+      // The function ran within two intervals. Counts only: no log line is read.
+      const end = Date.now();
+      const windowMinutes = 2 * minutes;
+      const stats = aws("cloudwatch", "get-metric-statistics", [
+        "--namespace",
+        "AWS/Lambda",
+        "--metric-name",
+        "Invocations",
+        "--dimensions",
+        `Name=FunctionName,Value=${fn.PhysicalResourceId}`,
+        "--start-time",
+        new Date(end - windowMinutes * 60_000).toISOString(),
+        "--end-time",
+        new Date(end).toISOString(),
+        "--period",
+        String(windowMinutes * 60),
+        "--statistics",
+        "Sum",
+      ]) as { Datapoints?: Array<{ Sum?: number }> };
+      const runs = (stats.Datapoints ?? []).reduce((n, d) => n + (d.Sum ?? 0), 0);
+      if (runs > 0)
+        return add(
+          "sweep",
+          `the sweep ran within two intervals (${windowMinutes} minutes)`,
+          "PASS",
+          `${runs} invocation(s)`,
+        );
+      // A schedule that has not fired yet on the day it is first deployed is not a failure.
+      const fresh = changedWithin(aws, fn.PhysicalResourceId, windowMinutes);
+      add(
+        "sweep",
+        `the sweep ran within two intervals (${windowMinutes} minutes)`,
+        fresh ? "INFO" : "FAIL",
+        fresh ? "not run yet: the function changed within two intervals" : "no invocation",
       );
     },
   },

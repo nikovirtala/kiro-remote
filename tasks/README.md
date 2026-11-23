@@ -5,7 +5,7 @@ smoke checks: seeding a table, a first run, a migration of stored records. The p
 in this directory whose ids are not in the ledger (`kiro-remote-deployment-ledger`), in task order,
 each with a dry run first, and stops at the first failure: the pipeline freezes and does **not** roll
 back (a task moves data forward, and an older commit does not undo it). A task in the ledger never
-runs again; deleting its file afterwards is tidying up. There is no task yet.
+runs again; deleting its file afterwards is tidying up. The tasks so far: `1-index-open-waits-and-links`, which gives the waits and open linked PRs that predate the sweep's index (GSI2) their keys.
 
 The runner is [`@nikovirtala/deployment`](https://github.com/nikovirtala/ark/tree/main/packages/deployment);
 `deploy.toml` at the repository root says where this directory is.
