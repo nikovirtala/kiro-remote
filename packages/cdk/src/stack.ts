@@ -41,6 +41,11 @@ export class KiroRemoteStack extends Stack {
       value: this.kiroRemote.httpApi.apiEndpoint,
       description: "The HTTP API default endpoint (facade base host)",
     });
+    // The table's name, for the deployment tasks that move stored records (tasks/README.md).
+    new CfnOutput(this, "TableName", {
+      value: this.kiroRemote.table.tableName,
+      description: "The DynamoDB table (read by deployment tasks, which are given it as an output)",
+    });
     new CfnOutput(this, "ManagedLoginDomainUrl", {
       value: this.kiroRemote.auth.managedLoginDomain.baseUrl(),
       description: "Cognito managed-login domain base URL",

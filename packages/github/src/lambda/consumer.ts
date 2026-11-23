@@ -1,8 +1,8 @@
 /**
  * SQS consumer for the GitHub queue (deliveries, harvest requests, delayed
  * drains). The 15-minute EventBridge schedule invokes this same function with
- * `{ "kind": "redeliver" }`, so the App secret is readable by exactly two
- * functions: the webhook ingress and this one.
+ * `{ "kind": "redeliver" }`, so the App secret is readable by exactly three
+ * functions: the webhook ingress, this one and the scheduled sweep.
  */
 
 import { isGithubQueueMessage } from "@nikovirtala/kiro-remote-core";

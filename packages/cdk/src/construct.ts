@@ -31,6 +31,7 @@
 
 import { otelResourceAttributes } from "@nikovirtala/deployment/cdk";
 import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
+import { SWEEP_INTERVAL_MINUTES } from "@nikovirtala/kiro-remote-core";
 import { Annotations, Duration, RemovalPolicy, Validations } from "aws-cdk-lib";
 import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
@@ -328,6 +329,9 @@ export interface KiroRemoteProps {
 
   /** Bundled code for the GitHub consumer function. Defaults to an inline placeholder (synth only). */
   githubConsumerCode?: Code;
+
+  /** Bundled code for the scheduled sweep function. Defaults to an inline placeholder (synth only). */
+  githubSweepCode?: Code;
   /**
    * The OpenTelemetry resource attributes of this deploy (the commit, the repository URL, the
    * environment, the service version), from `provenanceFromContext` of `@nikovirtala/deployment/cdk`.
@@ -434,6 +438,8 @@ export class KiroRemote extends Construct {
   readonly githubWebhookFn?: LambdaFunction;
   /** GitHub feature: the queue consumer (also invoked by the 15-minute redelivery schedule). */
   readonly githubConsumerFn?: LambdaFunction;
+  /** GitHub feature: the scheduled sweep (waits and base moves), run every SWEEP_INTERVAL_MINUTES. */
+  readonly githubSweepFn?: LambdaFunction;
   /** GitHub feature: the standard queue of verified deliveries, harvest requests and delayed drains. */
   readonly githubQueue?: Queue;
   /** GitHub feature: the dead-letter queue for the GitHub queue. */
@@ -468,6 +474,15 @@ export class KiroRemote extends Construct {
       indexName: "GSI1",
       partitionKey: { name: "GSI1PK", type: AttributeType.STRING },
       sortKey: { name: "GSI1SK", type: AttributeType.STRING },
+      projectionType: ProjectionType.ALL,
+    });
+    // GSI2: the scheduled sweep's sparse index. Only open waits and open linked PRs carry its keys
+    // (packages/core/src/repo/keys.ts), so it holds what the sweep reads and nothing else. A table
+    // takes one new index per update, and nothing else about the table changes with it.
+    this.table.addGlobalSecondaryIndex({
+      indexName: "GSI2",
+      partitionKey: { name: "GSI2PK", type: AttributeType.STRING },
+      sortKey: { name: "GSI2SK", type: AttributeType.STRING },
       projectionType: ProjectionType.ALL,
     });
 
@@ -1084,7 +1099,8 @@ export class KiroRemote extends Construct {
       });
 
       // Consumer: routes deliveries, links PRs, writes inbox items, drains. Also
-      // run by the redelivery schedule, so exactly two functions read the secret.
+      // run by the redelivery schedule; with the webhook and the sweep, exactly three functions read
+      // the secret.
       const consumerFn = new LambdaFunction(this, "GithubConsumerFn", {
         runtime: NODEJS_26_X,
         handler: "index.handler",
@@ -1122,6 +1138,40 @@ export class KiroRemote extends Construct {
             event: RuleTargetInput.fromObject({ kind: "redeliver" }),
           }),
         ],
+      });
+
+      // The sweep: reads GitHub for what a webhook should have said (a PR that closed, a base
+      // branch that moved) and writes the same decisions as the consumer, so it has what the
+      // consumer has: the table, both queues and the App secret. Its own function, so that its
+      // invocations are its own (the smoke check reads them), and a long run cannot hold up the
+      // queue's consumer. A pass that fails makes the run fail, and the next run tries again, so
+      // the schedule does not retry.
+      const sweepFn = new LambdaFunction(this, "GithubSweepFn", {
+        runtime: NODEJS_26_X,
+        handler: "index.handler",
+        code: props.githubSweepCode ?? placeholderLambdaCode(),
+        memorySize: 512,
+        timeout: Duration.minutes(5),
+        tracing: Tracing.ACTIVE,
+        environment: {
+          ...githubEnv,
+          COMMAND_QUEUE_URL: this.commandQueue.queueUrl,
+          GITHUB_TRUSTED_LOGINS: (props.githubTrustedLogins ?? []).join(","),
+          GITHUB_AGENT_LOGINS: (props.githubAgentLogins ?? []).join(","),
+          GITHUB_AUTO_CLOSE_ON_MERGE: props.githubAutoCloseOnMerge ?? "off",
+          GITHUB_WAKE_ON_BEHIND: props.githubWakeOnBehind ?? "off",
+        },
+      });
+      this.githubSweepFn = sweepFn;
+      acknowledgeXrayWrite(sweepFn);
+      this.table.grantReadWriteData(sweepFn);
+      this.bucket.grantRead(sweepFn);
+      this.commandQueue.grantSendMessages(sweepFn);
+      this.githubQueue.grantSendMessages(sweepFn);
+      appSecret.grantRead(sweepFn);
+      new Rule(this, "GithubSweepSchedule", {
+        schedule: Schedule.rate(Duration.minutes(SWEEP_INTERVAL_MINUTES)),
+        targets: [new LambdaFunctionTarget(sweepFn, { retryAttempts: 0 })],
       });
     }
 
