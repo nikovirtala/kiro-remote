@@ -111,7 +111,7 @@ How to write one is in [tasks/README.md](../tasks/README.md). By hand:
 
 ## Smoke checks
 
-`packages/pipeline/src/smoke/checks.ts`, from this repository's [deploy guide](deploy.md) and README: the stacks are healthy; the named outputs exist; the managed-login domain has its shape and the facade client its branding; `/openapi.json` is the OpenAPI 3.1 contract, the OAuth metadata is served and `/v1/sessions` and `/mcp` refuse a call without a token; every function is on Node 26 (or the bridge image with `TZ=UTC`), with active tracing and Powertools; the Kiro API key is only in Secrets Manager; every function carries the deployed commit; and the GitHub dead-letter queue's depth (INFO).
+`packages/pipeline/src/smoke/checks.ts`, from this repository's [deploy guide](deploy.md) and README: the stacks are healthy; the named outputs exist; the managed-login domain has its shape and the facade client its branding; `/openapi.json` is the OpenAPI 3.1 contract, the OAuth metadata is served and `/v1/sessions` and `/mcp` refuse a call without a token; every function is on Node 26 (or the bridge image with `TZ=UTC`), with active tracing and Powertools; the Kiro API key is only in Secrets Manager; every function carries the deployed commit; the API function names the GitHub queue it asks to read an awaited pull request (with the GitHub wake deployed); and the GitHub dead-letter queue's depth (INFO).
 
 ```sh
 node packages/pipeline/scripts/smoke.ts --dry-run    # every check's calls, none made

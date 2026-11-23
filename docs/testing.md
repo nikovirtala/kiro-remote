@@ -56,6 +56,17 @@ idempotency store: the create-once conditional put, the stored fingerprint and
 a lost race between two first calls, and a REST launch on the real `Repository`.
 The emulator does not evaluate IAM, so neither test proves permissions.
 
+`packages/github/test/waits-emulator.test.ts` runs the same way, with a table and
+an SQS queue of its own, and covers the waits: the create-once conditional put, one
+query per session and per PR through GSI1, the delete that only one of two racing
+callers wins, the API's `wait_check` message on a real queue reaching the consumer,
+a merge webhook waking every waiter once, and the held drain that folds a waiter's
+merge wake and its own conflict wake into one turn:
+
+```bash
+KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-github test waits-emulator
+```
+
 The tests create and delete their own table and refuse to run unless
 `AWS_ENDPOINT_URL` is a loopback address, so they cannot reach real AWS.
 
@@ -238,12 +249,12 @@ other than that token file.
   supports S256, and lists the authorization, token and registration endpoints.
 - `mcp-inspector`: The Inspector CLI
   (`--cli <url>/mcp --transport http --method tools/list`) completes
-  discovery, registration and the browser sign-in, and lists exactly the 16
+  discovery, registration and the browser sign-in, and lists exactly the 18
   registered tools.
 - `login`: A token with the three scopes, from the token file or a browser
   login. `captured.source` says which.
 - `mcp-tools`: The MCP SDK client connects over Streamable HTTP with that token.
-  `tools/list` returns the 16 tools, and `kiro_capabilities` and
+  `tools/list` returns the 18 tools, and `kiro_capabilities` and
   `kiro_list_models` return their result shapes.
 - `mcp-launch`: `kiro_launch_session` on the repo returns a session id.
   `kiro_get_session` returns it and `kiro_list_sessions` lists it.

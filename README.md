@@ -9,11 +9,11 @@ The part I'm most excited about: the MCP server lets a chat client such as Claud
 - launch a repo-scoped Kiro Web session with an initial prompt (`kiro_launch_session`),
 - send follow-up prompts and long-poll progress (`kiro_send_prompt`, `kiro_wait_for_events`),
 - read back each turn's final answer (`kiro_get_transcript`),
-- and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-16-tools). Every tool that changes something takes an optional `idempotencyKey`, so a retried call runs at most once in 24 hours ([details](./docs/mcp.md#retrying-safely-idempotencykey)).
+- and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-18-tools). Every tool that changes something takes an optional `idempotencyKey`, so a retried call runs at most once in 24 hours ([details](./docs/mcp.md#retrying-safely-idempotencykey)).
 
 Optionally, GitHub activity on a pull request the agent opened (merged, closed, changes requested, a comment from you, failing checks) can wake the session with a new turn: see [GitHub wake](./docs/github.md).
 
-You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can do all of the above either over the REST API or through the 16 MCP tools. Both MCP transports expose the same tools.
+You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can do all of the above either over the REST API or through the 18 MCP tools. Both MCP transports expose the same tools.
 
 Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 

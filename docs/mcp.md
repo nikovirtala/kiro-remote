@@ -8,7 +8,7 @@ the same `KiroRemoteClient` interface:
 - **Streamable HTTP** — mounted at `<host>/mcp`, a protected resource that
   requires the same Cognito bearer.
 
-Both surfaces expose the same **16 tools**.
+Both surfaces expose the same **18 tools**.
 
 ## The `kiro-remote` CLI
 
@@ -186,35 +186,45 @@ without one; see the Inspector's
 The live e2e harness uses the Inspector's CLI mode instead, with an in-memory
 store (see [`docs/testing.md`](testing.md#the-live-end-to-end-harness)).
 
-## The 16 tools
+## The 18 tools
 
 Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 `destructiveHint` (from [`packages/mcp/src/tools.ts`](../packages/mcp/src/tools.ts)):
 
-| #   | Tool                       | Annotation  | What it does                                                                                                      |
-| --- | -------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
-| 1   | `kiro_capabilities`        | RO          | Advertised capabilities, `kiro-cli` version (`null` until the caps publisher has run), your active session count. |
-| 2   | `kiro_list_models`         | RO          | Model ids the agent advertises.                                                                                   |
-| 3   | `kiro_launch_session`      | —           | Launch a session against one or more repos with an initial prompt.                                                |
-| 4   | `kiro_list_sessions`       | RO          | List your sessions, newest first, with status filter + cursor.                                                    |
-| 5   | `kiro_adopt_session`       | —           | Adopt an existing Kiro cloud session.                                                                             |
-| 6   | `kiro_get_session`         | RO          | Fetch one session you own.                                                                                        |
-| 7   | `kiro_send_prompt`         | —           | Send a prompt; steer/queue/reject when busy.                                                                      |
-| 8   | `kiro_wait_for_events`     | RO          | Long-poll the event log (see limits below).                                                                       |
-| 9   | `kiro_get_transcript`      | RO          | The assistant's final text per completed turn.                                                                    |
-| 10  | `kiro_list_permissions`    | RO          | List permission requests (optionally by status).                                                                  |
-| 11  | `kiro_answer_permission`   | —           | Answer a pending request with an offered `optionId` (+ optional consent).                                         |
-| 12  | `kiro_set_config`          | —           | Change a session's `model` / `effort` / `mode`.                                                                   |
-| 13  | `kiro_link_pull_request`   | —           | Link a PR (`owner/repo#n` or URL) to a session so GitHub activity wakes it ([GitHub wake](./github.md)).          |
-| 14  | `kiro_unlink_pull_request` | —           | Remove a PR link from a session.                                                                                  |
-| 15  | `kiro_cancel_turn`         | DESTRUCTIVE | Cancel the active turn.                                                                                           |
-| 16  | `kiro_delete_session`      | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                               |
+| #   | Tool                                 | Annotation  | What it does                                                                                                                           |
+| --- | ------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `kiro_capabilities`                  | RO          | Advertised capabilities, `kiro-cli` version (`null` until the caps publisher has run), your active session count.                      |
+| 2   | `kiro_list_models`                   | RO          | Model ids the agent advertises.                                                                                                        |
+| 3   | `kiro_launch_session`                | —           | Launch a session against one or more repos with an initial prompt.                                                                     |
+| 4   | `kiro_list_sessions`                 | RO          | List your sessions, newest first, with status filter + cursor.                                                                         |
+| 5   | `kiro_adopt_session`                 | —           | Adopt an existing Kiro cloud session.                                                                                                  |
+| 6   | `kiro_get_session`                   | RO          | Fetch one session you own, with its linked PRs (`links`) and the PRs it waits for (`waits`).                                           |
+| 7   | `kiro_send_prompt`                   | —           | Send a prompt; steer/queue/reject when busy.                                                                                           |
+| 8   | `kiro_wait_for_events`               | RO          | Long-poll the event log (see limits below).                                                                                            |
+| 9   | `kiro_get_transcript`                | RO          | The assistant's final text per completed turn.                                                                                         |
+| 10  | `kiro_list_permissions`              | RO          | List permission requests (optionally by status).                                                                                       |
+| 11  | `kiro_answer_permission`             | —           | Answer a pending request with an offered `optionId` (+ optional consent).                                                              |
+| 12  | `kiro_set_config`                    | —           | Change a session's `model` / `effort` / `mode`.                                                                                        |
+| 13  | `kiro_link_pull_request`             | —           | Link a PR (`owner/repo#n` or URL) to a session so GitHub activity wakes it ([GitHub wake](./github.md)).                               |
+| 14  | `kiro_unlink_pull_request`           | —           | Remove a PR link from a session.                                                                                                       |
+| 15  | `kiro_wait_for_pull_request`         | —           | Wake the session once when a PR it depends on but does not own merges or closes ([waits for](./github.md#waiting-for-a-pull-request)). |
+| 16  | `kiro_stop_waiting_for_pull_request` | —           | Remove a wait.                                                                                                                         |
+| 17  | `kiro_cancel_turn`                   | DESTRUCTIVE | Cancel the active turn.                                                                                                                |
+| 18  | `kiro_delete_session`                | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                                                    |
+
+`kiro_wait_for_pull_request` and `kiro_stop_waiting_for_pull_request` take
+`{ sessionId, pr }` and need `sessions:write`, like the link tools. A session can
+wait for any number of pull requests, and a pull request can be waited for by
+any number of sessions; see [waiting for a pull
+request](./github.md#waiting-for-a-pull-request). `kiro_get_session` returns the
+session's `waits`.
 
 ### Retrying safely: `idempotencyKey`
 
 Every tool that changes something (`kiro_launch_session`, `kiro_adopt_session`,
 `kiro_send_prompt`, `kiro_answer_permission`, `kiro_set_config`,
-`kiro_link_pull_request`, `kiro_unlink_pull_request`, `kiro_cancel_turn`,
+`kiro_link_pull_request`, `kiro_unlink_pull_request`,
+`kiro_wait_for_pull_request`, `kiro_stop_waiting_for_pull_request`, `kiro_cancel_turn`,
 `kiro_delete_session`) takes an optional `idempotencyKey`: 1 to 128 characters
 from `A-Z a-z 0-9 . _ ~ : -`. Send the same key on every retry of one call and
 it runs at most once in 24 hours. A replay returns the first call's result and
