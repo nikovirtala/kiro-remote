@@ -1,5 +1,5 @@
 /**
- * The 18 MCP tools.
+ * The 19 MCP tools.
  *
  * Each tool is defined ONCE here with its name, description, required core
  * {@link Action} (which authorize() turns into a scope), MCP annotations
@@ -27,6 +27,7 @@ import {
   ConfigPatchSchema,
   CreateTurnSchema,
   EventsQuerySchema,
+  FeedQuerySchema,
   IdempotencyKeyFieldSchema,
   type JsonSchema,
   LaunchSessionSchema,
@@ -149,12 +150,13 @@ export const CORE_SCHEMA_FOR_TOOL: Readonly<Record<string, z.ZodType>> = {
   kiro_set_config: ConfigPatchSchema,
   kiro_link_pull_request: LinkPullRequestSchema,
   kiro_unlink_pull_request: LinkPullRequestSchema,
+  kiro_list_events: FeedQuerySchema,
   kiro_wait_for_pull_request: WaitForPullRequestSchema,
   kiro_stop_waiting_for_pull_request: WaitForPullRequestSchema,
 };
 
 /**
- * The canonical list of the 18 tools, in a stable order. Each handler calls
+ * The canonical list of the 19 tools, in a stable order. Each handler calls
  * only the client interface, so the SAME definitions serve both transports.
  */
 export const TOOL_DEFS: readonly ToolDef[] = [
@@ -412,6 +414,18 @@ export const TOOL_DEFS: readonly ToolDef[] = [
     },
   },
   {
+    name: "kiro_list_events",
+    description:
+      "Read the account's change feed: links and waits added, removed or changed, and every wake with its cause, in order. Pass after (the nextCursor of the last page, 0 to start) and limit (default 50, at most 200). Each event has id, seq (no gaps), ts, type, effect (state: moves state a reader follows; annotation: may be skipped if the type is unknown), sessionId, pr, source and a small typed payload. Events are kept 35 days.",
+    action: "read",
+    inputZod: FeedQuerySchema,
+    annotations: { title: "List Events", readOnlyHint: true, openWorldHint: false },
+    async run(client, principal, args) {
+      const q = FeedQuerySchema.parse(args);
+      return { ...(await client.listFeedEvents(principal, q)) };
+    },
+  },
+  {
     name: "kiro_cancel_turn",
     description: `Cancel the active turn on a session.${IDEMPOTENCY_SENTENCE}`,
     action: "cancel",
@@ -447,7 +461,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
 ];
 
-/** The 18 tool names, in order. */
+/** The 19 tool names, in order. */
 export const TOOL_NAMES: readonly string[] = TOOL_DEFS.map((t) => t.name);
 
 /** Look up a tool definition by name. */

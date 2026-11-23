@@ -17,6 +17,8 @@ import {
   CreateTurnSchema,
   EventSchema,
   EventsQuerySchema,
+  FeedPageSchema,
+  FeedQuerySchema,
   IDEMPOTENCY_KEY_MAX_LENGTH,
   IDEMPOTENCY_KEY_PATTERN,
   type JsonSchema,
@@ -336,6 +338,19 @@ export function buildOpenApiDocument(config: FacadeConfig): Record<string, unkno
           optionalIdempotencyHeader,
         ],
         responses: { "204": jsonResponseSpec("Stopped"), ...errorResponses },
+      },
+    },
+    "/events": {
+      get: {
+        operationId: "listFeedEvents",
+        summary:
+          "The account's change feed: link and wait changes and every wake with its cause, in order, after a cursor (the last seq read). Events are kept 35 days; seq has no gaps, so a jump means expiry.",
+        security: securityFor(ri, "read"),
+        parameters: queryParams(toOpenApiSchema(FeedQuerySchema)),
+        responses: {
+          "200": jsonResponseSpec("A page of the feed", toOpenApiSchema(FeedPageSchema)),
+          ...errorResponses,
+        },
       },
     },
     "/github/unmatched": {

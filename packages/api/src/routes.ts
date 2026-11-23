@@ -24,12 +24,14 @@ import {
   deleteSession,
   capabilities as deriveCapabilities,
   EventsQuerySchema,
+  FeedQuerySchema,
   hasExtensionMethod,
   LaunchSessionSchema,
   LinkPullRequestSchema,
   ListSessionsQuerySchema,
   launchSession,
   linkPullRequest,
+  listFeedEvents,
   listUnmatchedDeliveries,
   type Principal,
   readEvents,
@@ -437,6 +439,16 @@ export async function deleteWait(
   return key === undefined
     ? apply()
     : withIdempotency(ctx.repo, principal.sub, key, fingerprintRestRequest(req), apply);
+}
+
+/** GET /v1/events */
+export async function getFeed(
+  ctx: ApiContext,
+  req: HttpRequest,
+  principal: Principal,
+): Promise<HttpResponse> {
+  const query = FeedQuerySchema.parse(req.query);
+  return jsonResponse(200, await listFeedEvents(ctx.service, principal, query));
 }
 
 /** GET /v1/github/unmatched */

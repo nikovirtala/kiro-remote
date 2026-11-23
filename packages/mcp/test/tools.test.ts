@@ -23,11 +23,13 @@ const EXPECTED_TOOLS = [
   "kiro_unlink_pull_request",
   "kiro_wait_for_pull_request",
   "kiro_stop_waiting_for_pull_request",
+  "kiro_list_events",
   "kiro_cancel_turn",
   "kiro_delete_session",
 ];
 
 const READ_TOOLS = new Set([
+  "kiro_list_events",
   "kiro_capabilities",
   "kiro_list_models",
   "kiro_list_sessions",
@@ -38,9 +40,9 @@ const READ_TOOLS = new Set([
 ]);
 
 describe("tool catalog", () => {
-  it("exposes exactly the 18 named tools in a stable order", () => {
+  it("exposes exactly the 19 named tools in a stable order", () => {
     expect(TOOL_NAMES).toEqual(EXPECTED_TOOLS);
-    expect(TOOL_DEFS).toHaveLength(18);
+    expect(TOOL_DEFS).toHaveLength(19);
   });
 
   it("sets readOnlyHint on read tools and not on write tools", () => {
@@ -238,5 +240,29 @@ describe("wait tools", () => {
       const entry = toolListEntries().find((e) => e.name === name);
       expect(JSON.stringify(entry?.inputSchema)).toContain("idempotencyKey");
     }
+  });
+});
+
+describe("kiro_list_events", () => {
+  it("reads the feed through the client with the cursor and limit", async () => {
+    const calls: unknown[] = [];
+    const page = { events: [], nextCursor: 4, hasMore: false };
+    const client = {
+      async listFeedEvents(_p: unknown, args: unknown) {
+        calls.push(args);
+        return page;
+      },
+    } as never;
+    const principal = { sub: "u", clientId: "c", scopes: ["sessions:read"] } as never;
+    const tool = TOOL_DEFS.find((t) => t.name === "kiro_list_events");
+    expect(tool?.annotations.readOnlyHint).toBe(true);
+    expect(tool?.action).toBe("read");
+    expect(await tool?.run(client, principal, {})).toEqual(page);
+    await tool?.run(client, principal, { after: 4, limit: 10 });
+    expect(calls).toEqual([
+      { after: 0, limit: 50 },
+      { after: 4, limit: 10 },
+    ]);
+    await expect(tool?.run(client, principal, { limit: 1000 })).rejects.toThrow();
   });
 });

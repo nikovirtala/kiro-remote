@@ -94,3 +94,15 @@ describe("HttpClient: waits", () => {
     expect(recorded).toEqual([]);
   });
 });
+
+describe("HttpClient: the change feed", () => {
+  it("GETs /v1/events with the cursor and limit", async () => {
+    const page = { events: [], nextCursor: 7, hasMore: false };
+    const { client, recorded } = clientWith({
+      "GET /v1/events": { status: 200, body: page },
+    });
+    expect(await client.listFeedEvents(P, { after: 7, limit: 25 })).toEqual(page);
+    expect(recorded[0].url).toBe("https://host/v1/events?after=7&limit=25");
+    expect(recorded[0].headers["idempotency-key"]).toBeUndefined();
+  });
+});

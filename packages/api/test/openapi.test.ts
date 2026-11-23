@@ -59,6 +59,7 @@ describe("operation scopes match authorize()'s action->scope mapping", () => {
     setConfig: "config",
     linkPullRequest: "link",
     unlinkPullRequest: "link",
+    listFeedEvents: "read",
     waitForPullRequest: "link",
     stopWaitingForPullRequest: "link",
     listUnmatchedDeliveries: "read",

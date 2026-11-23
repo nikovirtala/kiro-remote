@@ -223,7 +223,7 @@ function sessionOf(s: SessionCursor | undefined): SessionCursor {
   return s;
 }
 
-/** Assert the names are exactly the 18 registered tools. */
+/** Assert the names are exactly the 19 registered tools. */
 export function assertToolSet(names: string[], what: string): void {
   const expected = new Set<string>(TOOL_NAMES);
   const got = new Set(names);
