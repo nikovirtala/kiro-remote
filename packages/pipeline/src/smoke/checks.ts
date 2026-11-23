@@ -375,6 +375,24 @@ export const CHECKS: readonly SmokeCheck[] = [
           "INFO",
           "no GitHub wake in this stack",
         );
+      // Waits (docs/github.md): the API asks the GitHub consumer to read an awaited PR through
+      // this queue, so it must name it. Without it every wait would answer 501.
+      const queue = (res.StackResourceSummaries ?? []).find(
+        (r) =>
+          r.ResourceType === "AWS::SQS::Queue" &&
+          r.LogicalResourceId.startsWith("KiroRemoteGithubQueue"),
+      );
+      const apiFn = serviceFunctions(aws).find((f) => f.logicalId.startsWith("KiroRemoteApiFn"));
+      if (queue?.PhysicalResourceId) {
+        const named =
+          apiFn?.config.Environment?.Variables?.GITHUB_QUEUE_URL === queue.PhysicalResourceId;
+        add(
+          "queues",
+          "the API names the GitHub queue (waits for pull requests)",
+          named ? "PASS" : "FAIL",
+          named ? "" : "GITHUB_QUEUE_URL is not the GitHub queue",
+        );
+      }
       const a = aws("sqs", "get-queue-attributes", [
         "--queue-url",
         dlq.PhysicalResourceId,

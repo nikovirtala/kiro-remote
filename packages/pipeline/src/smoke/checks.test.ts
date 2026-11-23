@@ -22,6 +22,8 @@ import { CHECKS, parseResourceAttributes } from "./checks.ts";
 const COMMIT = "9bb4f62677da076832417924196766b5006babdb";
 const ORIGIN = "https://kiro-remote.nikovirtala.dev";
 const API = "https://exasb4746j.execute-api.eu-north-1.amazonaws.com";
+const GITHUB_QUEUE_URL =
+  "https://sqs.eu-north-1.amazonaws.com/1/KiroRemoteStack-KiroRemoteGithubQueue";
 const OTEL = `vcs.ref.head.revision=${COMMIT},vcs.repository.url.full=https://github.com/nikovirtala/kiro-remote,deployment.environment.name=production,service.version=${COMMIT}`;
 
 interface World {
@@ -70,7 +72,7 @@ function healthy(): World {
     },
     branding: true,
     functions: [
-      zip("KiroRemoteApiFnAEA3E115"),
+      zip("KiroRemoteApiFnAEA3E115", { GITHUB_QUEUE_URL }),
       zip("KiroRemoteOAuthTokenFn282F6F1C"),
       image("KiroRemoteBridgeConsumerFn322E483B"),
       image("KiroRemoteCatchUpFn7627B437"),
@@ -117,6 +119,11 @@ function fakeAccount(w: World) {
             LogicalResourceId: "AWSCDKTriggerCustomResourceProviderFn",
             PhysicalResourceId: "KiroRemoteStack-AWSCDKTrigger",
             ResourceType: "AWS::Lambda::Function",
+          },
+          {
+            LogicalResourceId: "KiroRemoteGithubQueue5B1C4A07",
+            PhysicalResourceId: GITHUB_QUEUE_URL,
+            ResourceType: "AWS::SQS::Queue",
           },
           {
             LogicalResourceId: "KiroRemoteGithubDlqC543AD13",
@@ -180,6 +187,26 @@ describe("the smoke checks", () => {
     expect(results.filter((r) => r.status !== "PASS" && r.status !== "INFO")).toEqual([]);
     expect(results.filter((r) => r.status === "INFO").map((r) => r.task)).toEqual(["queues"]);
     expect(results.length).toBeGreaterThan(20);
+  });
+
+  it("fail when the API does not name the GitHub queue", async () => {
+    process.env.DEPLOY_COMMIT = COMMIT;
+    const w = healthy();
+    delete w.functions[0].env.GITHUB_QUEUE_URL;
+    const { aws, fetch } = fakeAccount(w);
+    const failed = (await runChecks(CHECKS, { aws, fetch })).filter((r) => r.status === "FAIL");
+    expect(failed.map((r) => r.name)).toEqual([
+      "the API names the GitHub queue (waits for pull requests)",
+    ]);
+  });
+
+  it("fail when the API function is not the one carrying the queue", async () => {
+    process.env.DEPLOY_COMMIT = COMMIT;
+    const w = healthy();
+    w.functions[0].env.GITHUB_QUEUE_URL = "https://sqs.eu-north-1.amazonaws.com/1/other";
+    const { aws, fetch } = fakeAccount(w);
+    const failed = (await runChecks(CHECKS, { aws, fetch })).filter((r) => r.status === "FAIL");
+    expect(failed).toHaveLength(1);
   });
 
   it("fail when a function runs another commit than the one deployed, or carries none", async () => {
