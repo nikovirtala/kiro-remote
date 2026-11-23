@@ -375,6 +375,24 @@ describe("harvestTurn", () => {
       expect(w.commands.commands.filter((c) => c.kind === "delete")).toEqual([]);
     });
 
+    it("never closes a session that has prompts queued: the close is owed, the inbox is not dropped", async () => {
+      const w = world();
+      w.seedSession(SESSION, { repos: ["octo/repo"] });
+      await mergedLink(w, 3); // nothing is open: without a queue this deletes the session
+      await pendingItem(w);
+      await w.repo.putQueuedPrompt({ sessionId: SESSION, id: "Q1", prompt: "after the merge" });
+      const { handleQueueMessage } = await import("../src/consumer.ts");
+      await handleQueueMessage(w.deps, autoCloseMsg);
+
+      expect(w.commands.commands.filter((c) => c.kind === "delete")).toEqual([]);
+      expect((await w.repo.getSession(SESSION))?.closeAfterQueue).toBe(true);
+      expect((await w.repo.queryInbox(SESSION))[0]).toMatchObject({ status: "pending" });
+      expect((await w.repo.getQueuedPrompt(SESSION, "Q1"))?.status).toBe("queued");
+      expect(w.metrics.sum("AutoClosed")).toBe(0);
+      expect(w.metrics.sum("AutoCloseSkipped")).toBe(1);
+      expect(w.log.lines.some((l) => l.includes("auto_close_deferred_queue"))).toBe(true);
+    });
+
     it("without the flag, a harvest never closes", async () => {
       const w = world();
       w.seedSession(SESSION, { repos: ["octo/repo"] });
