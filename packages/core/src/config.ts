@@ -72,6 +72,23 @@ export const EVENT_SEQ_WIDTH = 12;
 /** How long a GitHub webhook delivery id is remembered for dedupe (and its raw body kept). */
 export const GITHUB_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * How often the scheduled sweep runs (docs/github.md, "The sweep"). It is the second line behind
+ * the webhook: GitHub does not retry a failed delivery, the 15-minute redelivery job asks for the
+ * ones it can still list, and the sweep reads GitHub for what no delivery will ever say (a delivery
+ * GitHub has dropped, a PR that closed while the App's webhook was off). Fifteen minutes is the
+ * rhythm of the redelivery job, so a lost wake is late by at most about one interval after a
+ * redelivery would have been due. A run costs one GSI2 query when nothing waits, and at most
+ * SWEEP_MAX_PR_READS reads of GitHub, which is about 400 reads an hour of the installation's 5,000.
+ */
+export const SWEEP_INTERVAL_MINUTES = 15;
+
+/** The most pull requests (and base branches) one sweep run reads. What is left waits for the next run. */
+export const SWEEP_MAX_PR_READS = 100;
+
+/** A run stops reading when GitHub says this few requests are left in the window. */
+export const SWEEP_RATE_LIMIT_RESERVE = 500;
+
 /** Debounce window for failing-check wakes, per PR. */
 export const GITHUB_CHECKS_DEBOUNCE_MS = 2 * 60 * 1000;
 

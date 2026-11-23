@@ -57,6 +57,8 @@ export interface ConflictCheckMessage {
   attempt: number;
   /** The PR's head sha at the first try; a different head later means the agent pushed. */
   headSha: string | null;
+  /** `sweep` when the scheduled sweep found the move, not a webhook (the change feed's `source`). */
+  source?: "sweep";
 }
 
 /**
@@ -102,7 +104,8 @@ export function isGithubQueueMessage(value: unknown): value is GithubQueueMessag
         (v.afterPr === null || typeof v.afterPr === "number") &&
         typeof v.deliveryId === "string" &&
         typeof v.attempt === "number" &&
-        (v.headSha === null || typeof v.headSha === "string")
+        (v.headSha === null || typeof v.headSha === "string") &&
+        (v.source === undefined || v.source === "sweep")
       );
     case "wait_check":
       return typeof v.sessionId === "string" && typeof v.pr === "string" && v.pr.includes("#");

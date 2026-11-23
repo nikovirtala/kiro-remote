@@ -144,6 +144,98 @@ describe("installation tokens", () => {
   });
 });
 
+describe("what the sweep reads", () => {
+  type Req = (
+    route: string,
+    params?: Record<string, unknown>,
+  ) => Promise<{ data: unknown; headers?: Record<string, string | number | undefined> }>;
+  const make = (request: Req) =>
+    new GithubClient({
+      credentials: CREDS,
+      now: () => 0,
+      auth: async (o) =>
+        o.type === "app"
+          ? { token: "app.jwt.token" }
+          : { token: "ghs_x", expiresAt: new Date(3_600_000).toISOString() },
+      request,
+    });
+
+  it("takes the rate limit from the headers of an answer, and of an error", async () => {
+    let fail = false;
+    const c = make(async (route) => {
+      if (route.includes("/installation")) {
+        return { data: { id: 5 } };
+      }
+      if (fail) {
+        throw Object.assign(new Error("rate limited"), {
+          status: 403,
+          response: { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "5000" } },
+        });
+      }
+      return {
+        data: [],
+        headers: { "x-ratelimit-remaining": "4321", "x-ratelimit-reset": "1700000000" },
+      };
+    });
+    expect(c.rateLimit()).toBeNull();
+    await c.latestMergedPull("octo/repo", "main");
+    expect(c.rateLimit()).toEqual({ remaining: 4321, resetAtMs: 1_700_000_000_000 });
+    fail = true;
+    await expect(c.latestMergedPull("octo/repo", "main")).rejects.toThrow("rate limited");
+    expect(c.rateLimit()).toEqual({ remaining: 0, resetAtMs: 5_000_000 });
+  });
+
+  it("lists the closed PRs on the base and returns the latest merge, not the latest update", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const c = make(async (route, params) => {
+      if (route.includes("/installation")) {
+        return { data: { id: 5 } };
+      }
+      expect(route).toBe("GET /repos/{owner}/{repo}/pulls");
+      seen.push(params ?? {});
+      return {
+        data: [
+          { number: 9, merged_at: null, merge_commit_sha: "9".repeat(40) }, // closed unmerged
+          { number: 7, merged_at: "2026-02-01T12:00:00Z", merge_commit_sha: "a".repeat(40) },
+          { number: 6, merged_at: "2026-02-01T10:00:00Z", merge_commit_sha: "6".repeat(40) },
+        ],
+      };
+    });
+    expect(await c.latestMergedPull("octo/repo", "main")).toEqual({
+      number: 7,
+      mergedAt: "2026-02-01T12:00:00Z",
+      mergeCommitSha: "a".repeat(40),
+    });
+    expect(seen[0]).toMatchObject({
+      owner: "octo",
+      repo: "repo",
+      state: "closed",
+      base: "main",
+      sort: "updated",
+      direction: "desc",
+      per_page: 30,
+    });
+  });
+
+  it("is null when nothing merged, the repo is not installed, or GitHub says 404", async () => {
+    const none = make(async (route) =>
+      route.includes("/installation") ? { data: { id: 5 } } : { data: [] },
+    );
+    expect(await none.latestMergedPull("octo/repo", "main")).toBeNull();
+    const notInstalled = make(async () => {
+      throw Object.assign(new Error("not found"), { status: 404 });
+    });
+    expect(await notInstalled.latestMergedPull("octo/repo", "main")).toBeNull();
+    const gone = make(async (route) => {
+      if (route.includes("/installation")) {
+        return { data: { id: 5 } };
+      }
+      throw Object.assign(new Error("not found"), { status: 404 });
+    });
+    expect(await gone.latestMergedPull("octo/repo", "main")).toBeNull();
+  });
+});
+
 describe("secrets never reach the logs", () => {
   it("installation tokens, the private key and signatures are redacted from log lines", () => {
     const lines: string[] = [];
