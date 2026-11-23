@@ -27,6 +27,14 @@ const GITHUB_QUEUE_URL =
 const OTEL = `vcs.ref.head.revision=${COMMIT},vcs.repository.url.full=https://github.com/nikovirtala/kiro-remote,deployment.environment.name=production,service.version=${COMMIT}`;
 
 interface World {
+  /** The sweep's schedule: present, or not deployed (a stack without GitHub wake has none). */
+  sweep: {
+    rule?: { state: string; expression: string };
+    targets: string[];
+    invocations: number;
+    /** Minutes since the function last changed. */
+    changedMinutesAgo: number;
+  } | null;
   outputs: Record<string, string>;
   branding: boolean;
   functions: Array<{
@@ -59,8 +67,16 @@ const image = (logicalId: string) => ({
   },
 });
 
+const SWEEP_FN_ARN = "arn:aws:lambda:eu-north-1:827333031966:function:KiroRemoteStack-Sweep-AbC";
+
 function healthy(): World {
   return {
+    sweep: {
+      rule: { state: "ENABLED", expression: "rate(15 minutes)" },
+      targets: [SWEEP_FN_ARN],
+      invocations: 3,
+      changedMinutesAgo: 24 * 60,
+    },
     outputs: {
       UserPoolId: "eu-north-1_f7watYE0D",
       FacadeClientId: "client",
@@ -76,6 +92,7 @@ function healthy(): World {
       zip("KiroRemoteOAuthTokenFn282F6F1C"),
       image("KiroRemoteBridgeConsumerFn322E483B"),
       image("KiroRemoteCatchUpFn7627B437"),
+      zip("KiroRemoteGithubSweepFn9A1B2C3D", { POWERTOOLS_SERVICE_NAME: "kiro-remote-github" }),
     ],
     status: {
       "/openapi.json": 200,
@@ -125,6 +142,15 @@ function fakeAccount(w: World) {
             PhysicalResourceId: GITHUB_QUEUE_URL,
             ResourceType: "AWS::SQS::Queue",
           },
+          ...(w.sweep
+            ? [
+                {
+                  LogicalResourceId: "KiroRemoteGithubSweepScheduleE1F2A3B4",
+                  PhysicalResourceId: "KiroRemoteStack-KiroRemoteGithubSweepSchedule-XyZ",
+                  ResourceType: "AWS::Events::Rule",
+                },
+              ]
+            : []),
           {
             LogicalResourceId: "KiroRemoteGithubDlqC543AD13",
             PhysicalResourceId:
@@ -134,11 +160,32 @@ function fakeAccount(w: World) {
         ],
       };
     }
+    if (service === "events" && command === "describe-rule") {
+      if (!w.sweep?.rule) throw new Error("ResourceNotFoundException");
+      return { State: w.sweep.rule.state, ScheduleExpression: w.sweep.rule.expression };
+    }
+    if (service === "events" && command === "list-targets-by-rule")
+      return { Targets: (w.sweep?.targets ?? []).map((Arn) => ({ Arn })) };
+    if (service === "cloudwatch" && command === "get-metric-statistics") {
+      // The window is two intervals: 30 minutes for a 15 minute schedule.
+      expect(arg("--period")).toBe("1800");
+      return {
+        Datapoints: w.sweep && w.sweep.invocations > 0 ? [{ Sum: w.sweep.invocations }] : [],
+      };
+    }
     if (service === "lambda" && command === "get-function-configuration") {
       const f = w.functions.find((x) => x.name === arg("--function-name"));
       if (!f) throw new Error("ResourceNotFoundException");
       return {
         FunctionName: f.name,
+        FunctionArn: f.logicalId.includes("GithubSweepFn")
+          ? SWEEP_FN_ARN
+          : `arn:aws:lambda:eu-north-1:827333031966:function:${f.name}`,
+        LastModified: new Date(
+          Date.now() -
+            (f.logicalId.includes("GithubSweepFn") ? (w.sweep?.changedMinutesAgo ?? 0) : 0) *
+              60_000,
+        ).toISOString(),
         PackageType: f.image ? "Image" : "Zip",
         Runtime: f.image ? undefined : f.runtime,
         TracingConfig: { Mode: f.tracing ?? "Active" },
@@ -186,6 +233,12 @@ describe("the smoke checks", () => {
     const results = await runChecks(CHECKS, { aws, fetch });
     expect(results.filter((r) => r.status !== "PASS" && r.status !== "INFO")).toEqual([]);
     expect(results.filter((r) => r.status === "INFO").map((r) => r.task)).toEqual(["queues"]);
+    expect(results.filter((r) => r.task === "sweep").map((r) => r.status)).toEqual([
+      "PASS",
+      "PASS",
+      "PASS",
+      "PASS",
+    ]);
     expect(results.length).toBeGreaterThan(20);
   });
 
@@ -209,13 +262,87 @@ describe("the smoke checks", () => {
     expect(failed).toHaveLength(1);
   });
 
+  describe("the sweep", () => {
+    const sweepResults = async (w: World) => {
+      const { aws, fetch } = fakeAccount(w);
+      return (await runChecks(CHECKS, { aws, fetch })).filter((r) => r.task === "sweep");
+    };
+
+    it("is INFO, not FAIL, on its first deploy: the function changed within two intervals and has not run", async () => {
+      const w = healthy();
+      (w.sweep as NonNullable<World["sweep"]>).invocations = 0;
+      (w.sweep as NonNullable<World["sweep"]>).changedMinutesAgo = 5;
+      const results = await sweepResults(w);
+      expect(results.map((r) => r.status)).toEqual(["PASS", "PASS", "PASS", "INFO"]);
+      expect(results[3].detail).toContain("not run yet");
+    });
+
+    it("fails when it has not run for two intervals and was not just deployed", async () => {
+      const w = healthy();
+      (w.sweep as NonNullable<World["sweep"]>).invocations = 0;
+      const results = await sweepResults(w);
+      expect(results.filter((r) => r.status === "FAIL").map((r) => r.detail)).toEqual([
+        "no invocation",
+      ]);
+    });
+
+    it.each([
+      [
+        "a disabled schedule",
+        (s: NonNullable<World["sweep"]>) => {
+          s.rule = { state: "DISABLED", expression: "rate(15 minutes)" };
+        },
+      ],
+      [
+        "a schedule that is not a fixed rate",
+        (s: NonNullable<World["sweep"]>) => {
+          s.rule = { state: "ENABLED", expression: "cron(0 * * * ? *)" };
+        },
+      ],
+      [
+        "a schedule that targets another function",
+        (s: NonNullable<World["sweep"]>) => {
+          s.targets = ["arn:aws:lambda:eu-north-1:827333031966:function:other"];
+        },
+      ],
+    ])("fails on %s", async (_what, change) => {
+      const w = healthy();
+      change(w.sweep as NonNullable<World["sweep"]>);
+      expect((await sweepResults(w)).some((r) => r.status === "FAIL")).toBe(true);
+    });
+
+    it("fails when GitHub wake is deployed without the sweep's schedule", async () => {
+      const w = healthy();
+      w.sweep = null;
+      const results = await sweepResults(w);
+      expect(results.map((r) => [r.status, r.detail])).toEqual([["FAIL", "no schedule"]]);
+    });
+
+    it("measures the window from the schedule's own rate", async () => {
+      const w = healthy();
+      (w.sweep as NonNullable<World["sweep"]>).rule = {
+        state: "ENABLED",
+        expression: "rate(1 minute)",
+      };
+      const { aws, fetch } = fakeAccount(w);
+      const seen: string[] = [];
+      const spy: AwsRunner = (service, command, args = []) => {
+        if (command === "get-metric-statistics")
+          seen.push(args[args.indexOf("--period") + 1] ?? "");
+        return aws(service, command, args);
+      };
+      await runChecks(CHECKS, { aws: spy, fetch }).catch(() => undefined);
+      expect(seen[0]).toBe("120");
+    });
+  });
+
   it("fail when a function runs another commit than the one deployed, or carries none", async () => {
     process.env.DEPLOY_COMMIT = "a".repeat(40);
     const w = healthy();
     w.functions.push(zip("KiroRemoteGithubWebhookFnCDEE4EF6", { OTEL_RESOURCE_ATTRIBUTES: "" }));
     const { aws, fetch } = fakeAccount(w);
     const failed = (await runChecks(CHECKS, { aws, fetch })).filter((r) => r.status === "FAIL");
-    expect(failed.filter((r) => r.task === "provenance")).toHaveLength(5);
+    expect(failed.filter((r) => r.task === "provenance")).toHaveLength(6);
     expect(failed.find((r) => r.name.startsWith("KiroRemoteGithubWebhookFn"))?.detail).toBe(
       "no vcs.ref.head.revision",
     );
@@ -330,6 +457,7 @@ describe("the smoke role and the checks", () => {
       "secrets",
       "provenance",
       "queues",
+      "sweep",
     ]);
     expect(planned.flatMap((p) => p.calls).every((c) => c.readOnly)).toBe(true);
   });

@@ -50,7 +50,7 @@ export const MISE_VERSION = "v2026.11.10";
  *   runner  the build's service role: the settings, the freeze flag, the ledger, the topic, the GitHub token, sts:AssumeRole
  *   deploy  `cdk deploy` of the service (through the CDK bootstrap roles), and the preflight's reads
  *   smoke   read-only, and no read of session data (`smoke/checks.ts`)
- *   task    one role per deployment task (`task-roles.ts`; none yet)
+ *   task    one role per deployment task (`task-roles.ts`)
  */
 export class PipelineStack extends cdk.Stack {
   public readonly ledger: dynamodb.Table;
@@ -366,6 +366,19 @@ export function smokeStatements({ account, region }: Where): iam.PolicyStatement
       sid: "CountTheQueues",
       actions: ["sqs:GetQueueAttributes"],
       resources: [`arn:aws:sqs:${region}:${account}:${SERVICE_NAME_PREFIX}*`],
+    }),
+    // The sweep's schedule: its rate, whether it is enabled, and what it targets.
+    new iam.PolicyStatement({
+      sid: "DescribeTheSchedules",
+      actions: ["events:DescribeRule", "events:ListTargetsByRule"],
+      resources: [`arn:aws:events:${region}:${account}:rule/${SERVICE_NAME_PREFIX}*`],
+    }),
+    // How often a function ran, as a count. CloudWatch has no resource-level permission for this
+    // read; it returns numbers per metric, never a log line or an item.
+    new iam.PolicyStatement({
+      sid: "CountTheInvocations",
+      actions: ["cloudwatch:GetMetricStatistics"],
+      resources: ["*"],
     }),
   ];
 }
