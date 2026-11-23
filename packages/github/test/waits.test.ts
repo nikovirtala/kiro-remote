@@ -1,4 +1,5 @@
 import type { Command } from "@nikovirtala/kiro-remote-core";
+import { feedViolations } from "@nikovirtala/kiro-remote-core/testing";
 import { describe, expect, it } from "vitest";
 import { handleQueueMessage, linkFromTrailer, processDelivery } from "../src/consumer.ts";
 import { processRecords } from "../src/lambda/consumer.ts";
@@ -236,7 +237,7 @@ describe("processDelivery: waits", () => {
     expect(await w.repo.queryWaits(WAITER)).toEqual([]);
   });
 
-  it("puts the wait back when the wake cannot be written, so the retry finds it", async () => {
+  it("leaves the wait where it was when the wake cannot be written (one transaction), so the retry finds it", async () => {
     const w = world();
     w.seedSession(WAITER);
     await w.repo.createWait({ sessionId: WAITER, pr: "octo/repo#7", source: "trailer" });
@@ -248,7 +249,7 @@ describe("processDelivery: waits", () => {
       repo: "octo/repo",
       rawBody: JSON.stringify(fixture("pull_request.closed.merged")),
     });
-    w.ddb.failNext.set("PutCommand", new Error("ddb down"));
+    w.ddb.failNext.set("TransactWriteCommand", new Error("ddb down"));
     await expect(processDelivery(w.deps, "del-m1")).rejects.toThrow();
     expect(await w.repo.queryWaits(WAITER)).toMatchObject([
       { pr: "octo/repo#7", source: "trailer" },
@@ -624,5 +625,180 @@ describe("Kiro-Remote-Waits-For trailer", () => {
     w.seedSession(SESSION);
     await linkFromTrailer(w.deps, opened("Kiro-Remote-Waits-For: octo/repo#41"));
     expect(await w.repo.queryWaits(SESSION)).toEqual([]);
+  });
+});
+
+describe("the change feed, from the GitHub paths", () => {
+  const OWNER = "user-sub-1";
+  const feed = async (w: World) => (await w.repo.readFeed(OWNER, 0, 200)).events;
+  const brief = (events: Awaited<ReturnType<typeof feed>>) =>
+    events.map((e) => [e.type, e.pr, e.source, e.payload.reason ?? e.payload.cause ?? null]);
+
+  it("a merge webhook: the wait is removed and the wake queued in one commit, then delivered", async () => {
+    const w = world();
+    w.seedSession(WAITER);
+    await w.repo.createWait({ sessionId: WAITER, pr: "octo/repo#7", source: "mcp" });
+    await deliver(w, "pull_request.closed.merged", "del-m1");
+    expect(brief(await feed(w))).toEqual([
+      ["wait.registered", "octo/repo#7", "mcp", null],
+      ["wait.removed", "octo/repo#7", "webhook", "merged"],
+      ["wake.queued", "octo/repo#7", "webhook", "wait"],
+      ["wake.delivered", "octo/repo#7", "webhook", "wait"],
+    ]);
+    expect(feedViolations(w.ddb.log)).toEqual([]);
+  });
+
+  it("the check made on registration is a sweep: merged, closed and unreadable", async () => {
+    const w = world();
+    for (const [i, n] of [31, 32, 33].entries()) {
+      const s = `S-${i}`;
+      w.seedSession(s);
+      await w.repo.createWait({ sessionId: s, pr: `octo/repo#${n}`, source: "rest" });
+    }
+    const pull = (n: number, over: Record<string, unknown>) => ({
+      number: n,
+      state: "closed",
+      merged: false,
+      createdAt: "x",
+      headSha: H("a"),
+      headRef: "x",
+      authorLogin: "a",
+      body: null,
+      baseRef: "main",
+      mergeCommitSha: H("b"),
+      mergeable: null,
+      mergeableState: null,
+      ...over,
+    });
+    w.github.pulls.set("octo/repo#31", pull(31, { merged: true }));
+    w.github.pulls.set("octo/repo#32", pull(32, {}));
+    for (const [i, n] of [31, 32, 33].entries()) {
+      await handleQueueMessage(w.deps, {
+        kind: "wait_check",
+        sessionId: `S-${i}`,
+        pr: `octo/repo#${n}`,
+      });
+    }
+    const removed = (await feed(w)).filter((e) => e.type === "wait.removed");
+    expect(removed.map((e) => [e.pr, e.source, e.payload.reason])).toEqual([
+      ["octo/repo#31", "sweep", "merged"],
+      ["octo/repo#32", "sweep", "closed"],
+      ["octo/repo#33", "sweep", "unreadable"],
+    ]);
+    expect(feedViolations(w.ddb.log)).toEqual([]);
+  });
+
+  it("an open awaited PR changes nothing, so the feed is silent", async () => {
+    const w = world();
+    w.seedSession(WAITER);
+    await w.repo.createWait({ sessionId: WAITER, pr: "octo/repo#7", source: "mcp" });
+    w.github.pulls.set("octo/repo#7", {
+      number: 7,
+      state: "open",
+      merged: false,
+      createdAt: "x",
+      headSha: H("a"),
+      headRef: "x",
+      authorLogin: "a",
+      body: null,
+      baseRef: "main",
+      mergeable: true,
+      mergeableState: "clean",
+    });
+    await handleQueueMessage(w.deps, { kind: "wait_check", sessionId: WAITER, pr: "octo/repo#7" });
+    expect(brief(await feed(w))).toEqual([["wait.registered", "octo/repo#7", "mcp", null]]);
+  });
+
+  it("a linked PR's merge: its state change and its wake, the waiter's own conflict as a conflict wake", async () => {
+    const w = world();
+    w.seedSession(WAITER);
+    await w.repo.createLink({
+      repo: "octo/repo",
+      number: 7,
+      sessionId: WAITER,
+      linkedBy: "harvest",
+      prState: "open",
+      headSha: H("a"),
+    });
+    await deliver(w, "pull_request.closed.merged", "del-m1");
+    expect(brief(await feed(w))).toEqual([
+      ["link.added", "octo/repo#7", "harvest", null],
+      ["link.state_changed", "octo/repo#7", "webhook", null],
+      ["wake.queued", "octo/repo#7", "webhook", "linked_pr_event"],
+      ["wake.delivered", "octo/repo#7", "webhook", "linked_pr_event"],
+    ]);
+    expect(feedViolations(w.ddb.log)).toEqual([]);
+  });
+
+  it("the conflict wake of a waiter's own PR is a conflict, beside the wait's", async () => {
+    const w = world();
+    w.seedSession(WAITER);
+    await w.repo.createLink({
+      repo: "octo/repo",
+      number: 8,
+      sessionId: WAITER,
+      linkedBy: "harvest",
+      prState: "open",
+      headSha: H("a"),
+      baseRef: "main",
+    });
+    w.github.pulls.set("octo/repo#8", {
+      number: 8,
+      state: "open",
+      merged: false,
+      createdAt: "x",
+      headSha: H("a"),
+      headRef: "x",
+      authorLogin: "a",
+      body: null,
+      baseRef: "main",
+      mergeable: false,
+      mergeableState: "dirty",
+    });
+    await w.repo.createWait({ sessionId: WAITER, pr: "octo/repo#7", source: "mcp" });
+    await deliver(w, "pull_request.closed.merged", "del-m1");
+    const queued = (await feed(w)).filter((e) => e.type === "wake.queued");
+    expect(queued.map((e) => [e.pr, e.payload.cause])).toEqual([
+      ["octo/repo#8", "conflict"],
+      ["octo/repo#7", "wait"],
+    ]);
+    expect(feedViolations(w.ddb.log)).toEqual([]);
+  });
+
+  it("a wake dropped because the session is gone says why", async () => {
+    const w = world();
+    w.seedSession(WAITER, { status: "deleted" });
+    await w.repo.createWait({ sessionId: WAITER, pr: "octo/repo#7", source: "mcp" });
+    await deliver(w, "pull_request.closed.merged", "del-m1");
+    const e = await feed(w);
+    expect(e.at(-1)).toMatchObject({
+      type: "wake.dropped",
+      payload: { reason: "session_deleted", cause: "wait" },
+    });
+  });
+
+  it("a trailer: the link and the waits it asked for are events from the trailer", async () => {
+    const w = world();
+    const SESSION = "01HZX0000000000000000000S1";
+    w.seedSession(SESSION);
+    const ev = event("pull_request", "pull_request.opened");
+    (ev.payload.pull_request as { body: string }).body =
+      `Kiro-Remote-Session: ${SESSION}\nKiro-Remote-Waits-For: octo/repo#41`;
+    await linkFromTrailer(w.deps, ev);
+    expect(brief(await feed(w))).toEqual([
+      ["link.added", "octo/repo#7", "trailer", null],
+      ["wait.registered", "octo/repo#41", "trailer", null],
+    ]);
+    expect(feedViolations(w.ddb.log)).toEqual([]);
+  });
+
+  it("carries no prompt text", async () => {
+    const w = world();
+    w.seedSession(WAITER);
+    await w.repo.createWait({ sessionId: WAITER, pr: "octo/repo#7", source: "mcp" });
+    await deliver(w, "pull_request.closed.merged", "del-m1");
+    const text = JSON.stringify(await feed(w));
+    expect(text).not.toContain("Rebase onto");
+    expect(text).not.toContain("GitHub webhook");
   });
 });

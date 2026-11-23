@@ -29,6 +29,7 @@ import type {
 import { fingerprintRequest, withIdempotentResult } from "@nikovirtala/kiro-remote-api";
 import {
   capabilities as deriveCapabilities,
+  type FeedPage,
   type Principal,
   type Repository,
   readEvents,
@@ -37,6 +38,7 @@ import {
   answerPermission as svcAnswer,
   cancelTurn as svcCancel,
   deleteSession as svcDelete,
+  listFeedEvents as svcFeed,
   getSession as svcGetSession,
   launchSession as svcLaunch,
   linkPullRequest as svcLink,
@@ -280,7 +282,7 @@ export class InProcessClient implements KiroRemoteClient {
       opts,
       "linkPullRequest",
       { sessionId, ...args },
-      async () => (await svcLink(this.service, principal, sessionId, args.pr)).link,
+      async () => (await svcLink(this.service, principal, sessionId, args.pr, "mcp")).link,
     );
   }
 
@@ -291,8 +293,15 @@ export class InProcessClient implements KiroRemoteClient {
     opts?: WriteOptions,
   ): Promise<void> {
     await this.write(principal, opts, "unlinkPullRequest", { sessionId, ...args }, () =>
-      svcUnlink(this.service, principal, sessionId, args.pr),
+      svcUnlink(this.service, principal, sessionId, args.pr, "mcp"),
     );
+  }
+
+  async listFeedEvents(
+    principal: Principal,
+    args: { after: number; limit: number },
+  ): Promise<FeedPage> {
+    return svcFeed(this.service, principal, args);
   }
 
   async waitForPullRequest(
@@ -317,7 +326,7 @@ export class InProcessClient implements KiroRemoteClient {
     opts?: WriteOptions,
   ): Promise<void> {
     await this.write(principal, opts, "stopWaitingForPullRequest", { sessionId, ...args }, () =>
-      svcStopWaiting(this.service, principal, sessionId, args.pr),
+      svcStopWaiting(this.service, principal, sessionId, args.pr, "mcp"),
     );
   }
 }

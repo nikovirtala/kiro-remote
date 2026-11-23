@@ -73,11 +73,60 @@ function applyUpdate(expr: string, item: Item, names: Names, values: Values): vo
   }
 }
 
+export interface LoggedCommand {
+  name: string;
+  input: Record<string, unknown>;
+}
+
+const isLinkOrWaitKey = (key: Item | undefined): boolean =>
+  key !== undefined &&
+  (String(key.PK).startsWith("GHPR#") ||
+    String(key.SK).startsWith("LINK#") ||
+    String(key.SK).startsWith("WAIT#"));
+
+const isFeedEvent = (item: Item | undefined): boolean =>
+  item !== undefined && String(item.PK).startsWith("FEED#") && String(item.SK).startsWith("EVT#");
+
+/**
+ * The commands that changed a link or a wait without writing a change feed event in the same
+ * transaction. A refresh of a link's head or base alone (an update that does not touch `prState`)
+ * is not a change a reader follows. The ark ADR 9t6n5jc6 rule: no state change without its event.
+ */
+export function feedViolations(log: readonly LoggedCommand[]): LoggedCommand[] {
+  const out: LoggedCommand[] = [];
+  for (const cmd of log) {
+    const input = cmd.input;
+    if (cmd.name === "TransactWriteCommand") {
+      const ops = input.TransactItems as Array<Record<string, Record<string, unknown>>>;
+      const writesFeed = ops.some((op) => isFeedEvent(op.Put?.Item as Item | undefined));
+      const touches = ops.some((op) =>
+        isLinkOrWaitKey((op.Put?.Item ?? op.Delete?.Key ?? op.Update?.Key) as Item | undefined),
+      );
+      if (touches && !writesFeed) {
+        out.push(cmd);
+      }
+    } else if (cmd.name === "PutCommand" && isLinkOrWaitKey(input.Item as Item)) {
+      out.push(cmd);
+    } else if (cmd.name === "DeleteCommand" && isLinkOrWaitKey(input.Key as Item)) {
+      out.push(cmd);
+    } else if (
+      cmd.name === "UpdateCommand" &&
+      isLinkOrWaitKey(input.Key as Item) &&
+      String(input.UpdateExpression).includes("prState")
+    ) {
+      out.push(cmd);
+    }
+  }
+  return out;
+}
+
 export class MemoryDdb {
   /** `PK\u0000SK` -> item. */
   readonly store = new Map<string, Item>();
   /** Every command sent, for assertions. */
   readonly sent: string[] = [];
+  /** Every command with its input, for {@link feedViolations}. */
+  readonly log: LoggedCommand[] = [];
   /** Optional fault injection: throw this for the next command with that name. */
   failNext = new Map<string, Error>();
 
@@ -103,6 +152,7 @@ export class MemoryDdb {
   }): Promise<unknown> {
     const name = cmd.constructor.name;
     this.sent.push(name);
+    this.log.push({ name, input: cmd.input });
     const injected = this.failNext.get(name);
     if (injected) {
       this.failNext.delete(name);
@@ -187,9 +237,13 @@ export class MemoryDdb {
   private transact(ops: Record<string, Record<string, unknown>>[]): unknown {
     const reasons: Array<{ Code: string }> = [];
     let failed = false;
+    const keyOf = (op: Record<string, Record<string, unknown>>): Item => {
+      const body = (op.Put ?? op.Delete ?? op.Update) as Record<string, unknown>;
+      return (op.Put ? body.Item : body.Key) as Item;
+    };
     for (const op of ops) {
-      const body = (op.Put ?? op.Delete) as Record<string, unknown>;
-      const key = (op.Put ? (body.Item as Item) : (body.Key as Item)) as Item;
+      const body = (op.Put ?? op.Delete ?? op.Update) as Record<string, unknown>;
+      const key = keyOf(op);
       const existing = this.store.get(this.k(key.PK, key.SK));
       const ok = holds(
         body.ConditionExpression as string | undefined,
@@ -209,6 +263,19 @@ export class MemoryDdb {
     for (const op of ops) {
       if (op.Put) {
         this.put(op.Put.Item as Item);
+      } else if (op.Update) {
+        const key = op.Update.Key as Item;
+        const k = this.k(key.PK, key.SK);
+        const next: Item = this.store.has(k)
+          ? structuredClone(this.store.get(k) as Item)
+          : { PK: key.PK, SK: key.SK };
+        applyUpdate(
+          op.Update.UpdateExpression as string,
+          next,
+          (op.Update.ExpressionAttributeNames ?? {}) as Names,
+          (op.Update.ExpressionAttributeValues ?? {}) as Values,
+        );
+        this.store.set(k, next);
       } else {
         const key = op.Delete.Key as Item;
         this.store.delete(this.k(key.PK, key.SK));

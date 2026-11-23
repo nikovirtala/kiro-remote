@@ -324,7 +324,7 @@ export async function processDelivery(
         break;
       case "wake":
         if (isWaitKind(a.kind)) {
-          if (!(await fireWait(deps, a))) {
+          if (!(await fireWait(deps, a, "webhook"))) {
             break;
           }
         } else {
@@ -416,31 +416,30 @@ async function loadWaits(
 const WAIT_HOLD_SLACK_MS = 30_000;
 
 /**
- * Fire a wait: remove it, then write the wake. The delete is the claim: of a webhook and a
- * re-check that fire the same wait at once only one deletes it and wakes the session. When the
- * wake cannot be written the wait is put back, so the retry finds it.
+ * Fire a wait: the wait is removed and the wake written in one transaction (with their events), so
+ * of a webhook and a re-check that fire the same wait at once only one commits and wakes the
+ * session, and a wake that cannot be written leaves the wait where it was for the retry. `source` is
+ * what read GitHub: a webhook, or the check made on registration (`sweep`).
  */
 async function fireWait(
   deps: ConsumerDeps,
   a: Extract<Action, { type: "wake" }>,
+  source: "webhook" | "sweep",
 ): Promise<boolean> {
-  const wait = await deps.repo.getWait(a.sessionId, a.key);
-  if (!wait || !(await deps.repo.deleteWait(a.sessionId, a.key))) {
+  const outcome = a.kind.slice("pr_wait_".length);
+  const res = await enqueueWake(wakeDeps(deps), a, {
+    source,
+    fires: { reason: outcome === "gone" ? "unreadable" : (outcome as "merged" | "closed") },
+  });
+  if (!res.claimed) {
     deps.logger.info("wait_already_fired", { pr: a.key, sessionId: a.sessionId });
     return false;
   }
-  try {
-    await enqueueWake(wakeDeps(deps), a);
-  } catch (err) {
-    await deps.repo.createWait({ sessionId: a.sessionId, pr: a.key, source: wait.source });
-    throw err;
-  }
-  deps.metrics.count("WaitsFired", 1, { outcome: a.kind.slice("pr_wait_".length) });
+  deps.metrics.count("WaitsFired", 1, { outcome });
   deps.logger.info("wait_fired", {
     pr: a.key,
     sessionId: a.sessionId,
     kind: a.kind,
-    source: wait.source,
     deliveryId: a.deliveryId,
   });
   return true;
@@ -478,29 +477,33 @@ async function checkWait(deps: ConsumerDeps, msg: WaitCheckMessage): Promise<str
       : decision.outcome === "closed"
         ? "pr_wait_closed"
         : "pr_wait_gone";
-  const fired = await fireWait(deps, {
-    type: "wake",
-    sessionId: msg.sessionId,
-    kind,
-    key: msg.pr,
-    repo: repoName,
-    number,
-    deliveryId: "",
-    data: null,
-    debounceMs: 0,
-    autoClose: false,
-    prompt: waitPrompt({
+  const fired = await fireWait(
+    deps,
+    {
+      type: "wake",
+      sessionId: msg.sessionId,
+      kind,
+      key: msg.pr,
       repo: repoName,
       number,
-      outcome: decision.outcome,
-      ...(decision.outcome === "merged" ? { base: decision.base, sha: decision.sha } : {}),
-      deliveryIds: [],
-      event:
-        decision.outcome === "gone"
-          ? "awaited pull request not found"
-          : `awaited pull request was already ${decision.outcome === "merged" ? "merged" : "closed"} when the wait was checked`,
-    }),
-  });
+      deliveryId: "",
+      data: null,
+      debounceMs: 0,
+      autoClose: false,
+      prompt: waitPrompt({
+        repo: repoName,
+        number,
+        outcome: decision.outcome,
+        ...(decision.outcome === "merged" ? { base: decision.base, sha: decision.sha } : {}),
+        deliveryIds: [],
+        event:
+          decision.outcome === "gone"
+            ? "awaited pull request not found"
+            : `awaited pull request was already ${decision.outcome === "merged" ? "merged" : "closed"} when the wait was checked`,
+      }),
+    },
+    "sweep",
+  );
   return fired ? msg.sessionId : null;
 }
 
