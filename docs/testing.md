@@ -79,6 +79,19 @@ command of the run:
 KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-github test feed-emulator
 ```
 
+`packages/github/test/sweep-emulator.test.ts` covers [the sweep](./github.md#the-sweep)
+on a real DynamoDB (a table with GSI1 and GSI2 as `packages/cdk` creates it) and SQS: the
+sparse index across two accounts and its membership as links open and close, a deleted
+session's waits removed with their events in order and without gaps in `seq`, a wait whose PR
+merged with no webhook fired by the sweep and read back on the feed with source `sweep`
+(`SWEEP_EVIDENCE_FILE=<path>` writes those events), a deleted session's wait removed by the
+sweep, five waits fired by a sweep and five webhooks at once (one wake each), a base that moved
+with no webhook, and the backfill of waits that predate the index:
+
+```bash
+KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-github test sweep-emulator
+```
+
 The tests create and delete their own table and refuse to run unless
 `AWS_ENDPOINT_URL` is a loopback address, so they cannot reach real AWS.
 
