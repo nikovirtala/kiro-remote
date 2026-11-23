@@ -255,8 +255,8 @@ There is no VPC and no long-running task. Operational details:
   gets the alias ARN as `CATCH_UP_FUNCTION_ARN` and `lambda:InvokeFunction` on
   that alias only. Versions are retained (`RemovalPolicy.RETAIN`) because an
   execution stays pinned to the version that started it for up to 6 h 30 min.
-  The role gets the table, bucket, Kiro API key secret and, with the GitHub
-  feature, the command and GitHub queues, plus
+  The role gets the table, bucket, Kiro API key secret, the right to send to the
+  command queue and, with the GitHub feature, the GitHub queue, plus
   `lambda:CheckpointDurableExecution` and `lambda:GetDurableExecutionState`
   scoped to the function's own ARN with a version wildcard (`<arn>:*`). It uses
   an explicit role, so CDK does not attach the broader AWS managed
@@ -286,14 +286,18 @@ no meaning on a cloud session:
 - **setConfig** and **answerPermission** commands are logged no-ops.
 - **Permission lists are always empty.** Cloud turns never ask for permission.
 - **adopt** (ACP session-load of an existing session) is rejected.
-- **A mid-turn steer** and a busy prompt with **`whenBusy=queue`** are
-  rejected. An idle-session steer is just a new prompt turn.
+- **A mid-turn steer** is refused in the call (409, `steer_unsupported`; a steer
+  that raced is kept on the queue). An idle-session steer is just a new prompt
+  turn. A busy prompt with **`whenBusy=queue`** is not rejected: it waits on the
+  session's queue and runs as its own turn when the turn in front of it has
+  ended ([the prompt queue](./mcp.md#the-prompt-queue-kiro_send_prompt-with-whenbusy)).
 - **`kiro_list_models` / `GET /v1/models` returning no models is expected** for
   cloud and autonomous sessions.
 
-Because of the last rule, a GitHub wake never goes into a busy session: it is
-written to the session's inbox and `drainInbox` starts a turn from it only when
-the session is idle ([GitHub wake](./github.md)).
+Because a busy cloud session takes no prompt, a GitHub wake never goes into a
+busy session: it is written to the session's inbox and `drainInbox` starts a
+turn from it only when the session is idle and no prompt is queued
+([GitHub wake](./github.md)).
 
 Each rejection is persisted as a client-visible `turn.failed` event
 (`rawType: "operation_rejected"`, with the rejected `operation` and a `reason`
@@ -301,7 +305,26 @@ in the payload), so a client polling `GET /v1/sessions/{id}/events` sees why the
 command did nothing. The command message is then acked (deleted). The command
 queue is a DLQ-less FIFO keyed by `MessageGroupId = sessionId`, so leaving a
 permanently unsupported command for redelivery would redeliver it every
-visibility timeout and block every later command for that session.
+visibility timeout and block every later command for that session. The API
+refuses a steer for a busy session itself, so a prompt command is not rejected
+this way; the rejections left are a steer or cancel command and `adopt`.
+
+#### Why a queued prompt is stored, not sent on
+
+A turn runs inside the invocation that started it, so the FIFO group is blocked
+until that turn ends or detaches. A prompt sent meanwhile is delivered to the
+consumer afterwards, usually to a session that is still `running` (a detached
+turn). A cloud turn cannot be interleaved with, so the consumer keeps the prompt
+instead: a `QPROMPT#<turn id>` item of the session, written by the API before the
+command is sent (so GET shows it at once). The settle of every turn (live, failed,
+or a catch-up finishing) starts the oldest queued prompt: it is claimed
+(`queued` to `delivered`, one winner) and sent back to the command queue as a
+`prompt` command with `queued: true`, which starts the turn only from the claimed
+state (`delivered` to `started`) and gives the prompt back when the session is not
+idle. So prompts run one at a time, in order, once. The consumer and catch-up
+functions need `COMMAND_QUEUE_URL` and permission to send to the command queue for
+this, with or without the GitHub feature. Stuck claims (a command lost for good)
+are taken back after 30 minutes.
 
 ### How the Lambda path drives cloud sessions (direct engine)
 
@@ -416,9 +439,10 @@ without writing (`catch_up_stale`). Inspect executions with
 
 The catch-up function has no reserved concurrency on purpose: `maxCloudSessions` bounds the consumer only, and a reserved value would also set aside account capacity for a function that mostly waits (waits hold no concurrency). Set one on `CatchUpFn` if you need a hard cap on engines during catch-up.
 
-Because META stays `running`, a follow-up, steer, cancel or `whenBusy=queue`
-sent during a detached turn is rejected as mid-turn, exactly as it is during a
-live turn. `adopt` is not supported.
+Because META stays `running`, a cancel sent during a detached turn is rejected as
+mid-turn, exactly as it is during a live turn, and the API refuses a steer. A `whenBusy=queue`
+prompt waits on the queue, and the settle of the catch-up starts it. `adopt` is
+not supported.
 
 **Version pinning.** The engine's launch command, environment and `_meta`
 fields are an internal, unversioned kiro-cli interface. They were verified

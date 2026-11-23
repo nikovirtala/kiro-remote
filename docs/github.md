@@ -46,9 +46,11 @@ flowchart TD
   assignment or Slack can write the same rows later.
 - **`drainInbox(sessionId)`** (`packages/core/src/service/inbox.ts`) is the
   only code that turns inbox items into a turn. A cloud session rejects a
-  mid-turn steer and `whenBusy=queue`
+  mid-turn steer
   ([details](./deploy.md#operations-cloud-sessions-do-not-support)), so a wake
-  **never** goes into a busy session: it waits as `pending`. The drain runs
+  **never** goes into a busy session: it waits as `pending`. Prompts a person
+  queued (`whenBusy=queue`) go first, in order: the drain waits while any is
+  queued, and the settle of the last one drains the inbox. The drain runs
   from the consumer (when the session is idle) and from the bridge **every time
   a turn settles** (live, failed, or a catch-up finishing), through one helper
   (`packages/bridge/src/settle.ts`).
@@ -152,6 +154,18 @@ A session that opens a follow-up PR in its post-merge turn therefore stays alive
 to see that PR through; without this it would be deleted and the second PR's
 merge could never reach it. A kept session is logged as `auto_close_skipped`
 with the open PRs.
+
+A session with **queued prompts** (`whenBusy=queue`, see
+[the prompt queue](./mcp.md#the-prompt-queue-kiro_send_prompt-with-whenbusy)) is
+never closed automatically. When the post-merge turn completes with prompts
+queued, the bridge sends a plain harvest (no close), starts the next queued prompt
+and records that a close is owed (`closeAfterQueue` on the session). The
+settle of the turn that leaves the queue empty asks for the close again, and the
+decision above (open PRs keep the session) is made then. The bridge also refuses
+an automatic delete command while the queue is not empty, and the GitHub consumer
+defers it (`auto_close_deferred_queue`), so a prompt queued between the two
+checks is not lost either. A delete by the caller is different: it fails each
+queued prompt first.
 
 ### Conflicting PRs
 
@@ -516,17 +530,18 @@ and ordered. Read it with a cursor:
 }
 ```
 
-| Type                 | Effect       | When, and the payload                                                                                                                                                                                                                                                  |
-| -------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `link.added`         | `state`      | A PR was linked. `{ method: harvest\|trailer\|manual, prState }`.                                                                                                                                                                                                      |
-| `link.removed`       | `state`      | A link was removed. `{ reason: "unlinked" }`.                                                                                                                                                                                                                          |
-| `link.state_changed` | `state`      | The linked PR opened, closed or merged. `{ from, to }`. A refresh of the head or base alone writes no event.                                                                                                                                                           |
-| `wait.registered`    | `state`      | A session started waiting for a PR. `{ waitSource: mcp\|rest\|trailer }`.                                                                                                                                                                                              |
-| `wait.removed`       | `state`      | A wait ended. `{ reason }`: `merged`, `closed`, `unreadable` (it **fired**), `stopped` (the caller removed it), `registration_failed` (stored, but its first check could not be requested) or `session_deleted` (its session was deleted, so nothing is left to wake). |
-| `wake.queued`        | `annotation` | A wake was written to the session's inbox, or folded into a pending one (`merged: true`). `{ itemId, kind, cause, merged }`.                                                                                                                                           |
-| `wake.delivered`     | `annotation` | The wake was sent to the session as a prompt turn. `{ itemId, kind, cause, turnId }`.                                                                                                                                                                                  |
-| `wake.released`      | `annotation` | The turn did not start, the wake is pending again. Same payload as delivered.                                                                                                                                                                                          |
-| `wake.dropped`       | `annotation` | The wake was not sent (session failed or deleted, auto-closed). `{ itemId, kind, cause, reason }`.                                                                                                                                                                     |
+| Type                 | Effect       | When, and the payload                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `link.added`         | `state`      | A PR was linked. `{ method: harvest\|trailer\|manual, prState }`.                                                                                                                                                                                                                                                                                                     |
+| `link.removed`       | `state`      | A link was removed. `{ reason: "unlinked" }`.                                                                                                                                                                                                                                                                                                                         |
+| `link.state_changed` | `state`      | The linked PR opened, closed or merged. `{ from, to }`. A refresh of the head or base alone writes no event.                                                                                                                                                                                                                                                          |
+| `wait.registered`    | `state`      | A session started waiting for a PR. `{ waitSource: mcp\|rest\|trailer }`.                                                                                                                                                                                                                                                                                             |
+| `wait.removed`       | `state`      | A wait ended. `{ reason }`: `merged`, `closed`, `unreadable` (it **fired**), `stopped` (the caller removed it), `registration_failed` (stored, but its first check could not be requested) or `session_deleted` (its session was deleted, so nothing is left to wake).                                                                                                |
+| `prompt.failed`      | `annotation` | A queued prompt will not run (not a wake): its session was deleted or failed, or it could not be sent. `{ turnId, whenBusy: "queue", reason }`: `session_deleted`, `session_failed`, `not_sent`. `pr` is null; `source` is `rest` or `mcp` (a caller's delete or call) or `bridge`. See [the prompt queue](./mcp.md#the-prompt-queue-kiro_send_prompt-with-whenbusy). |
+| `wake.queued`        | `annotation` | A wake was written to the session's inbox, or folded into a pending one (`merged: true`). `{ itemId, kind, cause, merged }`.                                                                                                                                                                                                                                          |
+| `wake.delivered`     | `annotation` | The wake was sent to the session as a prompt turn. `{ itemId, kind, cause, turnId }`.                                                                                                                                                                                                                                                                                 |
+| `wake.released`      | `annotation` | The turn did not start, the wake is pending again. Same payload as delivered.                                                                                                                                                                                                                                                                                         |
+| `wake.dropped`       | `annotation` | The wake was not sent (session failed or deleted, auto-closed). `{ itemId, kind, cause, reason }`.                                                                                                                                                                                                                                                                    |
 
 `cause` is why the session was woken: `linked_pr_event` (its own PR merged, closed,
 was reviewed or commented on, or failed checks), `conflict` (its PR no longer merges
@@ -534,8 +549,9 @@ or is behind) or `wait` (a PR it waits for closed). `kind` is the wake's own nam
 (`pr_merged`, `pr_conflict`, `pr_wait_merged`, ...). A fired wait is two events in one
 commit, `wait.removed` and the `wake.queued` it caused.
 
-`source` is who caused the change: `mcp` or `rest` (a caller), `trailer` (a
-`Kiro-Remote-*` line in a PR body), `webhook` (a GitHub delivery and the delayed
+`source` is who caused the change: `mcp` or `rest` (a caller), `bridge` (kiro-remote
+itself, while it drives a session: a queued prompt that cannot run because its session
+failed), `trailer` (a `Kiro-Remote-*` line in a PR body), `webhook` (a GitHub delivery and the delayed
 re-checks it started), `harvest` (the PR URL the agent printed in a turn) or `sweep`
 (a read of GitHub kiro-remote made on its own initiative: the check made when a wait
 is registered, and the [scheduled sweep](#the-sweep)). The removal of a deleted

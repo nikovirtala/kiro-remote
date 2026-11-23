@@ -92,6 +92,25 @@ with no webhook, and the backfill of waits that predate the index:
 KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-github test sweep-emulator
 ```
 
+`packages/bridge/test/queue-emulator.test.ts` covers [the prompt
+queue](./mcp.md#the-prompt-queue-kiro_send_prompt-with-whenbusy) on a real DynamoDB
+and a real FIFO queue, with the fake ACP agent as the engine and the API's service
+calls (`launchSession`, `sendPrompt`, `deleteSession`) feeding the queue the consumer
+reads one message at a time: a prompt queued behind a turn that detached runs after
+it, two queued prompts and a steer behind a turn and then a merge wake (the steer fails
+in the call with `steer_unsupported`; a steer that raced is kept on the queue; queued
+prompts in order, once each, nothing failed, the close asked for once, after the queue), a delete that fails each queued prompt
+before the delete reaches the bridge (the feed has no gap in `seq`), five drains at
+once claiming one prompt once, and the order, TTL and single failure of the records
+(`QUEUE_EVIDENCE_FILE=<path>` writes what each saw):
+
+```bash
+KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-bridge test queue-emulator
+```
+
+`packages/bridge/test/queue-loss.test.ts` follows the two sessions of 23 November
+2026 on the in-memory stores (each failed on the commit that added it).
+
 The tests create and delete their own table and refuse to run unless
 `AWS_ENDPOINT_URL` is a loopback address, so they cannot reach real AWS.
 
@@ -365,7 +384,10 @@ them:
 - **set_config** (model, effort, mode): a logged no-op on cloud sessions;
 - **permissions** (list and answer): cloud turns never ask;
 - **adopt**: rejected by the bridge;
-- **steer, and `whenBusy: "queue"` during a turn**: rejected as unsupported.
+- **steer during a turn**: rejected as unsupported. (`whenBusy: "queue"` is
+  supported: the prompt runs after the turn, see [the prompt
+  queue](./mcp.md#the-prompt-queue-kiro_send_prompt-with-whenbusy). The harness does
+  not test it live.)
 
 The claude.ai connector and forced detach / catch-up stay manual checks (see
 the [live-test checklist](#live-test-checklist-lambda-direct-engine)).

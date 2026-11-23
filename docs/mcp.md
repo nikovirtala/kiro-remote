@@ -198,8 +198,8 @@ Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 | 3   | `kiro_launch_session`                | —           | Launch a session against one or more repos with an initial prompt.                                                                     |
 | 4   | `kiro_list_sessions`                 | RO          | List your sessions, newest first, with status filter + cursor.                                                                         |
 | 5   | `kiro_adopt_session`                 | —           | Adopt an existing Kiro cloud session.                                                                                                  |
-| 6   | `kiro_get_session`                   | RO          | Fetch one session you own, with its linked PRs (`links`) and the PRs it waits for (`waits`).                                           |
-| 7   | `kiro_send_prompt`                   | —           | Send a prompt; steer/queue/reject when busy.                                                                                           |
+| 6   | `kiro_get_session`                   | RO          | Fetch one session you own, with its linked PRs (`links`), the PRs it waits for (`waits`) and its prompt `queue`.                       |
+| 7   | `kiro_send_prompt`                   | —           | Send a prompt; steer/queue/reject when busy ([the queue](#the-prompt-queue-kiro_send_prompt-with-whenbusy)).                           |
 | 8   | `kiro_wait_for_events`               | RO          | Long-poll the event log (see limits below).                                                                                            |
 | 9   | `kiro_get_transcript`                | RO          | The assistant's final text per completed turn.                                                                                         |
 | 10  | `kiro_list_permissions`              | RO          | List permission requests (optionally by status).                                                                                       |
@@ -263,12 +263,77 @@ session, and some tools have no effect there:
   never ask for permission.
 - `kiro_cancel_turn` is rejected while a turn is running and is a no-op when
   the session is idle.
-- `kiro_send_prompt` with `whenBusy: "steer"` or `"queue"` is rejected while a
-  turn is running; use `"reject"` and send the prompt once the turn settles.
+- `kiro_send_prompt` with `whenBusy: "steer"` (the default) fails in the call
+  while a turn is running (`steer_unsupported`). Use `"queue"` to run the prompt
+  after the turn, or `"reject"` and send it once the turn settles.
 
-A rejection shows up in `kiro_wait_for_events` as a `turn.failed` event with
+A rejected cancel shows up in `kiro_wait_for_events` as a `turn.failed` event with
 `rawType: "operation_rejected"`. See
 [Operations cloud sessions do not support](./deploy.md#operations-cloud-sessions-do-not-support).
+
+### The prompt queue: `kiro_send_prompt` with `whenBusy`
+
+A cloud turn cannot be interleaved with, so a session is **busy** while a turn
+runs and while prompts are queued. `whenBusy` says what a busy session does with
+a new prompt (it defaults to `steer`):
+
+| `whenBusy` | Busy session                                                                                                                                                        | Idle session, nothing queued |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `queue`    | The prompt waits on the session's queue and runs as **its own turn**, after the turn in front of it. The answer is `{ turn: { id, status: "queued" } }`.            | Runs now as a turn.          |
+| `reject`   | Refused in the call: a tool error (REST: 409). Nothing is stored.                                                                                                   | Runs now as a turn.          |
+| `steer`    | Refused in the call, like `reject`: a tool error (REST: 409) with `reason: steer_unsupported` and a hint to use `queue`. Nothing is stored, the queue is untouched. | Runs now as a turn.          |
+
+`steer` is the default, so a call without `whenBusy` on a busy cloud session fails
+the same way. Send the prompt with `whenBusy: "queue"` to have it run after the turn.
+
+**What `queue` guarantees.** `turn.id` in the answer is the id the prompt runs
+under, and the prompt ends in one of two ways, never silently:
+
+- **It runs**, as a turn with that id, **once** and **in order**: prompts run
+  oldest first, one at a time, each after the turn in front of it has ended
+  (including a turn that ran longer than one Lambda invocation). A GitHub wake
+  waits for the queue: the wake runs after the last queued prompt.
+- **It fails**, with a reason, where you can see it:
+  - `kiro_wait_for_events` shows a `turn.failed` event with `turnId` set to the
+    prompt's id and `rawType: "queued_prompt_failed"`; its payload has
+    `reason` (and never the prompt's text);
+  - `kiro_get_session` lists the queue (below), the prompt with
+    `status: "failed"` and `reason`;
+  - the [change feed](./github.md#the-change-feed) has a `prompt.failed`
+    annotation `{ turnId, whenBusy, reason }`.
+
+| `reason`          | Why                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------- |
+| `session_deleted` | The session was deleted while the prompt waited (by you, or found deleted).                             |
+| `session_failed`  | The session never provisioned, so nothing can run.                                                      |
+| `not_sent`        | The prompt was stored but could not be sent to the bridge; the call returned an error. It will not run. |
+
+**`kiro_get_session` shows the queue.** `queue` lists, oldest first, every prompt
+still to run and the latest that started or failed, each as
+`{ turnId, status, queuedAt, reason }`. `status` is `queued` (waiting for the
+turn in front of it), `delivered` (handed to the bridge, its turn is about to
+start), `started` (its turn exists: follow `turnId` on the event log) or
+`failed` (`reason` says why). Records are kept for 7 days.
+
+**How `steer` and `queue` combine.** A steer is a prompt for the turn that is
+running, and a cloud turn takes none. A session is busy while a turn runs and
+while prompts are queued, and a steer for a busy session fails in the call
+(`steer_unsupported`, 409 over REST, a tool error over MCP): it is not stored, it
+does not start a turn ahead of the queue and it removes nothing from it, so every
+queued prompt still runs, in order. A steer to an idle session with nothing queued
+is an ordinary prompt. In the one case the call cannot see, a session that looked
+idle when you called and was busy when the bridge read the command (another prompt
+got in first), the bridge keeps the steer on the queue behind what is in front of
+it instead of rejecting it, so it runs after them and shows in `queue` as `queued`;
+the answer you got was `running` because the session was idle then. It never
+ends as a silent rejection.
+
+**Deleting and closing.** `kiro_delete_session` fails each queued prompt first
+(`session_deleted`, visible at once in `kiro_get_session`), then deletes. A
+session with queued prompts is never deleted or closed automatically: when
+`GITHUB_AUTO_CLOSE_ON_MERGE` is on and a post-merge turn finishes while prompts
+are queued, the close waits and is decided again after the last queued prompt
+has run (it is still skipped if a linked PR is open).
 
 ### `kiro_wait_for_events` limits
 
