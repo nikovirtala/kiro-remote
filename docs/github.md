@@ -6,7 +6,7 @@ was merged or closed, changes were requested, you commented, or checks failed.
 The agent then continues the work, or wraps up.
 
 The feature is **optional and off by default**. Without `GITHUB_APP_SECRET_ARN`
-nothing is deployed for it: no webhook route, queues, functions or schedule.
+nothing is deployed for it: no webhook route, queues, functions or schedules.
 
 kiro-remote never opens PRs itself. Kiro's agent does, through Kiro's own GitHub
 app. kiro-remote only does three things:
@@ -164,8 +164,8 @@ PR's **base branch**, so that is what the check watches.
    `pull_request.closed` with `merged` (the base is `pull_request.base.ref`, the
    new tip `merge_commit_sha`), whether or not the merged PR is linked, and
    `push` to a branch (the new tip is `after`; deleted branches and tags are
-   ignored). A later trigger, for example a scheduled sweep, builds the same
-   `BaseMove` and reuses the check.
+   ignored). The [scheduled sweep](#the-sweep) builds the same `BaseMove` for a
+   base that moved while no webhook said so, and reuses the check.
 2. **Candidates.** The consumer lists the **open** linked PRs of that repo with
    one GSI1 query (`GHREPO#<owner>/<repo>`, sort key `OPEN#<n>`). It skips the
    PR that was just merged and any PR whose stored `baseRef` is another branch,
@@ -269,7 +269,9 @@ with the source (`mcp`, `rest` or `trailer`) and the time, and
 `GSI1PK = GHWAIT#<owner>/<repo>#<n>`, `GSI1SK = <session id>`. The session's key
 answers "what does this session wait for", GSI1 answers "who waits for this PR",
 and each is one query. One item means one conditional write, with no second row
-to keep in step. The source is a field of the wait, not of a link, so a later
+to keep in step. The same item carries `GSI2PK = SWEEP#WAIT` and
+`GSI2SK = <owner>/<repo>#<n>|<session id>`, which put it in [the sweep's
+index](#how-the-sweep-finds-what-is-open). The source is a field of the wait, not of a link, so a later
 producer (an ark issue's depends-on link, a map in draft) adds a value to
 `source` and uses the same two queries.
 
@@ -295,9 +297,9 @@ PR waiting for itself and anything past 20 lines are ignored; refusals are logge
 
 **The wake.** `route()` turns `pull_request.closed` into one wake per waiting
 session, whether or not the PR is linked to anyone, using the pure
-`decideWait()` (`packages/github/src/waits.ts`). The webhook and the check above
-both call it, and so can a later scheduled sweep for waits whose PR merged while
-webhooks were down. Only structured facts are forwarded, never the PR's text.
+`decideWait()` (`packages/github/src/waits.ts`). The webhook, the check above and
+the [scheduled sweep](#the-sweep) (for waits whose PR closed while webhooks were
+failing) all call it. Only structured facts are forwarded, never the PR's text.
 
 ```text
 [GitHub webhook] This turn was started by GitHub, not by the user: pull_request.closed (merged), awaited by this session on octo/repo#7 (delivery <id>).
@@ -311,6 +313,21 @@ PR #7, which this session waits for, was closed without merging. Say whether you
 
 When the check made at registration finds the PR already closed, the header has
 no delivery (`... was already merged when the wait was checked on octo/repo#7.`).
+
+**A wait ends in one of five ways**, each with its `wait.removed` reason on the
+[change feed](#the-change-feed): the PR merged, closed or could not be read (it
+**fired**: `merged`, `closed`, `unreadable`), the caller stopped it (`stopped`), its
+first check could not be requested (`registration_failed`), or **its session was
+deleted** (`session_deleted`). Deleting a session removes its waits, each in its own
+transaction with its event (`Repository.deleteSessionWaits`, called where the bridge
+marks the session deleted, so a delete from REST, MCP or `GITHUB_AUTO_CLOSE_ON_MERGE`
+all end up there). A wait is never left to outlive its session: if that removal
+fails, the deletion still goes through and the next [sweep](#the-sweep) removes the
+wait. The session's **links stay**, as history: a link says which session opened a
+PR and `already_linked` keeps another session from claiming it; removing it would
+rewrite that record, need a second `link.removed` reason, and gain nothing, since
+the sweep's base-move pass leaves the links of a deleted session alone and a wake
+for a deleted session is dropped anyway.
 
 **A fired wait is removed**, and the removal is the claim: of a webhook and a check
 that fire it at the same moment, only the transaction that deletes it commits, and it writes the
@@ -332,6 +349,134 @@ already delivered, and the read is `GET /pulls/{n}`. They cost one GSI1 query pe
 `pull_request.closed` delivery (and one `queryLinks` per waiter of a merged PR),
 and one read per registered wait. The API function gains
 `GITHUB_QUEUE_URL` and permission to send to the GitHub queue.
+
+## The sweep
+
+A webhook says when a PR closed or a base branch moved, and GitHub does not retry a
+delivery that failed. [Redelivery](#missed-deliveries) asks GitHub for the failed
+deliveries it can still list; the sweep covers what no delivery will ever say. Once
+every 15 minutes one function, `GithubSweepFn`, reads GitHub for what a webhook
+should have said and writes **the same decisions through the same paths**, with
+`source: "sweep"` on the [change feed](#the-change-feed). A wait whose PR closed
+while deliveries were failing still fires. A base branch that moved while they were
+failing still gets its conflict check. No wait outlives its session.
+
+The sweep is **one Lambda, one schedule and a list of passes** (`PASSES` in
+`packages/github/src/sweep/index.ts`). Each pass is a reader (DynamoDB and GitHub)
+and a pure decide function (`packages/github/src/sweep/plan.ts`, on top of `decideWait` in
+`waits.ts` and `decideConflict` in `conflicts.ts`). A later pass, such as links whose PR state drifted, is one more
+entry in the list. A pass that fails does not stop the others; the run then fails, so
+Lambda's `Errors` shows it, and the next run tries again (the schedule does not retry).
+
+| Pass         | Reads                                                                                              | Decides                                                                                                                                                                 | Writes                                                             |
+| ------------ | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `waits`      | every open wait, then **each distinct awaited PR once**, however many sessions wait for it         | `decideSweptWait`: a deleted session's wait is removed; otherwise `decideWait`, the webhook's decision (open keeps it, merged or closed fires, unreadable fires `gone`) | `fireWait` (wait removed and wake queued in one transaction)       |
+| `base_moves` | every open linked PR, grouped by repo and base branch; per group, the latest merge into the branch | `decideBaseMove`: the latest merge against the tip the last check recorded                                                                                              | the same `checkBase` the webhook runs, then the tip (`GHBASE#...`) |
+
+**Waits work whatever created them** (`mcp`, `rest`, `trailer`, or a source added
+later, such as an ark issue's depends-on link): the pass reads the index, not a
+creator. A wait whose session is deleted or gone is removed without reading GitHub
+(`wait.removed`, `session_deleted`). A merge it fires is **held** the way a
+webhook's is (`holdMsFor`), so it folds with the waiter's own conflict wake into one
+turn.
+
+**Base moves.** Reading a branch's tip needs the **Contents** permission, which the App
+is not required to have (only the optional `push` subscription needs it), so the sweep does not. It lists the closed PRs on the base
+([list pull requests](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests),
+the Pull requests permission the App has) and takes the **latest merge**
+(`merged_at`) among the 30 most recently updated: one read per branch. That is the
+move the webhook path checks by default (a PR merged into the base). A direct push
+moves a base without a merge: the sweep does not see it, and the `push` subscription
+still does. A merge that differs from the recorded tip is a move. With no tip
+recorded, the branch is checked only when the merge came after the oldest open link
+on it was made; an older one is just recorded (a **baseline**), so the first run
+does not read every open PR for nothing. The webhook path records the tip too after
+a merge it checked, so the sweep does not check a move twice. A link with no stored
+`baseRef` is left out (the webhook path reads such a link; the next `pull_request`
+delivery for it stores one). A moved base reads each open PR of the repo on it
+through `checkBase`, with the mergeability re-checks of
+[Conflicting PRs](#conflicting-prs) as `conflict_check` messages marked `sweep`.
+
+### How the sweep finds what is open
+
+The sweep needs every open wait and every open linked PR, across accounts, without
+scanning the table. The access patterns in `repository.ts` rule out the other
+options:
+
+- **GSI1** is partitioned by what the existing queries ask (`USER#<sub>`,
+  `GHREPO#<repo>`, `GHWAIT#<pr>`): to list "everything open" the sweep would have to
+  scan it. A scan of GSI1 reads every session ever created and every link ever made,
+  open or not, so it grows with history, not with what is open. Today the index
+  holds 251 items (a read-only `describe-table` of the live table: 75,394 items and
+  about 287 MB in all), so a scan would be cheap now and cost more every month.
+- **A key on the base table** would need a second row per wait (and per link) to
+  keep in step with the first, which the one-item design of waits avoids.
+- **A sparse index, GSI2** (`GSI2PK`, `GSI2SK`, projection all): only an open wait
+  (`SWEEP#WAIT`, sorted by PR then session) and a link whose PR is open or not
+  known yet (`SWEEP#LINK`, sorted by PR) carry its keys, and they leave it by
+  themselves: a wait that fires or is removed is deleted with its keys, and a link that
+  closes has the keys removed in the same update that records the state. The index
+  holds what the sweep reads and nothing else, one query per kind per run. All items
+  of a kind share one partition, far below what DynamoDB serves from one (1,000 WCU,
+  3,000 RCU) for one read per run and the writes that follow a wait or a link; shard it
+  by hash when that stops being true. A global index is eventually consistent, so
+  an item written a moment ago may wait for the next run.
+
+**Items that predate the index** are put in it once, by the deployment task
+`tasks/1-index-open-waits-and-links.ts`. It scans GSI1 for keys only (it reads no
+item), adds the two attributes with a conditional update, and can be run twice. Until
+it has run after the deploy, such a wait is found by its webhook, as before.
+
+### Reads, the cap and the rate limit
+
+A run reads at most **`SWEEP_MAX_PR_READS` = 100** PRs and base branches
+(`packages/core/src/config.ts`), shared by the passes: the waits pass may use half,
+so the base-move pass always has the rest. Once the cap is reached, or GitHub's
+`x-ratelimit-remaining` header says fewer than **500** requests are left in the
+window ([rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)),
+or GitHub answers 429 (or 403 with none left), the run stops reading, and **what is
+left waits for the next run**. When more PRs are open than a run may read, the window
+moves by the number read each run, so every one is read within `ceil(n / reads)` runs
+and none is starved by those in front of it. A moved base is never started if its
+open PRs do not fit what is left, except the first the pass checks (it always runs, even
+above the cap, so a large base still gets checked). At 100 reads every 15 minutes the sweep
+uses at most 400 of the installation's 5,000 requests an hour.
+
+### The interval
+
+**15 minutes** (`SWEEP_INTERVAL_MINUTES`, one constant: the schedule, the run
+number and the tests read it; the smoke check reads the deployed schedule's own
+rate). It is the rhythm of the redelivery job, so a lost wake is late by about one
+interval at most after a redelivery would have been due. A run with nothing open
+costs two index queries. A shorter interval buys little (a wake that waited minutes
+already waited for a person) and spends rate limit.
+
+### The sweep and the webhook race
+
+Both fire a wait through `fireWait`: **the delete is the claim**. Of a webhook and a
+sweep that fire the same wait at once, only the transaction that deletes it commits,
+and it writes the wake and both events in the same transaction; the other finds the
+wait gone, writes nothing and counts nothing, so the session is woken once. If the
+wake cannot be written, the wait stays for the next try. The same holds for the
+deleted-session removal. Tests: `sweep.test.ts` (a webhook landing while the sweep
+reads, the sweep first, both at once) and `sweep-emulator.test.ts` (five waits, one
+sweep and five webhooks at once, on real conditional writes).
+
+### Metrics and the smoke check
+
+Namespace `KiroRemote/GitHub`: `SweepPrsRead` (every run, 0 when idle),
+`SweepWaitsFired` (by `outcome`), `SweepWaitsRemoved` (by `reason`),
+`SweepBaseMovesFound`, `SweepSkippedForCap` (by `pass`), `SweepReadsFailed` (by
+`pass`) and `SweepPassFailed` (by `pass`). A run logs `sweep_run` with the counts;
+`sweep_wait_removed`, `sweep_base_moved` and `sweep_*_skipped_for_cap` name the PR
+and session, never a title or a body. The conflict wakes and the wait wakes the sweep
+writes count in `ConflictWakes` and `WaitsFired` as for a webhook.
+
+The pipeline's smoke checks ([docs/pipeline.md](./pipeline.md#smoke-checks)) assert
+that the schedule exists, is enabled and runs at a fixed rate, that it targets the
+function, and that the function **ran within two intervals** (an invocation count; no
+log line is read). On the first deploy, before the schedule has fired, that is `INFO`
+(the function changed within two intervals), never `FAIL`.
 
 ## The change feed
 
@@ -371,17 +516,17 @@ and ordered. Read it with a cursor:
 }
 ```
 
-| Type                 | Effect       | When, and the payload                                                                                                                                                                         |
-| -------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `link.added`         | `state`      | A PR was linked. `{ method: harvest\|trailer\|manual, prState }`.                                                                                                                             |
-| `link.removed`       | `state`      | A link was removed. `{ reason: "unlinked" }`.                                                                                                                                                 |
-| `link.state_changed` | `state`      | The linked PR opened, closed or merged. `{ from, to }`. A refresh of the head or base alone writes no event.                                                                                  |
-| `wait.registered`    | `state`      | A session started waiting for a PR. `{ waitSource: mcp\|rest\|trailer }`.                                                                                                                     |
-| `wait.removed`       | `state`      | A wait ended. `{ reason }`: `merged`, `closed`, `unreadable` (it **fired**), `stopped` (the caller removed it) or `registration_failed` (stored, but its first check could not be requested). |
-| `wake.queued`        | `annotation` | A wake was written to the session's inbox, or folded into a pending one (`merged: true`). `{ itemId, kind, cause, merged }`.                                                                  |
-| `wake.delivered`     | `annotation` | The wake was sent to the session as a prompt turn. `{ itemId, kind, cause, turnId }`.                                                                                                         |
-| `wake.released`      | `annotation` | The turn did not start, the wake is pending again. Same payload as delivered.                                                                                                                 |
-| `wake.dropped`       | `annotation` | The wake was not sent (session failed or deleted, auto-closed). `{ itemId, kind, cause, reason }`.                                                                                            |
+| Type                 | Effect       | When, and the payload                                                                                                                                                                                                                                                  |
+| -------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `link.added`         | `state`      | A PR was linked. `{ method: harvest\|trailer\|manual, prState }`.                                                                                                                                                                                                      |
+| `link.removed`       | `state`      | A link was removed. `{ reason: "unlinked" }`.                                                                                                                                                                                                                          |
+| `link.state_changed` | `state`      | The linked PR opened, closed or merged. `{ from, to }`. A refresh of the head or base alone writes no event.                                                                                                                                                           |
+| `wait.registered`    | `state`      | A session started waiting for a PR. `{ waitSource: mcp\|rest\|trailer }`.                                                                                                                                                                                              |
+| `wait.removed`       | `state`      | A wait ended. `{ reason }`: `merged`, `closed`, `unreadable` (it **fired**), `stopped` (the caller removed it), `registration_failed` (stored, but its first check could not be requested) or `session_deleted` (its session was deleted, so nothing is left to wake). |
+| `wake.queued`        | `annotation` | A wake was written to the session's inbox, or folded into a pending one (`merged: true`). `{ itemId, kind, cause, merged }`.                                                                                                                                           |
+| `wake.delivered`     | `annotation` | The wake was sent to the session as a prompt turn. `{ itemId, kind, cause, turnId }`.                                                                                                                                                                                  |
+| `wake.released`      | `annotation` | The turn did not start, the wake is pending again. Same payload as delivered.                                                                                                                                                                                          |
+| `wake.dropped`       | `annotation` | The wake was not sent (session failed or deleted, auto-closed). `{ itemId, kind, cause, reason }`.                                                                                                                                                                     |
 
 `cause` is why the session was woken: `linked_pr_event` (its own PR merged, closed,
 was reviewed or commented on, or failed checks), `conflict` (its PR no longer merges
@@ -393,8 +538,10 @@ commit, `wait.removed` and the `wake.queued` it caused.
 `Kiro-Remote-*` line in a PR body), `webhook` (a GitHub delivery and the delayed
 re-checks it started), `harvest` (the PR URL the agent printed in a turn) or `sweep`
 (a read of GitHub kiro-remote made on its own initiative: the check made when a wait
-is registered, and any later scheduled sweep). A reader treats an unknown `source` as
-opaque.
+is registered, and the [scheduled sweep](#the-sweep)). The removal of a deleted
+session's waits has the source of what asked for the deletion: `rest`, `mcp`, or
+`webhook` (`GITHUB_AUTO_CLOSE_ON_MERGE`); the sweep's own removal of a deleted
+session's wait is `sweep`. A reader treats an unknown `source` as opaque.
 
 **Never in an event:** prompt text, transcript content, PR titles or bodies, tokens.
 Only ids, PR references, enums and counts.
@@ -418,7 +565,19 @@ the source of truth. The JSON Schemas generated from them are checked in under
 `page.json` and one file per type (`pnpm --filter @nikovirtala/kiro-remote-core
 gen:feed-schemas`, then `pnpm lint:fix`). A test fails when they drift from the code
 and when an emitted event does not validate against them. A change that only adds an
-optional payload field or a type stays in `v: 1`; anything else is `v: 2`.
+optional payload field, a type **or an enum value** stays in `v: 1`; anything else is
+`v: 2`.
+
+**The rule for enum values.** A payload's enum (such as the `reason` of `wait.removed`)
+is closed in the schema, as `source` is, and may gain values within `v: 1`: **a reader
+treats a value it does not know as opaque**. It shows it, groups by it, and never
+fails or stops because of it. That is what `source` already promised, and what
+`session_deleted` (added to `wait.removed`'s `reason`) relies on. A reader that
+validates events against its own copy of the JSON Schemas must therefore not reject
+an event for an enum value its copy lacks (the checked-in schemas list the values
+known at the commit they were generated from). Removing or renaming a value, changing
+what one means, or adding a required field is `v: 2`. A `state` event type a reader
+does not know still stops it (see below); an enum value does not.
 
 **Skipping what you do not know.** `effect` says whether an event moves state a reader
 follows (`state`: a link or a wait) or only records a decision (`annotation`: a wake).
@@ -550,11 +709,12 @@ succeeded, and asks GitHub to redeliver up to 50
 A redelivery keeps its `X-GitHub-Delivery` id, so dedupe still applies when it
 arrives. A delivery the ingress stored but the consumer could not process goes to
 the DLQ after 5 attempts and is not redelivered (its id is already claimed):
-investigate the DLQ.
+investigate the DLQ. For a PR that closed or a base that moved while deliveries failed,
+and for deliveries GitHub no longer lists, see [the sweep](#the-sweep).
 
 ## Metrics
 
-The GitHub Lambdas use the same Powertools Logger, Metrics and Tracer as the rest of the stack (see [observability](./deploy.md#observability)). Namespace `KiroRemote/GitHub` (webhook, consumer): `WebhooksReceived`,
+The GitHub Lambdas use the same Powertools Logger, Metrics and Tracer as the rest of the stack (see [observability](./deploy.md#observability)). Namespace `KiroRemote/GitHub` (webhook, consumer, sweep): `WebhooksReceived`,
 `WebhooksRejectedSignature`, `WebhooksDuplicate`, `WebhooksDropped`
 (`reason=repo_not_allowed`), `WebhooksUnmatched`, `LinksCreated` (by `method`),
 `LinksRejected` (by `reason`), `WakesDelivered`, `WakesDropped` (by `reason`),
@@ -569,7 +729,9 @@ PR read), `ConflictRechecks` (later tries), `ConflictsFound`, `BehindFound`
 `read_failed`) and `ConflictWakes` (by `state`: `conflicting` or `behind`; new
 inbox items only, a wake folded into a pending one is not counted). Each check logs `conflict_check_done`,
 `conflict_check_skipped`, `conflict_recheck_scheduled`, `conflict_check_gave_up`
-or `conflict_wake` with the PR, base and attempt. The bridge also emits `WakesDelivered` and `WakesDropped` as it
+or `conflict_wake` with the PR, base and attempt. For [the sweep](#metrics-and-the-smoke-check): `SweepPrsRead`,
+`SweepWaitsFired`, `SweepWaitsRemoved`, `SweepBaseMovesFound`, `SweepSkippedForCap`, `SweepReadsFailed` and
+`SweepPassFailed`. The bridge also emits `WakesDelivered` and `WakesDropped` as it
 settles turns.
 
 ## Where it shows up

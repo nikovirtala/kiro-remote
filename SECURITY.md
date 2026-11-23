@@ -53,7 +53,8 @@ When the optional GitHub wake feature is deployed (`GITHUB_APP_SECRET_ARN`, see
   Checks and Actions, all read-only, and it can be installed only on your account
   and only on the allow-listed repos. It cannot push, comment or merge.
 - **Secrets.** The App secret (app id, private key, webhook secret) is read by
-  exactly two functions: the webhook ingress and the GitHub consumer. Installation
+  exactly three functions: the webhook ingress, the GitHub consumer and the scheduled
+  sweep (which reads pull requests the way the consumer does). Installation
   tokens are minted on demand, cached in memory until 5 minutes before expiry, and
   never logged; the logger redacts `ghs_`/`ghp_`/`github_pat_` tokens, PEM private
   keys and webhook signatures anywhere they appear.
