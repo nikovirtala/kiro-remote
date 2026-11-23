@@ -230,7 +230,13 @@ export function errorToProblem(err: unknown): HttpResponse {
   }
 
   if (err instanceof InvalidStateError) {
-    return problem(409, "invalid-state", "Conflict", err.message);
+    return problem(
+      409,
+      "invalid-state",
+      "Conflict",
+      err.message,
+      err.reason ? { reason: err.reason } : {},
+    );
   }
 
   if (isZodError(err)) {

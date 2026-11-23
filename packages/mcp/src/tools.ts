@@ -227,7 +227,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   {
     name: "kiro_get_session",
     description:
-      "Fetch a single session the caller owns, with its linked pull requests (links) and the pull requests it waits for (waits).",
+      "Fetch a single session the caller owns, with its linked pull requests (links), the pull requests it waits for (waits) and its prompt queue (queue: each prompt sent with whenBusy queue, with its turn id and status queued, delivered, started or failed, and the reason it failed).",
     action: "read",
     inputZod: SessionIdSchema,
     annotations: { title: "Get Session", readOnlyHint: true, openWorldHint: false },
@@ -238,7 +238,7 @@ export const TOOL_DEFS: readonly ToolDef[] = [
   },
   {
     name: "kiro_send_prompt",
-    description: `Send a prompt to a session, steering, queueing, or rejecting it when the session is busy.${IDEMPOTENCY_SENTENCE}`,
+    description: `Send a prompt to a session. A session is busy while a turn runs and while prompts are queued. whenBusy "queue" keeps the prompt on the session's queue and runs it as its own turn, in order, after the turn in front of it; it ends as a turn or as a visible failure (turn.failed on the event log, shown in kiro_get_session's queue), never silently. "reject" refuses a busy session in the call. "steer" (the default) cannot be applied to a running cloud turn: for a busy session it fails in the call (steer_unsupported, use "queue" instead), stores nothing and leaves the queue as it is. The result's turn id is the id the turn runs under.${IDEMPOTENCY_SENTENCE}`,
     action: "prompt",
     inputZod: SendPromptSchema,
     annotations: { title: "Send Prompt", readOnlyHint: false, openWorldHint: true },

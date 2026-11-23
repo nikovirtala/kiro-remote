@@ -34,8 +34,25 @@
  * yet ({@link planCatchUp}), and either settles the turn (the replay reached
  * `turn_end`) or reports it pending. A turn still unfinished
  * {@link CATCH_UP_MAX_AGE_MS} after detaching is failed.
- * While META stays `running`, a mid-turn steer, cancel or `whenBusy=queue` is
- * rejected exactly as before.
+ * While META stays `running`, a mid-turn steer command or cancel is rejected exactly as
+ * before (the API no longer sends one for a prompt: it refuses a steer for a busy session
+ * itself, and a prompt steer that finds the session busy only because it raced is queued).
+ * A `whenBusy=queue` prompt is not rejected either: it is kept on the session's queue
+ * (see QUEUED PROMPTS) and the settle of the turn starts it.
+ *
+ * QUEUED PROMPTS (service/queue.ts in core)
+ * The API stores a `whenBusy=queue` prompt as a `QPROMPT#<turn id>` item and
+ * sends a prompt command. Because a turn runs inside the invocation that
+ * started it, that command is delivered only after the turn ended or detached,
+ * so it usually finds the session `running`. The consumer makes sure the item
+ * exists and asks the settler to drain: the oldest queued prompt is claimed and
+ * sent back as a prompt command with `queued: true` (whenBusy=reject), which
+ * starts it only from the claimed state, and gives it back when the session is
+ * not idle. Every settle drains again, so prompts run one at a time, in order,
+ * once. A prompt that cannot run fails visibly (turn.failed on the event log,
+ * prompt.failed on the change feed). An automatic close (a `delete` command
+ * from the webhook) is refused while prompts are queued and owed (META
+ * `closeAfterQueue`); a delete from the caller first fails each of them.
  *
  * WAKE TURNS (GitHub, and any later producer)
  * A prompt command may carry a `trigger` (see TurnTrigger): a wake turn that
@@ -66,9 +83,12 @@ import {
   type CommandQueue,
   type EventItem,
   type FeedSource,
+  failOpenQueuedPrompts,
+  failQueuedPrompt,
   type GithubQueue,
   type NormalizedEvent,
   normalizeUpdate,
+  openQueuedPrompts,
   Repository,
   type SessionInputs,
   type SessionMetaItem,
@@ -344,7 +364,7 @@ export class LambdaConsumer {
           })
         : undefined);
 
-    // The GitHub feature is on only when BOTH queues are known.
+    // Wakes and harvests need BOTH queues; queued prompts need the command queue.
     const githubQueue =
       deps.githubQueue ??
       (deps.config.githubQueueUrl
@@ -355,7 +375,6 @@ export class LambdaConsumer {
       (deps.config.commandQueueUrl
         ? new SqsCommandQueue({ sqs, queueUrl: deps.config.commandQueueUrl })
         : undefined);
-    const wakeEnabled = githubQueue !== undefined && commandQueue !== undefined;
 
     // The engine's session cwd; Lambda only allows writes under /tmp.
     try {
@@ -374,7 +393,10 @@ export class LambdaConsumer {
       logger,
       metrics,
       now,
-      ...(wakeEnabled ? { queue: commandQueue, githubQueue } : {}),
+      // The command queue alone is enough to run queued prompts; wakes and harvests also need the
+      // GitHub queue (the GitHub feature).
+      ...(commandQueue ? { queue: commandQueue } : {}),
+      ...(commandQueue && githubQueue ? { githubQueue } : {}),
     });
 
     return new LambdaConsumer({
@@ -484,8 +506,7 @@ export class LambdaConsumer {
       return false;
     } catch (err) {
       if (err instanceof UnsupportedCloudOperationError) {
-        // PERMANENT rejection (mid-turn steer/cancel, a queued follow-up with no
-        // drain, or `adopt`). Keep it LOUD -- a warn log AND a client-visible
+        // PERMANENT rejection (mid-turn steer/cancel, or `adopt`). Keep it LOUD -- a warn log AND a client-visible
         // rejection event -- but ack the record so SQS deletes it and the FIFO
         // group keeps moving.
         this.logger.warn("command_unsupported_cloud", {
@@ -495,7 +516,7 @@ export class LambdaConsumer {
           error: err.message,
         });
         try {
-          await this.recordUnsupportedRejection(command.sessionId, err.operation, err.message);
+          await this.recordUnsupportedRejection(command, err.operation, err.message);
         } catch (persistErr) {
           this.logger.warn("command_rejection_persist_error", {
             sessionId: command.sessionId,
@@ -544,6 +565,7 @@ export class LambdaConsumer {
           command.turnId,
           opts,
           command.trigger,
+          command.queued === true,
         );
         return;
       case "steer":
@@ -563,7 +585,9 @@ export class LambdaConsumer {
         log.info("set_config_noop_cloud");
         return;
       case "delete":
-        await this.markDeleted(command.sessionId, command.source ?? "rest");
+        if (await this.queueAllowsDelete(command.sessionId, command.source)) {
+          await this.markDeleted(command.sessionId, command.source ?? "rest");
+        }
         return;
       case "adopt":
         // adopt is not supported; reject it LOUDLY so it is logged + persisted
@@ -665,8 +689,10 @@ export class LambdaConsumer {
    * Resolve a follow-up `prompt`/`steer`. A redelivery of the turn that META
    * says is active is a no-op (plus a catch-up, in case it was left behind);
    * otherwise the shared rules apply: an idle session takes a fresh prompt, a
-   * `whenBusy=reject` is a quiet skip, and a mid-turn steer / `whenBusy=queue`
-   * throws {@link UnsupportedCloudOperationError}.
+   * `whenBusy=reject` is a quiet skip, and a mid-turn steer throws
+   * {@link UnsupportedCloudOperationError}. A `whenBusy=queue` prompt goes on
+   * the session's queue instead, and a `queued` command (a drain's) starts the
+   * prompt it claimed.
    */
   private async steer(
     id: string,
@@ -675,11 +701,20 @@ export class LambdaConsumer {
     turnId: string | undefined,
     opts: HandleOptions,
     trigger?: TurnTrigger,
+    queued = false,
   ): Promise<void> {
     const { rt, item } = await this.refresh(id);
     if (turnId !== undefined && item?.activeTurnId === turnId) {
       this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
       await this.catchUpLeftover(item);
+      return;
+    }
+    if (turnId !== undefined && queued) {
+      await this.startQueuedPrompt(rt, item, content, turnId, opts);
+      return;
+    }
+    if (turnId !== undefined && whenBusy === "queue") {
+      await this.queuePrompt(id, content, turnId);
       return;
     }
     // A wake turn only ever starts an idle session. If a manual prompt (or
@@ -690,13 +725,95 @@ export class LambdaConsumer {
       await this.releaseWake(id, turnId, trigger);
       return;
     }
-    const decision = this.cloud.classifySteer(rt, id, whenBusy, turnId);
+    if (whenBusy === "queue") {
+      // A queue command without a turn id predates the queue: nothing to keep it under.
+      throw new UnsupportedCloudOperationError(
+        "queue",
+        "a queued prompt needs a turn id; send the prompt again",
+      );
+    }
+    // Prompts waiting in the queue make the session busy: they run first, so a person's
+    // steer or reject must not start a turn ahead of them. (A wake is held back by the drain.)
+    const queueOpen = trigger
+      ? false
+      : (await openQueuedPrompts({ repo: this.repo }, id)).length > 0;
+    if (
+      whenBusy === "steer" &&
+      turnId !== undefined &&
+      !trigger &&
+      (rt.machine.turn === "running" || queueOpen)
+    ) {
+      // The API refuses a steer for a busy session, so this one looked idle there and is busy now
+      // (a turn or a queued prompt got in first). Rejecting would lose a prompt its caller was told
+      // was accepted: keep it on the queue, behind what is in front of it.
+      if (rt.issuedTurns.has(turnId) || (await this.repo.getTurn(id, turnId)) !== null) {
+        // A redelivery of a steer that already ran as a turn.
+        this.logger.info("prompt_idempotent_skip", { sessionId: id, turnId });
+        return;
+      }
+      this.logger.info("steer_queued_race", { sessionId: id, turnId });
+      await this.queuePrompt(id, content, turnId);
+      return;
+    }
+    const decision = this.cloud.classifySteer(rt, id, whenBusy, turnId, queueOpen);
     if (decision === "prompt") {
       await this.prompt(rt, id, content, turnId, item?.eventSeq ?? 0, opts, trigger);
     } else if (decision === "reject" && trigger && turnId !== undefined) {
       await this.releaseWake(id, turnId, trigger);
     }
     // "idempotent" and "reject" are logged no-ops inside classifySteer.
+  }
+
+  /**
+   * Keep a `whenBusy=queue` prompt on the session's queue and start whatever is due. The API
+   * stored the prompt already; a command from before the queue existed stores it here. A session
+   * that is gone fails it (the drain says why). Throws when the next prompt cannot be sent, so
+   * the command is retried (storing the prompt again is a no-op).
+   */
+  private async queuePrompt(id: string, prompt: string, turnId: string): Promise<void> {
+    await this.repo.putQueuedPrompt({ sessionId: id, id: turnId, prompt });
+    this.logger.info("queued_prompt_received", { sessionId: id, turnId });
+    if (!this.settler.canDrainQueue) {
+      // Nothing here can start it later, so say so now instead of leaving it queued for ever.
+      this.logger.error("queue_unavailable", { sessionId: id, turnId });
+      await failQueuedPrompt(this.queueDeps, id, turnId, { reason: "not_sent", source: "bridge" });
+      return;
+    }
+    await this.settler.drainQueueOrThrow(id);
+  }
+
+  /**
+   * A drain claimed a queued prompt and sent it as a command. Start it when it is still
+   * `delivered` (a redelivery finds it started, or failed) and the session is idle; give it back
+   * to the queue when the session is busy (the settle of the running turn drains again); fail it
+   * when the session is gone.
+   */
+  private async startQueuedPrompt(
+    rt: SessionRuntime,
+    item: SessionMetaItem | null,
+    content: string,
+    turnId: string,
+    opts: HandleOptions,
+  ): Promise<void> {
+    const id = rt.id;
+    const queued = await this.repo.getQueuedPrompt(id, turnId);
+    if (queued?.status !== "delivered") {
+      this.logger.info("queued_prompt_skip", { sessionId: id, turnId, status: queued?.status });
+      return;
+    }
+    if (!item || item.status === "deleted" || item.status === "failed") {
+      await failQueuedPrompt(this.queueDeps, id, turnId, {
+        reason: item?.status === "failed" ? "session_failed" : "session_deleted",
+        source: "bridge",
+      });
+      return;
+    }
+    if (item.status !== "idle") {
+      this.logger.info("queued_prompt_not_started", { sessionId: id, turnId, status: item.status });
+      await this.repo.releaseQueuedPrompt(id, turnId);
+      return;
+    }
+    await this.prompt(rt, id, content, turnId, item.eventSeq, opts, undefined, true);
   }
 
   /** Return a wake turn's inbox items to pending, or drop them when the session can no longer run. */
@@ -718,6 +835,7 @@ export class LambdaConsumer {
     afterSeq: number,
     opts: HandleOptions,
     trigger?: TurnTrigger,
+    queuedPrompt = false,
   ): Promise<void> {
     const tid = turnId ?? ulid();
     const begun = await this.cloud.beginResume(rt, id, turnId, tid);
@@ -725,6 +843,9 @@ export class LambdaConsumer {
       return;
     }
     await this.cloud.recordTurnStart(rt, tid, prompt, trigger ?? USER_TRIGGER);
+    if (queuedPrompt) {
+      await this.repo.startQueuedPrompt(id, tid);
+    }
     const cloudId = rt.kiroSessionId;
     if (!cloudId) {
       await this.failTurn(rt, new Error("no cloud session id to resume"), "turn_failed", afterSeq);
@@ -1112,22 +1233,54 @@ export class LambdaConsumer {
     }
   }
 
+  /**
+   * Whether a delete may go ahead while prompts are queued. A delete from the caller goes ahead
+   * after it has failed each queued prompt (visibly, reason `session_deleted`). An automatic close
+   * (source `webhook`) never goes ahead: the session stays, the close is owed until the queue is
+   * empty (META `closeAfterQueue`), and the queue is drained.
+   */
+  private async queueAllowsDelete(id: string, source: FeedSource | undefined): Promise<boolean> {
+    const open = await openQueuedPrompts({ repo: this.repo }, id);
+    if (open.length === 0) {
+      return true;
+    }
+    if (source === "webhook") {
+      await this.repo.patchSession(id, { closeAfterQueue: true });
+      this.logger.info("auto_close_deferred_queue", { sessionId: id, queued: open.length });
+      await this.settler.drainQueue(id);
+      return false;
+    }
+    const failed = await failOpenQueuedPrompts(this.queueDeps, id, {
+      reason: "session_deleted",
+      source: source ?? "rest",
+    });
+    this.logger.info("queued_prompts_failed_on_delete", { sessionId: id, failed });
+    this.metrics.count("QueuedPromptsFailed", failed, { reason: "session_deleted" });
+    return true;
+  }
+
   /* ------------------------- unsupported rejection ------------------------- */
 
   /**
-   * Persist a client-visible rejection for an unsupported operation. A no-op
-   * when the runtime is gone.
+   * Persist a client-visible rejection for an unsupported operation (a mid-turn steer or cancel,
+   * or adopt), under the turn it was about. A no-op when the runtime is gone.
    */
   private async recordUnsupportedRejection(
-    id: string,
+    command: Command,
     operation: string,
     reason: string,
   ): Promise<void> {
-    const rt = this.runtimes.get(id);
+    const rt = this.runtimes.get(command.sessionId);
     if (!rt) {
       return;
     }
-    await this.cloud.recordUnsupportedRejection(rt, operation, reason);
+    const turnId = command.kind === "prompt" ? command.turnId : rt.activeTurnId;
+    await this.cloud.recordUnsupportedRejection(rt, operation, reason, turnId);
+  }
+
+  /** What the queue functions of core need. */
+  private get queueDeps() {
+    return { repo: this.repo, now: this.now };
   }
 
   /** Test seam: the per-session runtime, if any. */

@@ -29,8 +29,9 @@ import {
   OAUTH_CODE_TTL_MS,
   OAUTH_TX_TTL_MS,
   PERMISSION_TIMEOUT_MS,
+  QUEUED_PROMPT_TTL_MS,
 } from "../config.ts";
-import type { FeedPage, FeedSource, WakeCause } from "../schemas/feed.ts";
+import type { FeedPage, FeedSource, PromptFailReason, WakeCause } from "../schemas/feed.ts";
 import { FeedConflictError, type FeedDraft, FeedWriter, type TransactOp } from "./feed.ts";
 import {
   CAPS_SK,
@@ -56,6 +57,8 @@ import {
   oauthCodePk,
   oauthTxPk,
   permSk,
+  QUEUED_PROMPT_PREFIX,
+  queuedPromptSk,
   SESSION_LINK_PREFIX,
   SINGLETON_SK,
   SWEEP_LINK_PK,
@@ -87,6 +90,8 @@ import type {
   PrLinkItem,
   PrState,
   PrWaitItem,
+  QueuedPromptItem,
+  QueuedPromptStatus,
   RegisteredClientItem,
   S3Pointer,
   SessionLinkItem,
@@ -1618,6 +1623,176 @@ export class Repository {
   /** Move a still-pending item's due time (ISO-8601). False when it was drained meanwhile. */
   async setInboxNotBefore(sessionId: string, id: string, notBefore: string): Promise<boolean> {
     return this.inboxTransition(sessionId, id, "pending", { notBefore });
+  }
+
+  /* ---------------------------- Queued prompts --------------------------- */
+
+  /**
+   * Store a prompt sent with whenBusy "queue", under the turn id its caller was given. False when
+   * that id is already stored (a retried call, a command delivered twice): the first write stands.
+   */
+  async putQueuedPrompt(args: { sessionId: string; id: string; prompt: string }): Promise<boolean> {
+    const prompt = await this.spill(
+      `prompts/${args.sessionId}`,
+      args.prompt,
+      INLINE_PROMPT_MAX_BYTES,
+    );
+    const item: QueuedPromptItem = {
+      PK: sessionPk(args.sessionId),
+      SK: queuedPromptSk(args.id),
+      id: args.id,
+      sessionId: args.sessionId,
+      prompt: prompt as QueuedPromptItem["prompt"],
+      status: "queued",
+      queuedAt: this.nowIso(),
+      claimedAt: null,
+      failReason: null,
+      failedAt: null,
+      ttl: ttlFromNow(QUEUED_PROMPT_TTL_MS, this.now()),
+    };
+    try {
+      await this.ddb.send(
+        new PutCommand({
+          TableName: this.table,
+          Item: item,
+          ConditionExpression: "attribute_not_exists(PK)",
+        }),
+      );
+      return true;
+    } catch (err) {
+      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  async getQueuedPrompt(sessionId: string, id: string): Promise<QueuedPromptItem | null> {
+    const res = await this.ddb.send(
+      new GetCommand({
+        TableName: this.table,
+        Key: { PK: sessionPk(sessionId), SK: queuedPromptSk(id) },
+        ConsistentRead: true,
+      }),
+    );
+    return (res.Item as QueuedPromptItem | undefined) ?? null;
+  }
+
+  /** A session's queued prompts in the order they were sent (oldest first), whatever their status. */
+  async listQueuedPrompts(sessionId: string): Promise<QueuedPromptItem[]> {
+    const items: QueuedPromptItem[] = [];
+    let start: Record<string, unknown> | undefined;
+    do {
+      const res = await this.ddb.send(
+        new QueryCommand({
+          TableName: this.table,
+          KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
+          ExpressionAttributeValues: { ":pk": sessionPk(sessionId), ":p": QUEUED_PROMPT_PREFIX },
+          ConsistentRead: true,
+          ...(start ? { ExclusiveStartKey: start } : {}),
+        }),
+      );
+      items.push(...((res.Items as QueuedPromptItem[] | undefined) ?? []));
+      start = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (start);
+    // The turn id is a ULID made when the prompt was sent, but two made in one millisecond are not
+    // ordered by it, so the time the record was written comes first.
+    return items.sort((a, b) => a.queuedAt.localeCompare(b.queuedAt) || a.id.localeCompare(b.id));
+  }
+
+  /** The prompt text of a queued prompt (read back from S3 when it was too large to keep inline). */
+  async queuedPromptText(item: QueuedPromptItem): Promise<string> {
+    return (await this.resolve(item.prompt)) as string;
+  }
+
+  /**
+   * Move a queued prompt from one status to another, optionally with a feed event in the same
+   * transaction. False when it was not in the `from` status (another writer moved it first).
+   */
+  private async queuedPromptTransition(
+    sessionId: string,
+    id: string,
+    from: QueuedPromptStatus,
+    to: QueuedPromptStatus,
+    extra: Record<string, unknown>,
+    draft?: FeedDraft,
+  ): Promise<boolean> {
+    const set: Record<string, unknown> = { status: to, ...extra };
+    const names: Record<string, string> = {};
+    const values: Record<string, unknown> = { ":from": from };
+    const sets: string[] = [];
+    for (const [k, v] of Object.entries(set)) {
+      names[`#${k}`] = k;
+      values[`:${k}`] = v;
+      sets.push(`#${k} = :${k}`);
+    }
+    names["#status"] = "status";
+    const update = {
+      TableName: this.table,
+      Key: { PK: sessionPk(sessionId), SK: queuedPromptSk(id) },
+      UpdateExpression: `SET ${sets.join(", ")}`,
+      ConditionExpression: "#status = :from",
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    };
+    try {
+      if (draft) {
+        await this.feed.transact(await this.ownerOf(sessionId), [{ Update: update }], [draft]);
+      } else {
+        await this.ddb.send(new UpdateCommand(update));
+      }
+      return true;
+    } catch (err) {
+      if (
+        err instanceof FeedConflictError ||
+        (err as { name?: string }).name === "ConditionalCheckFailedException"
+      ) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /** queued -> delivered: the one drain that wins this claim sends the prompt. */
+  async claimQueuedPrompt(sessionId: string, id: string): Promise<boolean> {
+    return this.queuedPromptTransition(sessionId, id, "queued", "delivered", {
+      claimedAt: this.nowIso(),
+    });
+  }
+
+  /** delivered -> queued: the turn could not start yet, so the prompt keeps its place in the queue. */
+  async releaseQueuedPrompt(sessionId: string, id: string): Promise<boolean> {
+    return this.queuedPromptTransition(sessionId, id, "delivered", "queued", { claimedAt: null });
+  }
+
+  /** delivered -> started: the turn exists. False when it was not delivered (a redelivered command). */
+  async startQueuedPrompt(sessionId: string, id: string): Promise<boolean> {
+    return this.queuedPromptTransition(sessionId, id, "delivered", "started", {});
+  }
+
+  /**
+   * queued or delivered -> failed, with `prompt.failed` on the change feed in the same
+   * transaction. False when the prompt was neither (it started, or already failed).
+   */
+  async failQueuedPrompt(
+    sessionId: string,
+    id: string,
+    args: { reason: PromptFailReason; source: FeedSource },
+  ): Promise<boolean> {
+    const draft: FeedDraft = {
+      sessionId,
+      pr: null,
+      type: "prompt.failed",
+      source: args.source,
+      payload: { turnId: id, whenBusy: "queue", reason: args.reason },
+    };
+    const extra = { failReason: args.reason, failedAt: this.nowIso() };
+    for (const from of ["queued", "delivered"] as const) {
+      if (await this.queuedPromptTransition(sessionId, id, from, "failed", extra, draft)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /* ------------------------- Unmatched GitHub deliveries ----------------- */

@@ -208,16 +208,15 @@ describe("CloudSession unsupported operations", () => {
     }
   });
 
-  test("rejects a whenBusy=queue follow-up with UnsupportedCloudOperationError", async () => {
+  test("prompts waiting on the queue make an idle session busy: a steer is rejected, a reject is skipped", async () => {
     const w = wire();
-    const rt = await busy(w, "squ");
-    try {
-      w.cloud.classifySteer(rt, "squ", "queue", undefined);
-      throw new Error("expected throw");
-    } catch (err) {
-      expect(err).toBeInstanceOf(UnsupportedCloudOperationError);
-      expect((err as UnsupportedCloudOperationError).operation).toBe("queue");
-    }
+    const rt = await idleLaunched(w, "sqopen");
+    expect(() => w.cloud.classifySteer(rt, "sqopen", "steer", undefined, true)).toThrow(
+      UnsupportedCloudOperationError,
+    );
+    expect(w.cloud.classifySteer(rt, "sqopen", "reject", undefined, true)).toBe("reject");
+    // With nothing queued the same session takes the prompt.
+    expect(w.cloud.classifySteer(rt, "sqopen", "steer", undefined, false)).toBe("prompt");
   });
 
   test("rejects a cancel of a running cloud turn with UnsupportedCloudOperationError", async () => {

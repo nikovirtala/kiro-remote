@@ -69,6 +69,21 @@ export const EVENTS_POLL_INTERVAL_MS = 1000;
 /** Event-cursor sequence numbers are stored zero-padded to this width. */
 export const EVENT_SEQ_WIDTH = 12;
 
+/**
+ * How long a queued prompt's record is kept after it is created, in milliseconds. A prompt waits
+ * for the turn in front of it (a turn ends within hours, see CATCH_UP_MAX_AGE_MS), so this is far
+ * longer than any wait; after it the record, its status and its failure reason are gone.
+ */
+export const QUEUED_PROMPT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long a prompt handed to the bridge (`delivered`) may stay unstarted before the next drain
+ * takes it back (`queued`) and sends it again. The command queue's own retries finish well inside
+ * this; it only matters when a command was lost for good (a dead-letter), so that one prompt cannot
+ * hold up the queue behind it for ever.
+ */
+export const QUEUED_PROMPT_CLAIM_STALE_MS = 30 * 60 * 1000;
+
 /** How long a GitHub webhook delivery id is remembered for dedupe (and its raw body kept). */
 export const GITHUB_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 

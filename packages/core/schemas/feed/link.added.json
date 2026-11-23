@@ -40,7 +40,7 @@
     },
     "source": {
       "type": "string",
-      "enum": ["mcp", "rest", "trailer", "webhook", "harvest", "sweep"]
+      "enum": ["mcp", "rest", "trailer", "webhook", "harvest", "sweep", "bridge"]
     },
     "type": {
       "type": "string",

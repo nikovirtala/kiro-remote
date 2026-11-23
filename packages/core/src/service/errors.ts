@@ -38,9 +38,12 @@ export class SessionNotFoundError extends Error {
 /** The requested state change is not valid for the session -> API maps to 409. */
 export class InvalidStateError extends Error {
   readonly status = 409;
-  constructor(message: string) {
+  /** A short machine-readable reason (such as `steer_unsupported`), when the refusal has one. */
+  readonly reason: string | undefined;
+  constructor(message: string, reason?: string) {
     super(message);
     this.name = "InvalidStateError";
+    this.reason = reason;
   }
 }
 

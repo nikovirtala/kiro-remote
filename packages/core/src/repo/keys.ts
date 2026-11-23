@@ -64,6 +64,9 @@ export const ghDeliveryPk = (deliveryId: string): string => `GHDLV#${deliveryId}
 /** Per-session inbox of typed wake items (SESSION#<id>, INBOX#<ulid>). */
 export const inboxSk = (ulid: string): string => `INBOX#${ulid}`;
 export const INBOX_PREFIX = "INBOX#";
+/** Per-session queue of prompts sent with whenBusy "queue" (SESSION#<id>, QPROMPT#<turn id>). */
+export const queuedPromptSk = (turnId: string): string => `QPROMPT#${turnId}`;
+export const QUEUED_PROMPT_PREFIX = "QPROMPT#";
 /** Deliveries for allowed repos that matched no session link (one partition, newest last). */
 export const GH_UNMATCHED_PK = "GHUNMATCHED";
 

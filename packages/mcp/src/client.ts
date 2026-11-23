@@ -196,7 +196,10 @@ export class InProcessClient implements KiroRemoteClient {
       opts,
       "createTurn",
       { sessionId, ...args },
-      async () => (await svcSendPrompt(this.service, principal, sessionId, args)) as ClientTurn,
+      async () =>
+        (await svcSendPrompt(this.service, principal, sessionId, args, {
+          source: "mcp",
+        })) as ClientTurn,
     );
   }
 

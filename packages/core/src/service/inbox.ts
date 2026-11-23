@@ -14,11 +14,12 @@ import { MAX_CLOUD_SESSIONS } from "../config.ts";
 import { ConcurrentModificationError } from "../repo/repository.ts";
 import type { InboxItem } from "../repo/types.ts";
 import type { ServiceDeps } from "./index.ts";
+import { openQueuedPrompts } from "./queue.ts";
 
 export type DrainResult =
   /** Nothing pending. */
   | { status: "empty" }
-  /** The session is not idle; items stay pending until the running turn settles. */
+  /** The session is not idle, or prompts are queued (they go first); items stay pending. */
   | { status: "busy" }
   /** Items are pending but none is due yet (debounce). */
   | { status: "not_due"; nextDueAt: string }
@@ -76,7 +77,9 @@ export async function drainInbox(deps: DrainDeps, sessionId: string): Promise<Dr
     return { status: "dropped", dropped, reason };
   }
 
-  if (session.status !== "idle") {
+  // Prompts a person queued run before a wake, in the order they were sent. The settle of the last
+  // of them drains the inbox again.
+  if (session.status !== "idle" || (await openQueuedPrompts(deps, sessionId)).length > 0) {
     return { status: "busy" };
   }
 

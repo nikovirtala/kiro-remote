@@ -44,6 +44,7 @@ export * from "./service/feed.ts";
 export * from "./service/inbox.ts";
 export * from "./service/index.ts";
 export * from "./service/links.ts";
+export * from "./service/queue.ts";
 export * from "./service/sqs-queue.ts";
 export * from "./service/waits.ts";
 export * from "./state/transition.ts";
