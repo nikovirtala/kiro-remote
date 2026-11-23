@@ -18,6 +18,7 @@
 import {
   ConcurrencyLimitError,
   ForbiddenError,
+  GithubNotEnabledError,
   InvalidStateError,
   RepoNotAllowedError,
   SessionNotFoundError,
@@ -135,6 +136,7 @@ export function isKnownProblem(err: unknown): boolean {
     err instanceof SessionNotFoundError ||
     err instanceof NotFoundError ||
     err instanceof CapabilityUnavailableError ||
+    err instanceof GithubNotEnabledError ||
     err instanceof UnprocessableError ||
     err instanceof BadRequestError ||
     err instanceof InvalidStateError ||
@@ -210,6 +212,12 @@ export function errorToProblem(err: unknown): HttpResponse {
   if (err instanceof CapabilityUnavailableError) {
     return problem(501, "capability-unavailable", "Capability Unavailable", err.message, {
       method: err.method,
+    });
+  }
+
+  if (err instanceof GithubNotEnabledError) {
+    return problem(501, "capability-unavailable", "Capability Unavailable", err.message, {
+      method: "github",
     });
   }
 

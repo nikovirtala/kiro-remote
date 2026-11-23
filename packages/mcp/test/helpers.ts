@@ -7,7 +7,12 @@
  * REST API (for the HTTP client) and a fake OAuth facade (for the CLI flows).
  */
 
-import type { Command, CommandQueue, Repository } from "@nikovirtala/kiro-remote-core";
+import type {
+  Command,
+  CommandQueue,
+  GithubQueueMessage,
+  Repository,
+} from "@nikovirtala/kiro-remote-core";
 import { Repository as CoreRepository, type Principal } from "@nikovirtala/kiro-remote-core";
 import { InProcessClient } from "../src/client.ts";
 import type { FetchLike } from "../src/http-client.ts";
@@ -113,6 +118,9 @@ export class FakeDdb {
       const to = values[":to"] as string;
       rows = rows.filter((i) => i.SK >= from && i.SK <= to);
     }
+    if (typeof values[":p"] === "string") {
+      rows = rows.filter((i) => i.SK.startsWith(values[":p"] as string));
+    }
     if (typeof values[":permPrefix"] === "string") {
       rows = rows.filter((i) => i.SK.startsWith(values[":permPrefix"] as string));
     }
@@ -162,6 +170,8 @@ export interface InProcHarness {
   client: InProcessClient;
   ddb: FakeDdb;
   queue: SpyQueue;
+  /** Messages the service sent to the GitHub queue. */
+  githubSent: GithubQueueMessage[];
   repo: Repository;
   seedSession(overrides?: Partial<Record<string, unknown>>): string;
   seedEvent(sessionId: string, seq: number, overrides?: Partial<Record<string, unknown>>): void;
@@ -178,6 +188,8 @@ export function buildInProcess(
     kiroCliVersion?: string | null;
     ids?: string[];
     sleep?: (ms: number) => Promise<void>;
+    /** Leave the GitHub queue out, as on a deployment without the GitHub feature. */
+    noGithubQueue?: boolean;
   } = {},
 ): InProcHarness {
   const ddb = new FakeDdb();
@@ -194,11 +206,21 @@ export function buildInProcess(
   let idCounter = 0;
   const newId = () => idQueue.shift() ?? `id-${++idCounter}`;
 
+  const githubSent: GithubQueueMessage[] = [];
   const client = new InProcessClient({
     service: {
       repo,
       queue,
       allowedRepos: opts.allowedRepos ?? ["*/*"],
+      ...(opts.noGithubQueue
+        ? {}
+        : {
+            githubQueue: {
+              async send(m: GithubQueueMessage) {
+                githubSent.push(m);
+              },
+            },
+          }),
       newId,
       ...(opts.sleep ? { sleep: opts.sleep } : {}),
     },
@@ -275,7 +297,7 @@ export function buildInProcess(
     });
   }
 
-  return { client, ddb, queue, repo, seedSession, seedEvent, seedPermission };
+  return { client, ddb, queue, githubSent, repo, seedSession, seedEvent, seedPermission };
 }
 
 /* ------------------------------ Fake REST API ------------------------------ */

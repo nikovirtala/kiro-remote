@@ -40,6 +40,7 @@ import {
   kiroCliVersion as kiroCliVersionFromInit,
   Repository,
   SqsCommandQueue,
+  SqsGithubQueue,
 } from "@nikovirtala/kiro-remote-core";
 import type { ApiContext, FacadeDeps } from "../context.ts";
 import type { McpTransportHandler } from "../mcp-seam.ts";
@@ -255,6 +256,10 @@ export function buildContextFromEnv(options: BuildContextOptions = {}): ApiConte
       allowedRepos: splitList(env.ALLOWED_REPOS),
       // Set by the construct only when the GitHub feature is deployed.
       prTrailer: env.GITHUB_PR_TRAILER === "on" ? "on" : "off",
+      // Set by the construct only when the GitHub feature is deployed; waits need it.
+      ...(env.GITHUB_QUEUE_URL
+        ? { githubQueue: new SqsGithubQueue({ sqs, queueUrl: env.GITHUB_QUEUE_URL }) }
+        : {}),
     },
     repo,
     auth: {

@@ -16,6 +16,7 @@ import type {
   ClientPermission,
   ClientSession,
   ClientTurn,
+  ClientWait,
   KiroRemoteClient,
   WriteOptions,
 } from "@nikovirtala/kiro-remote-api";
@@ -316,6 +317,36 @@ export class HttpClient implements KiroRemoteClient {
     await this.request(
       "DELETE",
       `/sessions/${encodeURIComponent(sessionId)}/links/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`,
+      key(write),
+    );
+  }
+
+  async waitForPullRequest(
+    _principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    write?: WriteOptions,
+  ): Promise<ClientWait> {
+    return (await this.request("POST", `/sessions/${encodeURIComponent(sessionId)}/waits`, {
+      body: args,
+      idempotent: true,
+      ...key(write),
+    })) as ClientWait;
+  }
+
+  async stopWaitingForPullRequest(
+    _principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    write?: WriteOptions,
+  ): Promise<void> {
+    const ref = parsePrRef(args.pr);
+    if (!ref) {
+      throw new Error("pr must be owner/repo#number or a GitHub pull request URL");
+    }
+    await this.request(
+      "DELETE",
+      `/sessions/${encodeURIComponent(sessionId)}/waits/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`,
       key(write),
     );
   }

@@ -30,6 +30,8 @@ import {
   toOpenApiSchema,
   UnmatchedDeliverySchema,
   UnmatchedQuerySchema,
+  WaitForPullRequestSchema,
+  WaitSchema,
 } from "@nikovirtala/kiro-remote-core";
 
 /** The resource-server scope identifier prefix advertised in the scheme. */
@@ -304,6 +306,36 @@ export function buildOpenApiDocument(config: FacadeConfig): Record<string, unkno
           optionalIdempotencyHeader,
         ],
         responses: { "204": jsonResponseSpec("Unlinked"), ...errorResponses },
+      },
+    },
+    "/sessions/{id}/waits": {
+      post: {
+        operationId: "waitForPullRequest",
+        summary:
+          "Wake the session once when a pull request it depends on, but does not own, is merged or closed (owner/repo#n or a PR URL). The repo must match ALLOWED_REPOS and may differ from the session's repos. A PR already merged or closed wakes the session at once. Registering twice is a no-op (200).",
+        security: securityFor(ri, "link"),
+        parameters: [pathParam("id"), idempotencyHeader],
+        requestBody: jsonBody(toOpenApiSchema(WaitForPullRequestSchema)),
+        responses: {
+          "200": jsonResponseSpec("Already waiting", toOpenApiSchema(WaitSchema)),
+          "201": jsonResponseSpec("Waiting", toOpenApiSchema(WaitSchema)),
+          ...errorResponses,
+        },
+      },
+    },
+    "/sessions/{id}/waits/{owner}/{repo}/{n}": {
+      delete: {
+        operationId: "stopWaitingForPullRequest",
+        summary: "Stop waiting for a pull request.",
+        security: securityFor(ri, "link"),
+        parameters: [
+          pathParam("id"),
+          pathParam("owner"),
+          pathParam("repo"),
+          pathParam("n"),
+          optionalIdempotencyHeader,
+        ],
+        responses: { "204": jsonResponseSpec("Stopped"), ...errorResponses },
       },
     },
     "/github/unmatched": {

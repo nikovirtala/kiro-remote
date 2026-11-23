@@ -833,6 +833,13 @@ export class KiroRemote extends Construct {
       });
     }
 
+    // A wait registered through the API or MCP is read once by the GitHub consumer, which
+    // alone holds GitHub credentials: the API asks it through the GitHub queue.
+    if (this.githubQueue) {
+      this.apiFn.addEnvironment("GITHUB_QUEUE_URL", this.githubQueue.queueUrl);
+      this.githubQueue.grantSendMessages(this.apiFn);
+    }
+
     // The SQS FIFO command consumer. 15-minute timeout (the ceiling): a turn
     // is AWAITed in the invocation (holding the FIFO MessageGroupId =
     // sessionId) until it ends or the invocation nears its deadline, at which

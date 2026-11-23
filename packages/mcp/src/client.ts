@@ -22,6 +22,7 @@ import type {
   ClientPermission,
   ClientSession,
   ClientTurn,
+  ClientWait,
   KiroRemoteClient,
   WriteOptions,
 } from "@nikovirtala/kiro-remote-api";
@@ -42,7 +43,9 @@ import {
   listSessions as svcListSessions,
   sendPrompt as svcSendPrompt,
   setConfig as svcSetConfig,
+  stopWaitingForPullRequest as svcStopWaiting,
   unlinkPullRequest as svcUnlink,
+  waitForPullRequest as svcWait,
 } from "@nikovirtala/kiro-remote-core";
 
 /** The single client interface the tools depend on (canonical in @nikovirtala/kiro-remote-api). */
@@ -289,6 +292,32 @@ export class InProcessClient implements KiroRemoteClient {
   ): Promise<void> {
     await this.write(principal, opts, "unlinkPullRequest", { sessionId, ...args }, () =>
       svcUnlink(this.service, principal, sessionId, args.pr),
+    );
+  }
+
+  async waitForPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    opts?: WriteOptions,
+  ): Promise<ClientWait> {
+    return this.write(
+      principal,
+      opts,
+      "waitForPullRequest",
+      { sessionId, ...args },
+      async () => (await svcWait(this.service, principal, sessionId, args.pr, "mcp")).wait,
+    );
+  }
+
+  async stopWaitingForPullRequest(
+    principal: Principal,
+    sessionId: string,
+    args: { pr: string },
+    opts?: WriteOptions,
+  ): Promise<void> {
+    await this.write(principal, opts, "stopWaitingForPullRequest", { sessionId, ...args }, () =>
+      svcStopWaiting(this.service, principal, sessionId, args.pr),
     );
   }
 }

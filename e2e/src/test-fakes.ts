@@ -322,6 +322,8 @@ export class FakeKiro {
       setConfig: unsupported,
       linkPullRequest: unsupported,
       unlinkPullRequest: unsupported,
+      waitForPullRequest: unsupported,
+      stopWaitingForPullRequest: unsupported,
     };
   }
 }
