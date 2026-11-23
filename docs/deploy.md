@@ -278,7 +278,7 @@ There is no VPC and no long-running task. Operational details:
 
 ### Operations cloud sessions do not support
 
-All 18 MCP tools and every REST route stay available, but some operations have
+All 19 MCP tools and every REST route stay available, but some operations have
 no meaning on a cloud session:
 
 - **cancel** is rejected while a turn is running and is a no-op when the

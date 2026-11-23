@@ -67,6 +67,18 @@ merge wake and its own conflict wake into one turn:
 KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-github test waits-emulator
 ```
 
+`packages/github/test/feed-emulator.test.ts` covers the [change
+feed](./github.md#the-change-feed) on a real DynamoDB and SQS: a wait registered
+through the service, a PR merged through a fake webhook and the wake delivered, read
+back by cursor; a change and its event committing together or not at all; two fires
+of one wait at once; ten writers on one account (seq 1 to 10, no gaps); a page
+boundary; another account's feed; the 30 day TTL; and `feedViolations()` over every
+command of the run:
+
+```bash
+KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-github test feed-emulator
+```
+
 The tests create and delete their own table and refuse to run unless
 `AWS_ENDPOINT_URL` is a loopback address, so they cannot reach real AWS.
 
@@ -249,12 +261,12 @@ other than that token file.
   supports S256, and lists the authorization, token and registration endpoints.
 - `mcp-inspector`: The Inspector CLI
   (`--cli <url>/mcp --transport http --method tools/list`) completes
-  discovery, registration and the browser sign-in, and lists exactly the 18
+  discovery, registration and the browser sign-in, and lists exactly the 19
   registered tools.
 - `login`: A token with the three scopes, from the token file or a browser
   login. `captured.source` says which.
 - `mcp-tools`: The MCP SDK client connects over Streamable HTTP with that token.
-  `tools/list` returns the 18 tools, and `kiro_capabilities` and
+  `tools/list` returns the 19 tools, and `kiro_capabilities` and
   `kiro_list_models` return their result shapes.
 - `mcp-launch`: `kiro_launch_session` on the repo returns a session id.
   `kiro_get_session` returns it and `kiro_list_sessions` lists it.

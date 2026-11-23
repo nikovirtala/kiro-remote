@@ -8,7 +8,7 @@ the same `KiroRemoteClient` interface:
 - **Streamable HTTP** — mounted at `<host>/mcp`, a protected resource that
   requires the same Cognito bearer.
 
-Both surfaces expose the same **18 tools**.
+Both surfaces expose the same **19 tools**.
 
 ## The `kiro-remote` CLI
 
@@ -186,7 +186,7 @@ without one; see the Inspector's
 The live e2e harness uses the Inspector's CLI mode instead, with an in-memory
 store (see [`docs/testing.md`](testing.md#the-live-end-to-end-harness)).
 
-## The 18 tools
+## The 19 tools
 
 Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 `destructiveHint` (from [`packages/mcp/src/tools.ts`](../packages/mcp/src/tools.ts)):
@@ -209,8 +209,9 @@ Stable order, with annotations `RO` = `readOnlyHint`, `DESTRUCTIVE` =
 | 14  | `kiro_unlink_pull_request`           | —           | Remove a PR link from a session.                                                                                                       |
 | 15  | `kiro_wait_for_pull_request`         | —           | Wake the session once when a PR it depends on but does not own merges or closes ([waits for](./github.md#waiting-for-a-pull-request)). |
 | 16  | `kiro_stop_waiting_for_pull_request` | —           | Remove a wait.                                                                                                                         |
-| 17  | `kiro_cancel_turn`                   | DESTRUCTIVE | Cancel the active turn.                                                                                                                |
-| 18  | `kiro_delete_session`                | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                                                    |
+| 17  | `kiro_list_events`                   | RO          | The change feed: link and wait changes and every wake with its cause, after a cursor ([change feed](./github.md#the-change-feed)).     |
+| 18  | `kiro_cancel_turn`                   | DESTRUCTIVE | Cancel the active turn.                                                                                                                |
+| 19  | `kiro_delete_session`                | DESTRUCTIVE | Permanently delete a session and its cloud sandbox.                                                                                    |
 
 `kiro_wait_for_pull_request` and `kiro_stop_waiting_for_pull_request` take
 `{ sessionId, pr }` and need `sessions:write`, like the link tools. A session can
@@ -218,6 +219,10 @@ wait for any number of pull requests, and a pull request can be waited for by
 any number of sessions; see [waiting for a pull
 request](./github.md#waiting-for-a-pull-request). `kiro_get_session` returns the
 session's `waits`.
+
+`kiro_list_events { after, limit }` reads the account's [change
+feed](./github.md#the-change-feed) (`after` is the `nextCursor` of the last page,
+`0` to start; `limit` defaults to 50, at most 200) and needs `sessions:read`.
 
 ### Retrying safely: `idempotencyKey`
 
