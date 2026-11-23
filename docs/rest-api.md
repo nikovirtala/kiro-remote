@@ -28,7 +28,7 @@ delete needs `sessions:delete`. A session is visible only to its creator's sub.
 | GET    | `/v1/sessions`                               | List your sessions. Query: `status`, `limit` (default 20, max 100), `cursor`.                                                                                                                                                                                                                                                                                                                    |
 | POST   | `/v1/sessions`                               | Launch a session. Returns **202** `{ sessionId, turnId }`; `turnId` is `null` until the bridge starts the first turn.                                                                                                                                                                                                                                                                            |
 | POST   | `/v1/sessions/adopt`                         | Adopt an existing Kiro session. Body `{ kiroSessionId }`.                                                                                                                                                                                                                                                                                                                                        |
-| GET    | `/v1/sessions/{id}`                          | Fetch one session.                                                                                                                                                                                                                                                                                                                                                                               |
+| GET    | `/v1/sessions/{id}`                          | Fetch one session, with `links`, `waits` and its prompt `queue`.                                                                                                                                                                                                                                                                                                                                 |
 | DELETE | `/v1/sessions/{id}`                          | Delete a session (needs `sessions:delete`).                                                                                                                                                                                                                                                                                                                                                      |
 | POST   | `/v1/sessions/{id}/turns`                    | Send a prompt. Returns **202**.                                                                                                                                                                                                                                                                                                                                                                  |
 | GET    | `/v1/sessions/{id}/turns/{turnId}`           | Fetch a turn.                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -55,13 +55,57 @@ session, and some routes have no effect there:
   is never a pending request to answer: cloud turns never ask for permission.
 - `POST /v1/sessions/{id}/cancel` is rejected while a turn is running and is a
   no-op when the session is idle.
-- `POST /v1/sessions/{id}/turns` with `whenBusy: "steer"` or `"queue"` is
-  rejected while a turn is running; use `"reject"` and send the prompt once
+- `POST /v1/sessions/{id}/turns` with `whenBusy: "steer"` (the default) is
+  refused with **409** while a turn is running (`reason: "steer_unsupported"`).
+  Use `"queue"` to run the prompt after the turn, or `"reject"` and send it once
   the turn settles.
 
-A rejection appears in `GET /v1/sessions/{id}/events` as a `turn.failed` event
+A rejected cancel appears in `GET /v1/sessions/{id}/events` as a `turn.failed` event
 with `rawType: "operation_rejected"`. See
 [Operations cloud sessions do not support](./deploy.md#operations-cloud-sessions-do-not-support).
+
+### The prompt queue (`whenBusy` on `POST /v1/sessions/{id}/turns`)
+
+A session is **busy** while a turn runs and while prompts are queued.
+
+- **`queue`**: **202** `{ id, status: "queued" }` for a busy session. The prompt
+  is stored on the session's queue under `id` before the call returns, and runs as
+  its own turn with that id, after the turn in front of it. The prompts of a
+  session run oldest first, one at a time, each **once**. A prompt ends as a turn
+  or as a visible failure, never silently.
+- **`reject`**: **409** for a busy session (a running turn, or prompts queued).
+  Nothing is stored.
+- **`steer`** (the default): **409** with `reason: "steer_unsupported"` for a busy
+  session, and a `detail` that says to use `queue`. A running cloud turn takes no
+  prompt, so it is refused in the call like `reject`: nothing is stored, no turn is
+  started ahead of the queue, and the queue is untouched. On an idle session with
+  nothing queued it is an ordinary prompt (**202**). If the session was idle at the
+  call and busy when the bridge read the command (another prompt got in first), the
+  bridge keeps the prompt on the queue behind what is in front of it (`queue[]`
+  shows it as `queued`), so it still runs; it never ends as a silent rejection.
+
+`GET /v1/sessions/{id}` returns `queue[]`, oldest first: every prompt still to
+run and the latest that started or failed, each
+`{ turnId, status, queuedAt, reason }`:
+
+| `status`    | Meaning                                                                                 |
+| ----------- | --------------------------------------------------------------------------------------- |
+| `queued`    | Waiting for the turn in front of it.                                                    |
+| `delivered` | Handed to the bridge; its turn is about to start.                                       |
+| `started`   | Its turn exists under `turnId` (`GET /v1/sessions/{id}/turns/{turnId}`, the event log). |
+| `failed`    | It will not run; `reason` is `session_deleted`, `session_failed` or `not_sent`.         |
+
+`GET /v1/sessions/{id}/turns/{turnId}` answers for a prompt that has no turn yet:
+`status: "queued"`, or `"failed"` with the reason in `stopReason`. A failed prompt
+is also a `turn.failed` event on the session's event log (`turnId` = the prompt's
+id, `rawType: "queued_prompt_failed"`, payload `{ source, whenBusy, reason }`) and a
+`prompt.failed` annotation on [the change feed](./github.md#the-change-feed). None
+of them carries the prompt's text. Records are kept for 7 days.
+
+`DELETE /v1/sessions/{id}` first fails each queued prompt (`session_deleted`),
+then queues the delete. A session with queued prompts is never deleted or
+closed automatically: an automatic close (`GITHUB_AUTO_CLOSE_ON_MERGE`) waits until
+the queue is empty and is then decided again.
 
 `kiroCliVersion` comes from `agentInfo.version` in the ACP `initialize` result
 the bridge persists as `CONFIG#CAPS` (the same value backs the MCP
@@ -89,7 +133,7 @@ turns exist only when the optional [GitHub wake](./github.md) is deployed.
   rejected with 403).
 - **POST `/v1/sessions/{id}/turns`**:
   `{ prompt, whenBusy: "steer" | "queue" | "reject" }` (`whenBusy` defaults to
-  `steer`).
+  `steer`; see [the prompt queue](#the-prompt-queue-whenbusy-on-post-v1sessionsidturns)).
 - **POST `/v1/sessions/adopt`**: `{ kiroSessionId }`.
 - **PATCH `/v1/sessions/{id}/config`**: `{ model?, effort?, mode? }`.
 - **POST `/v1/sessions/{id}/permissions/{requestId}`**: `{ optionId, consent? }`.
