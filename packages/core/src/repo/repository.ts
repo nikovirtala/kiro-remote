@@ -44,6 +44,7 @@ import {
   ghLinkGsi1Sk,
   ghPrPk,
   ghRepoGsi1Pk,
+  ghWaitGsi1Pk,
   INBOX_PREFIX,
   idempotencyPk,
   META_SK,
@@ -59,6 +60,8 @@ import {
   ttlFromNow,
   turnSk,
   userGsi1Pk,
+  WAIT_PREFIX,
+  waitSk,
 } from "./keys.ts";
 import type {
   CapsItem,
@@ -75,12 +78,14 @@ import type {
   PermItem,
   PrLinkItem,
   PrState,
+  PrWaitItem,
   RegisteredClientItem,
   S3Pointer,
   SessionLinkItem,
   SessionMetaItem,
   TurnItem,
   UnmatchedItem,
+  WaitSource,
 } from "./types.ts";
 
 const EVENT_TTL_MS = EVENT_TTL_DAYS * 24 * 60 * 60 * 1000;
@@ -895,6 +900,129 @@ export class Repository {
     }
   }
 
+  /* ------------------------------ PR waits ------------------------------- */
+
+  /**
+   * Register a wait: the session wants a wake when the PR merges or closes. One item, written
+   * with `attribute_not_exists(PK)`, so registering twice is a no-op that returns the first one.
+   * `pr` is the canonical lower-cased `owner/repo#n` (see prKeyOf).
+   */
+  async createWait(args: {
+    sessionId: string;
+    pr: string;
+    source: WaitSource;
+  }): Promise<{ created: true; wait: PrWaitItem } | { created: false; wait: PrWaitItem }> {
+    const hash = args.pr.lastIndexOf("#");
+    const wait: PrWaitItem = {
+      PK: sessionPk(args.sessionId),
+      SK: waitSk(args.pr),
+      sessionId: args.sessionId,
+      pr: args.pr,
+      repo: args.pr.slice(0, hash),
+      number: Number(args.pr.slice(hash + 1)),
+      source: args.source,
+      createdAt: this.nowIso(),
+      GSI1PK: ghWaitGsi1Pk(args.pr),
+      GSI1SK: args.sessionId,
+    };
+    try {
+      await this.ddb.send(
+        new PutCommand({
+          TableName: this.table,
+          Item: wait,
+          ConditionExpression: "attribute_not_exists(PK)",
+        }),
+      );
+      return { created: true, wait };
+    } catch (err) {
+      if ((err as { name?: string }).name !== "ConditionalCheckFailedException") {
+        throw err;
+      }
+      const existing = await this.getWait(args.sessionId, args.pr);
+      if (!existing) {
+        throw err;
+      }
+      return { created: false, wait: existing };
+    }
+  }
+
+  async getWait(sessionId: string, pr: string): Promise<PrWaitItem | null> {
+    const res = await this.ddb.send(
+      new GetCommand({
+        TableName: this.table,
+        Key: { PK: sessionPk(sessionId), SK: waitSk(pr) },
+        ConsistentRead: true,
+      }),
+    );
+    return (res.Item as PrWaitItem | undefined) ?? null;
+  }
+
+  /** The PRs a session waits for, oldest PR key first. */
+  async queryWaits(sessionId: string): Promise<PrWaitItem[]> {
+    const items: PrWaitItem[] = [];
+    let cursor: Record<string, unknown> | undefined;
+    do {
+      const res = await this.ddb.send(
+        new QueryCommand({
+          TableName: this.table,
+          KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
+          ExpressionAttributeValues: { ":pk": sessionPk(sessionId), ":p": WAIT_PREFIX },
+          ConsistentRead: true,
+          ExclusiveStartKey: cursor,
+        }),
+      );
+      items.push(...((res.Items as PrWaitItem[] | undefined) ?? []));
+      cursor = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (cursor);
+    return items;
+  }
+
+  /**
+   * The sessions waiting for a PR, via GSI1. A global index read is eventually consistent: a wait
+   * written a moment ago may be missing. Registering a wait therefore always reads the PR after
+   * storing it (the `wait_check` message), which covers the PR having merged in that window.
+   */
+  async queryWaiters(pr: string): Promise<PrWaitItem[]> {
+    const items: PrWaitItem[] = [];
+    let cursor: Record<string, unknown> | undefined;
+    do {
+      const res = await this.ddb.send(
+        new QueryCommand({
+          TableName: this.table,
+          IndexName: "GSI1",
+          KeyConditionExpression: "GSI1PK = :pk",
+          ExpressionAttributeValues: { ":pk": ghWaitGsi1Pk(pr) },
+          ExclusiveStartKey: cursor,
+        }),
+      );
+      items.push(...((res.Items as PrWaitItem[] | undefined) ?? []));
+      cursor = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (cursor);
+    return items;
+  }
+
+  /**
+   * Remove a wait. True for the one caller whose delete removed it, false when there was none,
+   * so a wait fired by a webhook and by a re-check at once wakes the session once.
+   */
+  async deleteWait(sessionId: string, pr: string): Promise<boolean> {
+    try {
+      await this.ddb.send(
+        new DeleteCommand({
+          TableName: this.table,
+          Key: { PK: sessionPk(sessionId), SK: waitSk(pr) },
+          ConditionExpression: "attribute_exists(PK)",
+        }),
+      );
+      return true;
+    } catch (err) {
+      if ((err as { name?: string }).name === "ConditionalCheckFailedException") {
+        return false;
+      }
+      throw err;
+    }
+  }
+
   /* ----------------------------- GitHub deliveries ----------------------- */
 
   /**
@@ -1120,6 +1248,11 @@ export class Repository {
       prompt: patch.prompt,
       data: patch.data,
     });
+  }
+
+  /** Move a still-pending item's due time (ISO-8601). False when it was drained meanwhile. */
+  async setInboxNotBefore(sessionId: string, id: string, notBefore: string): Promise<boolean> {
+    return this.inboxTransition(sessionId, id, "pending", { notBefore });
   }
 
   /* ------------------------- Unmatched GitHub deliveries ----------------- */

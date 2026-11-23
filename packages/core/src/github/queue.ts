@@ -59,11 +59,23 @@ export interface ConflictCheckMessage {
   headSha: string | null;
 }
 
+/**
+ * Read an awaited PR once for a wait that was just registered: merged or closed fires the wait
+ * now, open leaves it stored. The API holds no GitHub credentials, so it asks the consumer.
+ */
+export interface WaitCheckMessage {
+  kind: "wait_check";
+  sessionId: string;
+  /** The awaited PR, owner/repo#n, lower-cased. */
+  pr: string;
+}
+
 export type GithubQueueMessage =
   | DeliveryMessage
   | HarvestMessage
   | DrainMessage
-  | ConflictCheckMessage;
+  | ConflictCheckMessage
+  | WaitCheckMessage;
 
 export function isGithubQueueMessage(value: unknown): value is GithubQueueMessage {
   if (typeof value !== "object" || value === null) {
@@ -92,6 +104,8 @@ export function isGithubQueueMessage(value: unknown): value is GithubQueueMessag
         typeof v.attempt === "number" &&
         (v.headSha === null || typeof v.headSha === "string")
       );
+    case "wait_check":
+      return typeof v.sessionId === "string" && typeof v.pr === "string" && v.pr.includes("#");
     default:
       return false;
   }

@@ -89,6 +89,13 @@ export const LinkPullRequestSchema = z.object({
 });
 export type LinkPullRequestInput = z.infer<typeof LinkPullRequestSchema>;
 
+/**
+ * POST /v1/sessions/{id}/waits: the pull request to wait for, `owner/repo#n` or a github.com URL.
+ * The same shape as a link body; the repo need not be one of the session's repos.
+ */
+export const WaitForPullRequestSchema = LinkPullRequestSchema;
+export type WaitForPullRequestInput = z.infer<typeof WaitForPullRequestSchema>;
+
 /** GET /v1/github/unmatched (query) */
 export const UnmatchedQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -169,6 +176,16 @@ export const LinkSchema = z.object({
 });
 export type LinkView = z.infer<typeof LinkSchema>;
 
+/** A pull request the session waits for: it is woken once when the PR merges or closes. */
+export const WaitSchema = z.object({
+  pr: z.string(),
+  repo: z.string(),
+  number: z.number().int(),
+  source: z.union([z.literal("mcp"), z.literal("rest"), z.literal("trailer")]),
+  createdAt: z.string(),
+});
+export type WaitView = z.infer<typeof WaitSchema>;
+
 export const TurnTriggerSchema = z.object({
   source: z.union([z.literal("user"), z.literal("github")]),
   deliveryIds: z.array(z.string()),
@@ -202,6 +219,8 @@ export const SessionSchema = z.object({
   updatedAt: z.string(),
   /** Linked pull requests. Present on GET /v1/sessions/{id} only. */
   links: z.array(LinkSchema).optional(),
+  /** Pull requests the session waits for (present when the session is fetched by id). */
+  waits: z.array(WaitSchema).optional(),
 });
 export type SessionView = z.infer<typeof SessionSchema>;
 
