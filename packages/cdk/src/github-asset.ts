@@ -1,5 +1,5 @@
 /**
- * Bundles the GitHub Lambda handlers (webhook ingress and queue consumer) with
+ * Bundles the GitHub Lambda handlers (webhook ingress, queue consumer and the scheduled sweep) with
  * esbuild, in-process, no Docker. Same approach and flags as
  * {@link import("./api-asset.ts").buildApiLambdaCode}; the Octokit packages
  * are bundled in, the AWS SDK v3 stays external (the managed runtime has it).
@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const ENTRY_DIR = join(here, "..", "..", "github", "src", "lambda");
 const OUT_ROOT = join(here, "..");
 
-export type GithubHandlerName = "webhook" | "consumer";
+export type GithubHandlerName = "webhook" | "consumer" | "sweep";
 
 /** Bundle `packages/github/src/lambda/<name>.ts` to `<cdk>/.github-<name>-bundle/index.js`. */
 export function buildGithubLambdaCode(name: GithubHandlerName): Code {

@@ -2,11 +2,12 @@
  * CDK assertions for the optional GitHub feature (githubAppSecretArn).
  *
  *  - OFF (no ARN): nothing is deployed for it, and the bridge/API are as before.
- *  - ON: the webhook route, queue + DLQ, consumer, and 15-minute redelivery
- *    schedule exist; exactly the webhook and consumer roles can read the App
- *    secret; the route has no authorizer; cdk-nag passes.
+ *  - ON: the webhook route, queue + DLQ, consumer, the 15-minute redelivery
+ *    schedule and the sweep (its own function and schedule) exist; exactly the webhook, consumer
+ *    and sweep roles can read the App secret; the route has no authorizer; cdk-nag passes.
  */
 
+import { SWEEP_INTERVAL_MINUTES } from "@nikovirtala/kiro-remote-core";
 import { App, Stack } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, test } from "vitest";
@@ -85,15 +86,65 @@ describe("GitHub feature ON", () => {
     });
   });
 
-  test("only the webhook and consumer roles can read the App secret", () => {
+  test("only the webhook, consumer and sweep roles can read the App secret", () => {
     const policies = Object.entries(t.findResources("AWS::IAM::Policy"));
     const readers = policies
       .filter(([, p]) => JSON.stringify(p).includes(SECRET_ARN))
       .map(([id]) => id)
       .sort();
-    expect(readers).toHaveLength(2);
+    expect(readers).toHaveLength(3);
     expect(readers.some((id) => id.includes("GithubWebhookFn"))).toBe(true);
     expect(readers.some((id) => id.includes("GithubConsumerFn"))).toBe(true);
+    expect(readers.some((id) => id.includes("GithubSweepFn"))).toBe(true);
+  });
+
+  test("the table has GSI2, the sweep's index, beside GSI1", () => {
+    t.hasResourceProperties("AWS::DynamoDB::Table", {
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({ IndexName: "GSI1" }),
+        Match.objectLike({
+          IndexName: "GSI2",
+          KeySchema: [
+            { AttributeName: "GSI2PK", KeyType: "HASH" },
+            { AttributeName: "GSI2SK", KeyType: "RANGE" },
+          ],
+          Projection: { ProjectionType: "ALL" },
+        }),
+      ]),
+    });
+  });
+
+  test("the sweep is one function on one schedule, with no retry, at the interval core names", () => {
+    expect(SWEEP_INTERVAL_MINUTES).toBe(15);
+    const [[sweepId, sweep]] = functionsByLogicalIdPart(t, "GithubSweepFn");
+    const props = (
+      sweep as {
+        Properties: {
+          Runtime: string;
+          Timeout: number;
+          TracingConfig: { Mode: string };
+          Environment: { Variables: Record<string, unknown> };
+        };
+      }
+    ).Properties;
+    expect(props.Runtime).toBe("nodejs26.x");
+    expect(props.TracingConfig.Mode).toBe("Active");
+    expect(props.Timeout).toBeGreaterThan(120);
+    expect(props.Environment.Variables).toMatchObject({
+      POWERTOOLS_SERVICE_NAME: "kiro-remote-github",
+      GITHUB_QUEUE_URL: expect.anything(),
+      COMMAND_QUEUE_URL: expect.anything(),
+      TABLE_NAME: expect.anything(),
+    });
+    const rules = Object.values(t.findResources("AWS::Events::Rule")).filter((r) =>
+      JSON.stringify(r).includes(sweepId),
+    );
+    expect(rules).toHaveLength(1);
+    const rule = (rules[0] as { Properties: Record<string, unknown> }).Properties;
+    expect(rule.ScheduleExpression).toBe(`rate(${SWEEP_INTERVAL_MINUTES} minutes)`);
+    expect(rule.Targets).toEqual([
+      expect.objectContaining({ RetryPolicy: { MaximumRetryAttempts: 0 } }),
+    ]);
   });
 
   test("the bridge consumer can send to the command and GitHub queues but cannot read the secret", () => {

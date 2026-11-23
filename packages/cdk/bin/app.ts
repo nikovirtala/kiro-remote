@@ -175,6 +175,7 @@ const github = githubAppSecretArn
       ...(githubWakeOnBehind ? { githubWakeOnBehind } : {}),
       githubWebhookCode: buildGithubLambdaCode("webhook"),
       githubConsumerCode: buildGithubLambdaCode("consumer"),
+      githubSweepCode: buildGithubLambdaCode("sweep"),
     }
   : {};
 
