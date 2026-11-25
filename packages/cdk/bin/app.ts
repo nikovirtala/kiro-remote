@@ -189,6 +189,8 @@ new KiroRemoteStack(app, "KiroRemoteStack", {
     publicBaseUrl,
     cognitoDomainPrefix,
     allowedRepos,
+    // Kiro IDE / CLI sign in with their own CIMD document, https://kiro.dev/oauth/client-metadata.json.
+    cimdAllowedHosts: ["kiro.dev"],
     kiroApiKeySecretArn,
     ...(sesFromEmail ? { sesFromEmail } : {}),
     ...(sesVerifiedDomain ? { sesVerifiedDomain } : {}),
