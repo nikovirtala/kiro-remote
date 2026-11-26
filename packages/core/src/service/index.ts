@@ -16,6 +16,7 @@ import { ulid } from "ulid";
 import type { Principal } from "../auth/authenticate.ts";
 import { authorize } from "../auth/authorize.ts";
 import { EVENTS_MAX_WAIT_SECONDS, EVENTS_POLL_INTERVAL_MS, MAX_CLOUD_SESSIONS } from "../config.ts";
+import type { TurnStatus } from "../domain.ts";
 import { trailerInstruction } from "../github/pr-ref.ts";
 import type { GithubQueue } from "../github/queue.ts";
 import { sessionPk } from "../repo/keys.ts";
@@ -480,6 +481,70 @@ export async function getSession(
       .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt) || a.id.localeCompare(b.id))
       .map(toQueuedPromptView),
   };
+}
+
+/** The turn status a prompt on a session's queue reports: the turn it will run as, or why it will not. */
+export function queuedPromptTurnStatus(item: Pick<QueuedPromptItem, "status">): TurnStatus {
+  return item.status === "failed" ? "failed" : item.status === "started" ? "running" : "queued";
+}
+
+/** What a deleted session still says about a turn as stored: it failed, was refused or was cancelled. */
+const KEPT_WHEN_DELETED: ReadonlySet<TurnStatus> = new Set(["failed", "refused", "cancelled"]);
+
+/**
+ * Where one turn stands, for a poller that holds a turn id (an MCP task). Reads the turn row, or
+ * the prompt still on the session's queue when the turn has not started (or failed there, its
+ * `stopReason` then one of session_deleted, session_failed, not_sent). `null` when the session is
+ * not the caller's or the turn does not exist, the same answer for both, so existence never leaks.
+ *
+ * Unlike {@link getSession} this still answers for a deleted session the caller owned. A turn that
+ * was still queued or running is reported `failed` with `stopReason` "session_deleted", and so is a
+ * completed one, because its answer (the event log) is no longer readable. One that had failed, been
+ * refused or been cancelled keeps what it says.
+ */
+export async function getTurnState(
+  deps: ServiceDeps,
+  principal: Principal,
+  sessionId: string,
+  turnId: string,
+): Promise<TurnView | null> {
+  authorize(principal, "read");
+  const session = await deps.repo.getSession(sessionId);
+  if (!session || session.createdBy !== principal.sub) {
+    return null;
+  }
+  const turn = await deps.repo.getTurn(sessionId, turnId);
+  let state: TurnView | null = null;
+  if (turn) {
+    state = {
+      id: turn.id,
+      sessionId: turn.sessionId,
+      status: turn.status,
+      stopReason: turn.stopReason,
+      startedAt: turn.startedAt,
+      endedAt: turn.endedAt,
+      trigger: turn.trigger
+        ? { source: turn.trigger.source, deliveryIds: turn.trigger.deliveryIds }
+        : { source: "user", deliveryIds: [] },
+    };
+  } else {
+    const queued = await deps.repo.getQueuedPrompt(sessionId, turnId);
+    if (queued) {
+      state = {
+        id: queued.id,
+        sessionId: queued.sessionId,
+        status: queuedPromptTurnStatus(queued),
+        stopReason: queued.failReason,
+        startedAt: null,
+        endedAt: queued.failedAt,
+        trigger: { source: "user", deliveryIds: [] },
+      };
+    }
+  }
+  if (state && session.status === "deleted" && !KEPT_WHEN_DELETED.has(state.status)) {
+    return { ...state, status: "failed", stopReason: "session_deleted" };
+  }
+  return state;
 }
 
 export async function listSessions(

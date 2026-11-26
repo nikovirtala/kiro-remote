@@ -34,6 +34,7 @@ import {
   listFeedEvents,
   listUnmatchedDeliveries,
   type Principal,
+  queuedPromptTurnStatus,
   readEvents,
   sendPrompt,
   setConfig,
@@ -155,12 +156,7 @@ export async function getTurn(
       return jsonResponse(200, {
         id: queued.id,
         sessionId: queued.sessionId,
-        status:
-          queued.status === "failed"
-            ? "failed"
-            : queued.status === "started"
-              ? "running"
-              : "queued",
+        status: queuedPromptTurnStatus(queued),
         // For a prompt that failed in the queue, why (session_deleted, session_failed, not_sent).
         stopReason: queued.failReason,
         startedAt: null,

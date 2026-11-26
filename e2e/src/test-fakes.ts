@@ -315,6 +315,7 @@ export class FakeKiro {
       adoptSession: unsupported,
       deleteSession: (_p, id) => wrap("deleteSession", () => this.remove(id)),
       createTurn: (_p, id, args) => wrap("createTurn", () => this.createTurn(id, args.prompt)),
+      getTurn: unsupported,
       getEvents: (_p, id, args) => wrap("getEvents", () => this.read(id, args.after)),
       listPermissions: unsupported,
       cancelTurn: unsupported,

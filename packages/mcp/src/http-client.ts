@@ -228,6 +228,25 @@ export class HttpClient implements KiroRemoteClient {
     })) as ClientTurn;
   }
 
+  async getTurn(
+    _principal: Principal,
+    sessionId: string,
+    turnId: string,
+  ): Promise<ClientTurn | null> {
+    try {
+      return (await this.request(
+        "GET",
+        `/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
+      )) as ClientTurn;
+    } catch (err) {
+      // 404: not the caller's session (or deleted, which the REST API hides) or no such turn.
+      if (err instanceof HttpClientError && err.status === 404) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
   async getEvents(
     _principal: Principal,
     sessionId: string,
