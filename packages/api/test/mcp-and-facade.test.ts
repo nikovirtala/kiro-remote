@@ -19,6 +19,34 @@ describe("/mcp route seam", () => {
     );
   });
 
+  test("/mcp never reaches the transport without a token, in either protocol era", async () => {
+    const h = buildHarness();
+    let reached = false;
+    h.ctx.mcp = {
+      async handle() {
+        reached = true;
+        return { status: 200, headers: {}, body: "{}" };
+      },
+    };
+    const modern = {
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/list",
+      "content-type": "application/json",
+    };
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } },
+    });
+    for (const headers of [{}, modern, { ...modern, authorization: "Bearer not-a-token" }]) {
+      const res = await route(h.ctx, { ...req({ method: "POST", path: "/mcp", body }), headers });
+      expect(res.status).toBe(401);
+      expect(res.headers["www-authenticate"]).toContain("resource_metadata=");
+    }
+    expect(reached).toBe(false);
+  });
+
   test("authenticated /mcp with no handler wired returns 501 (seam not yet plugged)", async () => {
     const h = buildHarness();
     const res = await route(h.ctx, {

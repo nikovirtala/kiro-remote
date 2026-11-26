@@ -350,6 +350,70 @@ stream), which is usually what you want to read back. Each turn has a `trigger`:
 `{ source: "github", deliveryIds: [...] }` for a turn a GitHub event woke (see
 [GitHub wake](./github.md)).
 
+## The skill and the protocol eras
+
+### The `kiro-remote-sessions` skill
+
+Both surfaces serve a skill that teaches a model to hand coding work to a Kiro
+cloud session with these tools: the launch, wait and transcript loop, what
+`turnStatus` says, the limits of one wait, `whenBusy: "queue"` for follow-ups,
+what does nothing on a cloud session, one `idempotencyKey` per logical call,
+linking and waiting for pull requests, and the asynchronous delete. It uses the
+[Skills extension](https://modelcontextprotocol.io/extensions/skills/overview)
+(`io.modelcontextprotocol/skills`, SEP-2640): a client that supports it finds
+the skill with `skills/list` and loads `skill://kiro-remote-sessions/SKILL.md`
+and the files under `references/` when it needs them. Claude (web), Claude Code
+and VS Code Copilot support the extension; Claude Desktop and Kiro do not, and
+get a short `instructions` text instead (in `initialize` and `server/discover`,
+under 600 characters) that names the loop, `whenBusy: "queue"`, idempotency keys
+and the skill URI.
+
+- **Where it lives.** One folder per skill under
+  [`packages/mcp/skills`](../packages/mcp/skills), each with a `SKILL.md`
+  (frontmatter `name`, which must be the folder name, and `description`) and
+  optional `references/` (Biome does not format `SKILL.md`: it would put a blank
+  line inside the frontmatter). Adding a skill is adding a folder: the catalog serves
+  every folder, and the API bundle embeds them at build time
+  ([`embed-skills.ts`](../packages/cdk/src/embed-skills.ts)), because the Lambda
+  has no folder to read at run time.
+- **Who may read it.** Any authenticated caller, whatever its scopes: the content
+  is the same for every user and holds no data. An unauthenticated request still
+  gets the 401 challenge, in both eras. Answers carry `ttlMs: 300000` and
+  `cacheScope: "public"` (`SKILLS_CACHE_HINT` in
+  [`skills.ts`](../packages/mcp/src/skills.ts)).
+- **What is checked.** `packages/mcp/test/skills-content.test.ts` holds the rule
+  that a skill only names what exists, over every folder: each `kiro_*` tool is
+  in `tools.ts`, each `whenBusy` value and tool argument is in that tool's schema,
+  each link resolves, and nothing deployment-specific is in the text. The Inspector
+  checks the served manifest ([testing](testing.md#the-mcp-servers-against-the-inspector-offline)).
+- **Trying it.** `npx @modelcontextprotocol/inspector@2.16.0 --cli <url>/mcp
+  --transport http --method skills/list --verify` (after signing in),
+  `--method skills/get --uri skill://kiro-remote-sessions/SKILL.md`, or
+  `--method initialize` for the instructions.
+
+### Protocol eras
+
+`/mcp` and the stdio server speak two eras from one server factory
+([`createMcpServerFactory`](../packages/mcp/src/server.ts), on
+`@modelcontextprotocol/server` 2.x):
+
+| Era        | A request is                                                                                                                      | Served by                                                |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 2026-07-28 | self-contained: `MCP-Protocol-Version` and `Mcp-Method` headers and a `_meta` envelope; `server/discover` instead of `initialize` | a fresh server per request                               |
+| 2025       | `initialize` (2025-06-18 and 2025-11-25), then `tools/list`, `tools/call`                                                         | the SDK's stateless fallback, a fresh server per request |
+
+Both eras return the same 19 tools, byte for byte
+(`packages/mcp/test/fixtures/tools-list.json`), the same `insufficient_scope`
+JSON-RPC error for a missing scope and `isError: true` for a tool that fails.
+The API authenticates a request before it reaches either era. The legacy handling
+is one constant (`LEGACY` in [`http-transport.ts`](../packages/mcp/src/http-transport.ts));
+changing it to `"reject"` retires the 2025 era.
+
+The `/mcp` seam is request and response, so it serves no streams:
+`subscriptions/listen` is refused (`-32601`), `GET` answers 405, and the server
+advertises `listChanged: false`. Extensions attach in one place
+([`extensions.ts`](../packages/mcp/src/extensions.ts)).
+
 ## Scopes and secrets
 
 MCP calls use your Cognito OAuth token and are gated by the same scopes as the REST

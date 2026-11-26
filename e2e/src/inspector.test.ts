@@ -4,6 +4,8 @@ import {
   type InspectorSpawn,
   inspectorInvocation,
   parseInspectorToolNames,
+  parseSkillReports,
+  runInspector,
   runInspectorToolsList,
 } from "./inspector.ts";
 
@@ -47,6 +49,61 @@ describe("inspectorInvocation", () => {
     });
     const all = JSON.stringify(inv);
     expect(all).not.toMatch(/bearer|token|owner\/repo/i);
+  });
+});
+
+describe("inspectorInvocation for the other calls", () => {
+  it("skills/list --verify asks for the checks, and prints reports, not a tools document", () => {
+    const inv = inspectorInvocation(BASE, "/tmp/x", { method: "skills/list", verify: true });
+    expect(inv.args).toEqual([
+      "--yes",
+      INSPECTOR_PACKAGE,
+      "--cli",
+      `${BASE}/mcp`,
+      "--transport",
+      "http",
+      "--method",
+      "skills/list",
+      "--verify",
+    ]);
+  });
+
+  it("names the protocol era when asked", () => {
+    const inv = inspectorInvocation(BASE, "/tmp/x", { method: "tools/list", era: "modern" });
+    expect(inv.args.slice(5, 8)).toEqual(["http", "--protocol-era", "modern"]);
+    expect(inv.args).toContain("tools/list");
+  });
+
+  it("is the release that has --verify and --protocol-era", () => {
+    expect(INSPECTOR_PACKAGE).toBe("@modelcontextprotocol/inspector@2.16.0");
+  });
+});
+
+describe("parseSkillReports", () => {
+  const report = { name: "a", ok: true, outcome: "verified", files: [{}, {}] };
+
+  it("reads one report per line and ignores the summary line", () => {
+    const out = `${JSON.stringify(report)}\n${JSON.stringify({ ...report, name: "b" })}\nVerified 2 skills.\n`;
+    expect(parseSkillReports(out).map((r) => r.name)).toEqual(["a", "b"]);
+  });
+
+  it("throws on a report that is not JSON or lacks its fields", () => {
+    expect(() => parseSkillReports("{nope")).toThrow(/not JSON/);
+    expect(() => parseSkillReports('{"name":"a"}')).toThrow(/without name, ok and files/);
+  });
+});
+
+describe("runInspector", () => {
+  it("returns stdout for exit 0, and throws on exit 7 (a skill failed verification)", async () => {
+    const ok = fakes({ exitStatus: 0, stdout: "out", stderrTail: "" });
+    await expect(runInspector(BASE, { method: "skills/list", verify: true }, ok)).resolves.toBe(
+      "out",
+    );
+    const bad = fakes({ exitStatus: 7, stdout: "", stderrTail: "digest mismatch" });
+    await expect(runInspector(BASE, { method: "skills/list", verify: true }, bad)).rejects.toThrow(
+      "MCP Inspector exited 7: digest mismatch",
+    );
+    expect(bad.rm).toHaveBeenCalledTimes(1);
   });
 });
 
