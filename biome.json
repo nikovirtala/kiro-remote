@@ -18,7 +18,8 @@
       "!.mise-cache",
       "!.extralib",
       "!docs/adr",
-      "!.claude/skills"
+      "!.claude/skills",
+      "!packages/mcp/skills/*/SKILL.md"
     ]
   },
   "formatter": {
