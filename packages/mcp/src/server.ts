@@ -24,9 +24,11 @@ import {
 } from "@modelcontextprotocol/server";
 import { ForbiddenError, type Principal, redact } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
-import { loadExtensions, type McpExtension } from "./extensions.ts";
+import { InsufficientScopeError } from "./errors.ts";
+import { callerExtensions, loadExtensions, type McpExtension } from "./extensions.ts";
 import { INSTRUCTIONS } from "./instructions.ts";
 import { type Logger, redactingLogger, silentLogger } from "./logger.ts";
+import type { TasksExtensionOptions } from "./tasks/index.ts";
 import { authorizeTool, findTool, type ToolResult, toolListEntries } from "./tools.ts";
 
 export { type Logger, redactingLogger, silentLogger };
@@ -34,19 +36,7 @@ export { type Logger, redactingLogger, silentLogger };
 export const SERVER_NAME = "kiro-remote";
 export const SERVER_VERSION = "0.0.0";
 
-/**
- * A ProtocolError subtype that carries the OAuth `insufficient_scope` error so the
- * JSON-RPC error payload is distinguishable from a generic tool failure.
- */
-export class InsufficientScopeError extends ProtocolError {
-  constructor(neededScope?: string) {
-    super(ProtocolErrorCode.InvalidRequest, "insufficient_scope", {
-      error: "insufficient_scope",
-      ...(neededScope ? { scope: neededScope } : {}),
-    });
-    this.name = "InsufficientScopeError";
-  }
-}
+export { InsufficientScopeError };
 
 /** The result of a tools/call: a structured content result. */
 export interface CallToolOutcome {
@@ -137,14 +127,24 @@ export function buildMcpServer(
   // The entries are plain JSON; the SDK result type wants `type: "object"` spelled out.
   mcp.server.setRequestHandler("tools/list", async () => listTools() as never);
 
-  mcp.server.setRequestHandler("tools/call", async (req) => {
+  const extensions = options.extensions ?? [];
+
+  mcp.server.setRequestHandler("tools/call", async (req, ctx) => {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     // CallToolOutcome is a structurally-valid CallToolResult.
-    return (await callTool(client, getPrincipal(), name, args, logger)) as never;
+    const outcome = await callTool(client, getPrincipal(), name, args, logger);
+    // An extension may answer in its place (Tasks: a task handle for a client that declared it).
+    for (const extension of extensions) {
+      const replaced = await extension.afterToolCall?.({ name, args }, outcome, ctx);
+      if (replaced !== undefined) {
+        return replaced as never;
+      }
+    }
+    return outcome as never;
   });
 
-  for (const extension of options.extensions ?? []) {
+  for (const extension of extensions) {
     extension.attach(mcp);
   }
   // An extension that serves resources declares that their list can change. No
@@ -165,6 +165,8 @@ export interface McpServerFactoryDeps {
   instructions?: string;
   /** Replaces the extensions every server carries (tests). */
   extensions?: () => Promise<readonly McpExtension[]>;
+  /** Replaces the Tasks extension's defaults (tests). */
+  tasks?: TasksExtensionOptions;
 }
 
 /**
@@ -173,9 +175,20 @@ export interface McpServerFactoryDeps {
  * protocol era, so tools, instructions and extensions are defined once, here.
  */
 export function createMcpServerFactory(deps: McpServerFactoryDeps): McpServerFactory {
-  return async (ctx) =>
-    buildMcpServer(deps.client, () => deps.principal(ctx), deps.logger ?? silentLogger, {
+  return async (ctx) => {
+    const logger = deps.logger ?? silentLogger;
+    const principal = () => deps.principal(ctx);
+    return buildMcpServer(deps.client, principal, logger, {
       instructions: deps.instructions ?? INSTRUCTIONS,
-      extensions: await (deps.extensions ?? loadExtensions)(),
+      extensions: [
+        ...(await (deps.extensions ?? loadExtensions)()),
+        ...callerExtensions({
+          client: deps.client,
+          principal,
+          logger,
+          ...(deps.tasks ? { tasks: deps.tasks } : {}),
+        }),
+      ],
     });
+  };
 }

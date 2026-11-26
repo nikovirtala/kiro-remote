@@ -54,7 +54,7 @@ const STREAMING_METHODS: ReadonlySet<string> = new Set(["subscriptions/listen"])
 const PRINCIPAL_KEY = "principal";
 
 export interface HttpTransportDeps
-  extends Pick<McpServerFactoryDeps, "instructions" | "extensions"> {
+  extends Pick<McpServerFactoryDeps, "instructions" | "extensions" | "tasks"> {
   client: ToolClient;
   logger?: Logger;
 }
@@ -136,6 +136,7 @@ export function createHttpTransportHandler(deps: HttpTransportDeps): McpTranspor
       logger,
       ...(deps.instructions !== undefined ? { instructions: deps.instructions } : {}),
       ...(deps.extensions ? { extensions: deps.extensions } : {}),
+      ...(deps.tasks ? { tasks: deps.tasks } : {}),
       principal: (ctx) => ctx.authInfo?.extra?.[PRINCIPAL_KEY] as Principal,
     }),
     {

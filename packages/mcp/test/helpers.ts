@@ -509,6 +509,13 @@ export const MODERN_META = {
   "io.modelcontextprotocol/clientCapabilities": {},
 };
 
+/** The client capabilities of a request that declares the Tasks extension. */
+export const TASKS_CAPABILITY = {
+  "io.modelcontextprotocol/clientCapabilities": {
+    extensions: { "io.modelcontextprotocol/tasks": {} },
+  },
+};
+
 /** A JSON-RPC answer as a test reads it: any field may be absent, none is typed. */
 // biome-ignore lint/suspicious/noExplicitAny: a test reads arbitrary result shapes.
 export type RpcAnswer = Record<string, any>;
@@ -531,6 +538,8 @@ export async function modernCall(
       // SEP-2243: the standard header naming the tool, resource or prompt.
       ...(typeof params.name === "string" ? { "mcp-name": params.name } : {}),
       ...(typeof params.uri === "string" ? { "mcp-name": params.uri } : {}),
+      // The Tasks extension names the task the same way.
+      ...(typeof params.taskId === "string" ? { "mcp-name": params.taskId } : {}),
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
