@@ -3,8 +3,8 @@
  *
  * This is the single place tool calls are authorized and executed, so the
  * Streamable HTTP transport (in the API) and the stdio transport (in the CLI)
- * behave identically. It also builds the official @modelcontextprotocol/sdk
- * {@link Server} for the stdio transport.
+ * behave identically. It also builds the one official
+ * @modelcontextprotocol/server {@link McpServer} both transports serve.
  *
  * Authorization contract (MCP auth spec): a tool call whose required scope the
  * caller lacks returns the OAuth `insufficient_scope` error, NOT a generic tool
@@ -14,13 +14,14 @@
  * core's redact.
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from "@modelcontextprotocol/sdk/types.js";
+  type McpRequestContext,
+  McpServer,
+  type McpServerFactory,
+  type McpServerOptions,
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@modelcontextprotocol/server";
 import { ForbiddenError, type Principal, redact } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 import { authorizeTool, findTool, type ToolResult, toolListEntries } from "./tools.ts";
@@ -56,12 +57,12 @@ export const redactingLogger: Logger = {
 export const silentLogger: Logger = { info() {}, error() {} };
 
 /**
- * An McpError subtype that carries the OAuth `insufficient_scope` error so the
+ * A ProtocolError subtype that carries the OAuth `insufficient_scope` error so the
  * JSON-RPC error payload is distinguishable from a generic tool failure.
  */
-export class InsufficientScopeError extends McpError {
+export class InsufficientScopeError extends ProtocolError {
   constructor(neededScope?: string) {
-    super(ErrorCode.InvalidRequest, "insufficient_scope", {
+    super(ProtocolErrorCode.InvalidRequest, "insufficient_scope", {
       error: "insufficient_scope",
       ...(neededScope ? { scope: neededScope } : {}),
     });
@@ -90,7 +91,7 @@ export async function callTool(
 ): Promise<CallToolOutcome> {
   const def = findTool(name);
   if (!def) {
-    throw new McpError(ErrorCode.MethodNotFound, `unknown tool: ${name}`);
+    throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `unknown tool: ${name}`);
   }
 
   // Scope gating FIRST: a missing scope is insufficient_scope, never a tool error.
@@ -126,32 +127,66 @@ export function listTools() {
   return { tools: toolListEntries() };
 }
 
+/** What {@link buildMcpServer} adds on top of the tools: instructions and extensions. */
+export interface BuildMcpServerOptions {
+  /** Shown to clients in `initialize` and `server/discover`. */
+  instructions?: string;
+  /** Called once with the new server, before it is connected (an extension attaches here). */
+  attach?: (server: McpServer) => void;
+}
+
 /**
- * Build the official SDK {@link Server} wired to the given client and a
- * resolver for the authenticated principal. The stdio transport drives this
- * server directly. The HTTP transport uses {@link callTool}/{@link listTools}
- * via the stateless handler, so both paths share identical tool logic.
+ * Build the SDK {@link McpServer} wired to the given client and a resolver for
+ * the authenticated principal. This is the one server both transports serve:
+ * stdio through serveStdio and /mcp through createMcpHandler, each calling it
+ * once per connection or request. `tools/list` and `tools/call` are handled
+ * here from tools.ts (not through registerTool) so the advertised schemas stay
+ * exactly the ones the OpenAPI generator's twin produces.
  */
 export function buildMcpServer(
   client: ToolClient,
   getPrincipal: () => Principal,
   logger: Logger = silentLogger,
-): Server {
-  const server = new Server(
-    { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { tools: {} } },
-  );
+  options: BuildMcpServerOptions = {},
+): McpServer {
+  const serverOptions: McpServerOptions = {
+    // Neither transport can push a list change (the HTTP seam has no stream), so say so.
+    capabilities: { tools: { listChanged: false } },
+    ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
+  };
+  const mcp = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, serverOptions);
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => listTools());
+  // The entries are plain JSON; the SDK result type wants `type: "object"` spelled out.
+  mcp.server.setRequestHandler("tools/list", async () => listTools() as never);
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  mcp.server.setRequestHandler("tools/call", async (req) => {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-    const outcome = await callTool(client, getPrincipal(), name, args, logger);
-    // CallToolOutcome is a structurally-valid CallToolResult; the SDK's result
-    // type carries extra optional task fields we do not use.
-    return outcome as unknown as Record<string, unknown>;
+    // CallToolOutcome is a structurally-valid CallToolResult.
+    return (await callTool(client, getPrincipal(), name, args, logger)) as never;
   });
 
-  return server;
+  options.attach?.(mcp);
+  return mcp;
+}
+
+/** What {@link createMcpServerFactory} needs besides the options of {@link buildMcpServer}. */
+export interface McpServerFactoryDeps extends BuildMcpServerOptions {
+  client: ToolClient;
+  logger?: Logger;
+  /** The caller of the exchange the new server will serve. */
+  principal: (ctx: McpRequestContext) => Principal;
+}
+
+/**
+ * The factory both serving entries call: createMcpHandler once per HTTP
+ * request, serveStdio once per connection. The same factory serves every
+ * protocol era, so tools, instructions and extensions are defined once.
+ */
+export function createMcpServerFactory(deps: McpServerFactoryDeps): McpServerFactory {
+  return (ctx) =>
+    buildMcpServer(deps.client, () => deps.principal(ctx), deps.logger ?? silentLogger, {
+      ...(deps.instructions !== undefined ? { instructions: deps.instructions } : {}),
+      ...(deps.attach ? { attach: deps.attach } : {}),
+    });
 }

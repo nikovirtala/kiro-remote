@@ -1,18 +1,18 @@
 /**
  * The stdio MCP transport for `kiro-remote mcp`.
  *
- * It builds the official SDK {@link Server} wired to the HTTP {@link ToolClient}
- * (which calls the REST API with the user's silently-refreshed token) and
- * connects it to a {@link StdioServerTransport}. The Principal passed to the
+ * It serves the shared MCP server factory wired to the HTTP {@link ToolClient}
+ * (which calls the REST API with the user's silently-refreshed token) over
+ * stdio. The Principal passed to the
  * tools is derived LOCALLY from the stored access token for scope gating; the
  * REST API still enforces authorization authoritatively server-side.
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type { Principal } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 import type { Keychain } from "./keychain.ts";
-import { buildMcpServer, type Logger, silentLogger } from "./server.ts";
+import { createMcpServerFactory, type Logger, silentLogger } from "./server.ts";
 import { decodeTokenForDisplay } from "./token-provider.ts";
 
 export interface RunStdioDeps {
@@ -47,11 +47,16 @@ export async function localPrincipal(keychain: Keychain): Promise<Principal> {
   return { sub: who.sub ?? "", clientId: stored.clientId, scopes: normalized };
 }
 
-/** Connect the MCP server to stdio and run until the transport closes. */
+/** Serve the MCP server over stdio until the transport closes. */
 export async function runStdio(deps: RunStdioDeps): Promise<void> {
   const logger = deps.logger ?? silentLogger;
   const principal = await localPrincipal(deps.keychain);
-  const server = buildMcpServer(deps.client as ToolClient, () => principal, logger);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  serveStdio(
+    createMcpServerFactory({
+      client: deps.client,
+      logger,
+      principal: () => principal,
+    }),
+    { onerror: (err) => logger.error("stdio transport error", { message: err.message }) },
+  );
 }

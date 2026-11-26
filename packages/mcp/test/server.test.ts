@@ -116,7 +116,16 @@ describe("HTTP transport handler (stateless JSON-RPC)", () => {
       principal: p,
       method: "POST",
       headers: {},
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "t", version: "0" },
+        },
+      }),
     });
     expect(init.status).toBe(200);
     expect(JSON.parse(init.body).result.serverInfo.name).toBe("kiro-remote");
