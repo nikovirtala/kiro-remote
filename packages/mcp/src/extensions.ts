@@ -6,8 +6,12 @@
  */
 
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
+import type { Principal } from "@nikovirtala/kiro-remote-core";
+import type { ToolClient } from "./client.ts";
+import type { Logger } from "./logger.ts";
 import type { CallToolOutcome } from "./server.ts";
 import { loadSkillCatalog } from "./skills.ts";
+import { TasksExtension, type TasksExtensionOptions, TurnTaskStore } from "./tasks/index.ts";
 
 /** What the factory needs of an extension: attach it to a server before it connects. */
 export interface McpExtension {
@@ -23,6 +27,35 @@ export interface McpExtension {
     outcome: CallToolOutcome,
     ctx: ServerContext,
   ): Promise<Record<string, unknown> | undefined>;
+}
+
+/** What the extensions that act for one caller need: they are built per server, not once per process. */
+export interface CallerExtensionDeps {
+  client: ToolClient;
+  principal: () => Principal;
+  logger?: Logger;
+  /** Replaces the Tasks defaults (tests poll in milliseconds, not seconds). */
+  tasks?: TasksExtensionOptions;
+}
+
+/**
+ * The extensions that read as the caller (the store behind Tasks reads the
+ * caller's own turns), so each server gets its own. Listed here with the shared
+ * ones so a new extension is one more entry in this file.
+ */
+export function callerExtensions(deps: CallerExtensionDeps): readonly McpExtension[] {
+  return [
+    new TasksExtension(
+      new TurnTaskStore({
+        client: deps.client,
+        principal: deps.principal,
+        ...(deps.tasks?.defaultPollIntervalMs !== undefined
+          ? { pollIntervalMs: deps.tasks.defaultPollIntervalMs }
+          : {}),
+      }),
+      { ...(deps.logger ? { logger: deps.logger } : {}), ...deps.tasks },
+    ),
+  ];
 }
 
 let loaded: Promise<readonly McpExtension[]> | undefined;

@@ -49,6 +49,8 @@ import {
   ProtocolErrorCode,
   type ServerContext,
 } from "@modelcontextprotocol/server";
+import { ForbiddenError } from "@nikovirtala/kiro-remote-core";
+import { InsufficientScopeError } from "../errors.ts";
 import type { McpExtension } from "../extensions.ts";
 import { type Logger, silentLogger } from "../logger.ts";
 import type { CallToolOutcome } from "../server.ts";
@@ -124,6 +126,22 @@ function requireTasksExtension(ctx: ServerContext, what: string): void {
 function requireModernRequest(ctx: ServerContext): void {
   if (!isModernRequest(ctx)) {
     throw new ProtocolError(ProtocolErrorCode.MethodNotFound, "Method not found");
+  }
+}
+
+/**
+ * Run a store call as the caller. The store reads with the caller's own scopes, so a
+ * caller without `sessions:read` gets the OAuth insufficient_scope error a tool
+ * call gives, before any record is looked at (nothing about the task is revealed).
+ */
+async function asCaller<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (err) {
+    if (err instanceof ForbiddenError) {
+      throw new InsufficientScopeError(err.neededScope);
+    }
+    throw err;
   }
 }
 
@@ -229,7 +247,7 @@ export class TasksExtension implements McpExtension {
       (async (params: { taskId: string }, ctx: ServerContext): Promise<GetTaskResultV2> => {
         requireModernRequest(ctx);
         requireTasksExtension(ctx, "tasks/get");
-        const task = await this.store.get(params.taskId);
+        const task = await asCaller(() => this.store.get(params.taskId));
         if (task === undefined) {
           return notFound();
         }
@@ -243,7 +261,7 @@ export class TasksExtension implements McpExtension {
       (async (params: { taskId: string }, ctx: ServerContext): Promise<UpdateTaskResultV2> => {
         requireModernRequest(ctx);
         requireTasksExtension(ctx, "tasks/update");
-        if (!(await this.store.update(params.taskId, {}))) {
+        if (!(await asCaller(() => this.store.update(params.taskId, {})))) {
           return notFound();
         }
         return { resultType: "complete" };
@@ -256,7 +274,7 @@ export class TasksExtension implements McpExtension {
       (async (params: { taskId: string }, ctx: ServerContext): Promise<CancelTaskResultV2> => {
         requireModernRequest(ctx);
         requireTasksExtension(ctx, "tasks/cancel");
-        if (!(await this.store.cancel(params.taskId))) {
+        if (!(await asCaller(() => this.store.cancel(params.taskId)))) {
           return notFound();
         }
         return { resultType: "complete" };

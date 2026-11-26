@@ -123,13 +123,18 @@ describe.each(cases)("Inspector over %s, %s era", (transport, era) => {
     expect(reports[0]?.files).toHaveLength(4);
   });
 
-  it("initialize shows the instructions", { timeout: 120_000 }, async () => {
+  it("initialize shows the instructions and the Tasks capability", {
+    timeout: 120_000,
+  }, async () => {
     const run = await npx(
       [...target(transport, era), "--method", "initialize", ...serverCommand(transport)],
       110_000,
     );
     expect(run.code, run.stderr.slice(-500)).toBe(0);
-    expect(JSON.parse(run.stdout).instructions).toBe(INSTRUCTIONS);
+    const init = JSON.parse(run.stdout);
+    expect(init.instructions).toBe(INSTRUCTIONS);
+    // The Tasks extension is advertised next to Skills (served on the modern era only).
+    expect(init.capabilities.extensions).toHaveProperty("io.modelcontextprotocol/tasks");
   });
 
   it("tools/list is the same 19 tools", { timeout: 120_000 }, async () => {

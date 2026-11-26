@@ -22,6 +22,7 @@
     "@nikovirtala/kiro-remote-core": "workspace:*"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/sdk": "1.32.2"
   }
 }

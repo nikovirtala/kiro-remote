@@ -422,6 +422,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.4.0
+        version: 2.4.0
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
@@ -2897,7 +2900,6 @@ snapshots:
       jose: 6.2.15
       pkce-challenge: 5.0.1
       zod: 4.6.7
-    optional: true
 
   '@modelcontextprotocol/core@2.4.0':
     dependencies:
