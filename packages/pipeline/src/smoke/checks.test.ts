@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { REGION } from "../names.ts";
 import { readPipelineContext } from "../pipeline-config.ts";
 import { PipelineStack, smokeStatements } from "../pipeline-stack.ts";
-import { CHECKS, parseResourceAttributes } from "./checks.ts";
+import { CHECKS, parseResourceAttributes, UNAUTHENTICATED_MCP_PROBES } from "./checks.ts";
 
 const COMMIT = "9bb4f62677da076832417924196766b5006babdb";
 const ORIGIN = "https://kiro-remote.nikovirtala.dev";
@@ -267,6 +267,38 @@ describe("the smoke checks", () => {
       "PASS",
     ]);
     expect(results.length).toBeGreaterThan(20);
+  });
+
+  it("probe /mcp with a tasks/get that declares the extension, and pass when it is refused", async () => {
+    process.env.DEPLOY_COMMIT = COMMIT;
+    const { aws, fetch } = fakeAccount(healthy());
+    const results = await runChecks(CHECKS, { aws, fetch });
+    const probe = results.filter((r) => r.name.includes("tasks/get"));
+    expect(probe.map((r) => r.status)).toEqual(["PASS"]);
+    const sent = UNAUTHENTICATED_MCP_PROBES.find((p) => p.era.includes("tasks/get"));
+    expect(JSON.parse(sent?.body ?? "{}")).toMatchObject({
+      method: "tasks/get",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/clientCapabilities": {
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
+        },
+      },
+    });
+    expect(sent?.headers["mcp-name"]).toBe(JSON.parse(sent?.body ?? "{}").params.taskId);
+  });
+
+  it("fail when /mcp answers a tasks/get without a token", async () => {
+    process.env.DEPLOY_COMMIT = COMMIT;
+    const w = healthy();
+    // The fake answers every 2026-07-28 request alike, so one that is served fails both probes.
+    w.mcp.modern = { status: 200 };
+    const { aws, fetch } = fakeAccount(w);
+    const failed = (await runChecks(CHECKS, { aws, fetch })).filter((r) => r.status === "FAIL");
+    expect(failed.map((r) => r.name)).toContain(
+      "POST /mcp (2026-07-28, tasks/get) without a token is refused with a resource_metadata challenge",
+    );
   });
 
   it("fail when the API does not name the GitHub queue", async () => {

@@ -128,7 +128,8 @@ async function http(
 /**
  * A request to /mcp in each protocol era, with no token. The 2025 era opens with `initialize`;
  * the 2026-07-28 era sends the version header, the method header and the `_meta` envelope on
- * every request. Neither carries a credential, and neither may be answered.
+ * every request, and one probe is a `tasks/get` that declares the Tasks extension. None carries a
+ * credential, and none may be answered.
  */
 export const UNAUTHENTICATED_MCP_PROBES: ReadonlyArray<{
   era: string;
@@ -166,6 +167,34 @@ export const UNAUTHENTICATED_MCP_PROBES: ReadonlyArray<{
           "io.modelcontextprotocol/protocolVersion": "2026-07-28",
           "io.modelcontextprotocol/clientInfo": { name: "kiro-remote-smoke", version: "0" },
           "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+  },
+  {
+    // The Tasks extension's methods are no exception: tasks/get with the extension declared and
+    // a task id that names nothing is still a 401 before anything is read. Smoke cannot sign in,
+    // so it cannot create a task; the live e2e harness covers the task flow.
+    era: "2026-07-28, tasks/get",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tasks/get",
+      "mcp-name": "kiro-remote-smoke",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tasks/get",
+      params: {
+        taskId: "kiro-remote-smoke",
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "kiro-remote-smoke", version: "0" },
+          "io.modelcontextprotocol/clientCapabilities": {
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
         },
       },
     }),

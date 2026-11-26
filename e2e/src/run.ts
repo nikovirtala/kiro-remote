@@ -32,6 +32,7 @@ import {
   STEPS,
   TURN_TIMEOUT_MS,
 } from "./steps.ts";
+import { connectTasks } from "./tasks-client.ts";
 
 /** The result of a harness run (used by the CLI exit code and tests). */
 export interface RunHarnessResult {
@@ -53,6 +54,7 @@ function realDeps(progress: (line: string) => void): HarnessDeps {
       });
     },
     connectMcp: (u, t) => connectMcp(u, t),
+    connectTasks: (u, t) => connectTasks(u, t),
     rest: (u, t) => new HttpClient({ baseUrl: u, tokens: t, fetch: nodeFetch }),
     now: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
