@@ -1,0 +1,17 @@
+envelope: ledger/v1
+kind: decision
+schema: decision/v1
+id: 01M8CP6MKYB764H3FSW60WVV0V
+subject: m58zvahh
+type: proposed
+at: 2026-11-26T19:44:29Z
+actor:
+  kind: agent
+  name: kiro
+  email: null
+  agent: kiro
+  on_behalf_of: niko.virtala@hey.com
+data:
+  title: Serve MCP from the v2 SDK and offer skills through the Skills extension
+  template: nygard
+  template_version: 1
