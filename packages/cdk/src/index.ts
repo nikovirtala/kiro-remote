@@ -17,7 +17,7 @@ export {
   KiroRemoteAuth,
   type KiroRemoteAuthProps,
   type PreRegisteredClientProps,
-} from "@nikovirtala/kiro-remote-auth";
+} from "@nikovirtala/kiro-remote-auth/construct";
 export {
   DEFAULT_CIMD_ALLOWED_HOST,
   DEFAULT_EVENT_TTL_DAYS,
