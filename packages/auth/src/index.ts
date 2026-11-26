@@ -11,7 +11,10 @@
  *  - /oauth/clients/cli.json (the facade CLI's own CIMD),
  *  - CIMD fetch + validate with an SSRF guard,
  *  - the Cognito + KMS ports (injectable for offline tests),
- *  - the standalone KiroRemoteAuth CDK construct.
+ *
+ * The standalone KiroRemoteAuth CDK construct is NOT exported here: it lives at
+ * the `@nikovirtala/kiro-remote-auth/construct` subpath so runtime bundles (the
+ * API Lambda) that import the handlers do not pull in aws-cdk-lib.
  */
 
 export const PACKAGE_NAME = "@nikovirtala/kiro-remote-auth";
@@ -23,7 +26,6 @@ export * from "./cli-client.ts";
 export * from "./clients.ts";
 export * from "./cognito.ts";
 export * from "./config.ts";
-export * from "./construct.ts";
 export * from "./kms.ts";
 export * from "./metadata.ts";
 export * from "./pkce.ts";

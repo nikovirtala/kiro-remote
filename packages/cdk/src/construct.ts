@@ -30,7 +30,10 @@
  */
 
 import { otelResourceAttributes } from "@nikovirtala/deployment/cdk";
-import { KiroRemoteAuth, type PreRegisteredClientProps } from "@nikovirtala/kiro-remote-auth";
+import {
+  KiroRemoteAuth,
+  type PreRegisteredClientProps,
+} from "@nikovirtala/kiro-remote-auth/construct";
 import { SWEEP_INTERVAL_MINUTES } from "@nikovirtala/kiro-remote-core";
 import { Annotations, Duration, RemovalPolicy, Validations } from "aws-cdk-lib";
 import { type CfnStage, DomainName, HttpApi, HttpMethod } from "aws-cdk-lib/aws-apigatewayv2";
