@@ -7,6 +7,7 @@
  * REST API (for the HTTP client) and a fake OAuth facade (for the CLI flows).
  */
 
+import type { McpTransportHandler } from "@nikovirtala/kiro-remote-api";
 import type {
   Command,
   CommandQueue,
@@ -472,4 +473,71 @@ export function fakeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   return `${header}.${payload}.sig`;
+}
+
+/* ------------------------- The /mcp seam as a fetch ------------------------ */
+
+/**
+ * A `fetch` that serves every request through an {@link McpTransportHandler},
+ * the way the API router does: the caller is already authenticated, headers are
+ * lower-cased and the body is a string. A real MCP client pointed at it
+ * exercises the seam end to end.
+ */
+export function seamFetch(handler: McpTransportHandler, who: Principal): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const req = new Request(input, init);
+    const headers: Record<string, string> = {};
+    req.headers.forEach((value, key) => {
+      headers[key.toLowerCase()] = value;
+    });
+    const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.text();
+    const res = await handler.handle({
+      principal: who,
+      method: req.method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+    });
+    const noBody = res.status === 202 || res.status === 204;
+    return new Response(noBody ? null : res.body, { status: res.status, headers: res.headers });
+  }) as typeof fetch;
+}
+
+/** The `_meta` envelope every 2026-07-28 request carries. */
+export const MODERN_META = {
+  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+  "io.modelcontextprotocol/clientInfo": { name: "test-client", version: "0.0.0" },
+  "io.modelcontextprotocol/clientCapabilities": {},
+};
+
+/** A JSON-RPC answer as a test reads it: any field may be absent, none is typed. */
+// biome-ignore lint/suspicious/noExplicitAny: a test reads arbitrary result shapes.
+export type RpcAnswer = Record<string, any>;
+
+/** POST one 2026-07-28 request through the seam and parse the JSON-RPC answer. */
+export async function modernCall(
+  handler: McpTransportHandler,
+  who: Principal,
+  method: string,
+  params: Record<string, unknown> = {},
+  id: number = 1,
+): Promise<{ status: number; json: RpcAnswer }> {
+  const res = await handler.handle({
+    principal: who,
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": method,
+      // SEP-2243: the standard header naming the tool, resource or prompt.
+      ...(typeof params.name === "string" ? { "mcp-name": params.name } : {}),
+      ...(typeof params.uri === "string" ? { "mcp-name": params.uri } : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: { ...params, _meta: { ...MODERN_META, ...((params._meta as object) ?? {}) } },
+    }),
+  });
+  return { status: res.status, json: JSON.parse(res.body) };
 }

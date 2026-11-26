@@ -1,11 +1,11 @@
 /**
  * @nikovirtala/kiro-remote-mcp
  *
- * One MCP server on @modelcontextprotocol/sdk exposed over two transports --
+ * One MCP server on @modelcontextprotocol/server exposed over two transports --
  * the Streamable HTTP transport mounted at /mcp on the API, and the stdio
  * transport run by `kiro-remote mcp` -- both written against the ONE canonical
  * {@link KiroRemoteClient} interface (defined in @nikovirtala/kiro-remote-api, implemented
- * here as {@link InProcessClient} and {@link HttpClient}). The 18 tools call
+ * here as {@link InProcessClient} and {@link HttpClient}). The 19 tools call
  * only that interface, so they contain no transport-forked logic.
  *
  * Also exports the `kiro-remote` CLI command implementations (login, logout,
