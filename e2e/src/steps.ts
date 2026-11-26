@@ -21,6 +21,7 @@ import type { McpSession } from "./mcp-client.ts";
 import type { Report } from "./report.ts";
 import type { Step } from "./runner.ts";
 import { type EventLike, type EventPage, waitForTurn } from "./settle.ts";
+import type { TasksSession } from "./tasks-client.ts";
 
 /** Everything the steps reach the outside world through (faked in unit tests). */
 export interface HarnessDeps {
@@ -34,6 +35,8 @@ export interface HarnessDeps {
   inspectorRun(baseUrl: string, call: InspectorCall): Promise<string>;
   obtainToken(baseUrl: string): Promise<ObtainedToken>;
   connectMcp(baseUrl: string, tokens: TokenProvider): Promise<McpSession>;
+  /** A client of `<baseUrl>/mcp` that declares the Tasks extension (the extension's own requester). */
+  connectTasks(baseUrl: string, tokens: TokenProvider): TasksSession;
   rest(baseUrl: string, tokens: TokenProvider): KiroRemoteClient;
   /** Milliseconds. */
   now(): number;
@@ -110,7 +113,13 @@ const REST_PRINCIPAL: Principal = { sub: "e2e", clientId: "e2e", scopes: [] };
 /* Prompts                                                                    */
 /* -------------------------------------------------------------------------- */
 
-export type MarkerKind = "MCP_LAUNCH" | "MCP_FOLLOWUP" | "REST_LAUNCH" | "REST_FOLLOWUP";
+export type MarkerKind =
+  | "MCP_LAUNCH"
+  | "MCP_FOLLOWUP"
+  | "MCP_TASK"
+  | "MCP_NO_TASK"
+  | "REST_LAUNCH"
+  | "REST_FOLLOWUP";
 
 export function markerFor(runId: string, kind: MarkerKind): string {
   return `KIRO_E2E_${runId}_${kind}`;
@@ -597,6 +606,104 @@ const mcpFollowup: Step<HarnessContext> = {
       throw new Error("kiro_get_transcript: the follow-up turn does not contain its marker");
     }
     return { turnId, ...turnCaptured(res) };
+  },
+};
+
+const mcpTasks: Step<HarnessContext> = {
+  id: "mcp-tasks",
+  name: "MCP Tasks: kiro_send_prompt returns a task, polled to completed, text equals kiro_get_transcript",
+  requires: ["baseUrl", "repo"],
+  needs: ["mcp-followup"],
+  async run(ctx) {
+    const mcp = mcpOf(ctx);
+    const s = sessionOf(ctx.state.mcpSession);
+    const marker = markerFor(ctx.deps.runId, "MCP_TASK");
+    const tasks = ctx.deps.connectTasks(baseOf(ctx), tokensOf(ctx));
+    try {
+      // whenBusy "queue": the one mode that leaves a stored record to follow.
+      const call = await tasks.callTool("kiro_send_prompt", {
+        sessionId: s.id,
+        prompt: promptFor(marker),
+        whenBusy: "queue",
+      });
+      if (call.kind !== "task") {
+        throw new Error(
+          "kiro_send_prompt did not return a task for a request that declares the Tasks extension",
+        );
+      }
+      const start = ctx.deps.now();
+      const outcome = await call.settle({
+        timeoutMs: ctx.deps.turnTimeoutMs,
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
+      if (outcome.status !== "completed") {
+        throw new Error(
+          `the task ended ${outcome.status}${outcome.error ? `: ${outcome.error}` : ""}`,
+        );
+      }
+      const structured = outcome.structured;
+      if (!structured || structured.sessionId !== s.id || structured.status !== "completed") {
+        throw new Error("the task result's structuredContent is not { sessionId, turnId, status }");
+      }
+      const turnId = str(structured, "turnId", "the task result structuredContent");
+      if (!outcome.text.includes(marker)) {
+        throw new Error("the task result does not contain the prompt's marker");
+      }
+      const turns = await mcpTranscriptTurns(mcp, s.id);
+      const turn = turns.find((t) => t.turnId === turnId);
+      if (!turn || turn.text !== outcome.text) {
+        throw new Error("the task result is not the text kiro_get_transcript gives for that turn");
+      }
+      return { turnId, taskMs: ctx.deps.now() - start, textLength: outcome.text.length };
+    } finally {
+      await tasks.close();
+    }
+  },
+};
+
+const mcpNoTasks: Step<HarnessContext> = {
+  id: "mcp-no-tasks",
+  name: "MCP without the Tasks extension (2025-era client): kiro_send_prompt answers as before",
+  requires: ["baseUrl", "repo"],
+  needs: ["mcp-followup"],
+  async run(ctx) {
+    const mcp = mcpOf(ctx);
+    const s = sessionOf(ctx.state.mcpSession);
+    const marker = markerFor(ctx.deps.runId, "MCP_NO_TASK");
+    const res = await mcp.callTool("kiro_send_prompt", {
+      sessionId: s.id,
+      prompt: promptFor(marker),
+      whenBusy: "queue",
+    });
+    if (res.isError || !res.structured) {
+      throw new Error(`kiro_send_prompt failed: ${res.text}`);
+    }
+    if ("taskId" in res.structured || "resultType" in res.structured) {
+      throw new Error("kiro_send_prompt returned a task to a client that did not declare Tasks");
+    }
+    const turnId = str(
+      obj(res.structured, "turn", "kiro_send_prompt"),
+      "id",
+      "kiro_send_prompt turn",
+    );
+    // Today's loop still works: wait for the turn, then read it.
+    const settled = await waitForTurn({
+      after: s.cursor,
+      turnId,
+      read: async (after) =>
+        mcpPage(await callOk(mcp, "kiro_wait_for_events", { sessionId: s.id, after })),
+      now: ctx.deps.now,
+      sleep: ctx.deps.sleep,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      timeoutMs: ctx.deps.turnTimeoutMs,
+    });
+    s.cursor = settled.cursor;
+    const turns = await mcpTranscriptTurns(mcp, s.id);
+    const turn = turns.find((t) => t.turnId === turnId);
+    if (!turn || typeof turn.text !== "string" || !turn.text.includes(marker)) {
+      throw new Error("kiro_get_transcript: the turn does not contain its marker");
+    }
+    return { turnId, ...turnCaptured(settled) };
   },
 };
 
@@ -2004,6 +2111,8 @@ export const STEPS: readonly Step<HarnessContext>[] = [
   mcpLaunch,
   mcpLaunchTurn,
   mcpFollowup,
+  mcpTasks,
+  mcpNoTasks,
   mcpDelete,
   restRead,
   restLaunch,

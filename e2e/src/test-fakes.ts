@@ -12,6 +12,7 @@ import type {
 import { HttpClientError, TOOL_NAMES } from "@nikovirtala/kiro-remote-mcp";
 import type { McpSession, ToolCallResult } from "./mcp-client.ts";
 import type { HarnessDeps } from "./steps.ts";
+import type { TasksCall, TasksOutcome, TasksSession } from "./tasks-client.ts";
 
 export const FAKE_TOKEN = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1MSJ9.fake-signature";
 
@@ -77,6 +78,14 @@ export interface FakeKiroOptions {
   deleteNeverConfirms?: boolean;
   /** Launching a session throws. */
   launchThrows?: boolean;
+  /** The Tasks client gets an ordinary result, never a task. */
+  noTasks?: boolean;
+  /** A task's result text is not what kiro_get_transcript gives. */
+  taskTextDiffers?: boolean;
+  /** The task ends failed. */
+  taskFails?: boolean;
+  /** The ordinary kiro_send_prompt answers with a task although no extension was declared. */
+  plainReturnsTask?: boolean;
 }
 
 interface ScriptStep {
@@ -260,7 +269,10 @@ export class FakeKiro {
         eventsTruncated: false,
       }),
       kiro_get_transcript: (a) => this.transcript(String(a.sessionId)),
-      kiro_send_prompt: (a) => ({ turn: this.createTurn(String(a.sessionId), String(a.prompt)) }),
+      kiro_send_prompt: (a) => {
+        const turn = this.createTurn(String(a.sessionId), String(a.prompt));
+        return this.opts.plainReturnsTask ? { turn, taskId: `task-${turn.id}` } : { turn };
+      },
       kiro_delete_session: (a) => {
         this.remove(String(a.sessionId));
         return { sessionId: a.sessionId, status: "deleting" };
@@ -283,6 +295,55 @@ export class FakeKiro {
         } catch (err) {
           return { isError: true, structured: undefined, text: (err as Error).message };
         }
+      },
+      close: async () => {},
+    };
+  }
+
+  /**
+   * A fake Tasks client over this backend. `kiro_send_prompt` starts a turn and
+   * answers with a task that settles once the turn's script has run out; other
+   * tools are not used through it.
+   */
+  tasks(): TasksSession {
+    return {
+      callTool: async (name, args): Promise<TasksCall> => {
+        this.calls.push(`tasks:${name}`);
+        if (name !== "kiro_send_prompt") {
+          throw new Error(`the fake Tasks client does not serve ${name}`);
+        }
+        const sessionId = String(args.sessionId);
+        const turn = this.createTurn(sessionId, String(args.prompt));
+        if (this.opts.noTasks) {
+          const structured = { turn };
+          return {
+            kind: "immediate",
+            settle: async () => ({
+              status: "completed",
+              text: JSON.stringify(structured),
+              structured,
+            }),
+          };
+        }
+        return {
+          kind: "task",
+          taskId: `task-${turn.id}`,
+          settle: async (): Promise<TasksOutcome> => {
+            const s = this.find(sessionId);
+            while (s.script.length > 0) {
+              this.read(sessionId, 0);
+            }
+            if (this.opts.taskFails) {
+              return { status: "failed", text: "", structured: undefined, error: "turn failed" };
+            }
+            const text = this.transcript(sessionId).turns.find((t) => t.turnId === turn.id)?.text;
+            return {
+              status: "completed",
+              text: this.opts.taskTextDiffers ? `${text ?? ""} (edited)` : (text ?? ""),
+              structured: { sessionId, turnId: turn.id, status: "completed" },
+            };
+          },
+        };
       },
       close: async () => {},
     };
@@ -373,6 +434,7 @@ export function fakeDeps(
       scopes: ["sessions:read", "sessions:write", "sessions:delete"],
     }),
     connectMcp: async () => kiro.mcp(),
+    connectTasks: () => kiro.tasks(),
     rest: () => kiro.rest(),
     now: () => t,
     sleep: async (ms) => {

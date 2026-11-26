@@ -134,6 +134,19 @@ npx @modelcontextprotocol/inspector@2.16.0 --cli <that url> --transport http \
   --protocol-era modern --method skills/list --verify
 ```
 
+## The Tasks extension against its own requester (offline)
+
+`packages/mcp/test/tasks-interop.test.ts` drives the `/mcp` handler and the stdio
+server with `@modelcontextprotocol/ext-tasks/client`, the extension's published
+requester (not code of this repository), against turn records that move from
+queued to running to completed, and from queued to failed. The requester
+declares the extension, reads the task handle, polls `tasks/get` and decodes the
+result; the test only carries its requests (`test/tasks-port.ts`).
+`packages/mcp/test/tasks.test.ts` covers each status mapping, the refusals
+(another user's task, a malformed id, no declared extension, the 2025 era) and
+cancel. The live harness repeats the flow against the deployed stack
+(`mcp-tasks`, `mcp-no-tasks` below).
+
 ## Synthesizing the CDK stack
 
 The CDK unit tests synthesize the stack with test props and run the cdk-nag
@@ -337,6 +350,18 @@ other than that token file.
   with no `turn.failed`. `kiro_get_transcript` contains the launch marker.
 - `mcp-followup`: `kiro_send_prompt` with `whenBusy: "reject"`, then waits until
   that turn settles. Its transcript turn contains the follow-up marker.
+- `mcp-tasks`: A 2026-07-28 request that declares the
+  [Tasks extension](./mcp.md#tasks-the-turns-answer-as-the-tool-result), made
+  with the extension's own requester (`@modelcontextprotocol/ext-tasks/client`),
+  calls `kiro_send_prompt` with `whenBusy: "queue"`. The answer must be a task.
+  The step polls it until it is `completed` and needs a result whose
+  `structuredContent` is `{ sessionId, turnId, status }`, whose text contains the
+  prompt's marker and is exactly the text `kiro_get_transcript` gives for that
+  turn. A task that ends `failed` or `cancelled`, or an ordinary result, fails the step.
+- `mcp-no-tasks`: The same call from the 2025-era SDK client, which does not
+  declare the extension, must answer as it always did (`{ turn }`, no task). The
+  step then waits for the turn with `kiro_wait_for_events` and finds its marker
+  in `kiro_get_transcript`.
 - `mcp-delete`: `kiro_delete_session` returns `deleting`, and `kiro_get_session`
   reports not found within 5 minutes.
 - `rest-read`: `GET /v1/capabilities` and `GET /v1/models` return their result
@@ -366,13 +391,13 @@ minutes per launch.
 ### The GitHub wake scenario (opt-in)
 
 With `KIRO_API_E2E_GITHUB=1` the harness appends 15 steps in three sessions
-(30 in total, plus `cleanup` when sessions were left behind): the single-PR
+(32 in total, plus `cleanup` when sessions were left behind): the single-PR
 flow (`gh-launch` to `gh-cleanup`), a chain of two dependent PRs
 (`gh-chain-*`), and failing checks plus a PR closed unmerged (`gh-checks-*`,
 `gh-close-wake`). They need the GitHub App installed on
 the repo and the GitHub CLI logged in as a trusted login. See
 [GitHub wake](./github.md#live-end-to-end-scenario-opt-in). Without the flag
-they are not in the step list at all, so a normal run has 15 steps and none
+they are not in the step list at all, so a normal run has 17 steps and none
 skipped.
 
 ### Output and exit codes
@@ -389,7 +414,7 @@ whether the repo is set) and `steps[]`, each with `id`, `name`, `status`
 - **0**: every step passed;
 - **1**: a step failed, or the harness crashed;
 - **2**: nothing failed, but some steps were skipped. For example, without
-  `KIRO_REMOTE_URL` all 15 steps are skipped with `KIRO_REMOTE_URL is unset`.
+  `KIRO_REMOTE_URL` all 17 steps are skipped with `KIRO_REMOTE_URL is unset`.
 
 `pnpm e2e` reports any non-zero code from the script as 1.
 

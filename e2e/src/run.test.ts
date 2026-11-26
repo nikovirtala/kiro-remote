@@ -17,6 +17,8 @@ const STEP_IDS = [
   "mcp-launch",
   "mcp-launch-turn",
   "mcp-followup",
+  "mcp-tasks",
+  "mcp-no-tasks",
   "mcp-delete",
   "rest-read",
   "rest-launch",
@@ -29,6 +31,8 @@ const LAUNCH_STEPS = [
   "mcp-launch",
   "mcp-launch-turn",
   "mcp-followup",
+  "mcp-tasks",
+  "mcp-no-tasks",
   "mcp-delete",
   "rest-launch",
   "rest-launch-turn",
@@ -234,10 +238,51 @@ describe("runHarness", () => {
     const { report, exitCode } = await runHarness({ env: ENV, deps: fakeDeps(BASE, kiro) });
     expect(step(report, "mcp-launch").status).toBe("failed");
     expect(step(report, "mcp-launch").reason).toContain("launch rejected");
-    for (const id of ["mcp-launch-turn", "mcp-followup", "mcp-delete"]) {
+    for (const id of [
+      "mcp-launch-turn",
+      "mcp-followup",
+      "mcp-tasks",
+      "mcp-no-tasks",
+      "mcp-delete",
+    ]) {
       expect(step(report, id).status).toBe("skipped");
     }
     expect(step(report, "rest-launch").status).toBe("failed");
+    expect(exitCode).toBe(1);
+  });
+
+  it("(i) the Tasks steps send a real request each and verify the task against the transcript", async () => {
+    const kiro = new FakeKiro();
+    const { report } = await runHarness({ env: ENV, deps: fakeDeps(BASE, kiro) });
+    expect(step(report, "mcp-tasks").status).toBe("passed");
+    expect(step(report, "mcp-no-tasks").status).toBe("passed");
+    expect(kiro.calls).toContain("tasks:kiro_send_prompt");
+    expect(step(report, "mcp-tasks").captured?.turnId).toEqual(expect.any(String));
+  });
+
+  it.each([
+    ["a server that returns no task", { noTasks: true }, "did not return a task"],
+    ["a task whose text is not the transcript's", { taskTextDiffers: true }, "kiro_get_transcript"],
+    ["a task that fails", { taskFails: true }, "the task ended failed: turn failed"],
+  ] as const)(
+    "(j) %s fails mcp-tasks, still deletes the session, and exits 1",
+    async (_name, options, reason) => {
+      const kiro = new FakeKiro(options);
+      const { report, exitCode } = await runHarness({ env: ENV, deps: fakeDeps(BASE, kiro) });
+      expect(step(report, "mcp-tasks").status).toBe("failed");
+      expect(step(report, "mcp-tasks").reason).toContain(reason);
+      expect(step(report, "mcp-delete").status).toBe("passed");
+      expect(kiro.liveSessions()).toEqual([]);
+      expect(exitCode).toBe(1);
+    },
+  );
+
+  it("(k) an ordinary client that is handed a task fails mcp-no-tasks", async () => {
+    const kiro = new FakeKiro({ plainReturnsTask: true });
+    const { report, exitCode } = await runHarness({ env: ENV, deps: fakeDeps(BASE, kiro) });
+    expect(step(report, "mcp-no-tasks").status).toBe("failed");
+    expect(step(report, "mcp-no-tasks").reason).toContain("did not declare Tasks");
+    expect(step(report, "mcp-tasks").status).toBe("passed");
     expect(exitCode).toBe(1);
   });
 
