@@ -26,9 +26,9 @@ import type { McpTransportHandler, McpTransportRequest } from "@nikovirtala/kiro
 import type { Principal } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
 import {
-  type BuildMcpServerOptions,
   createMcpServerFactory,
   type Logger,
+  type McpServerFactoryDeps,
   silentLogger,
 } from "./server.ts";
 
@@ -53,7 +53,8 @@ const STREAMING_METHODS: ReadonlySet<string> = new Set(["subscriptions/listen"])
 /** The key the principal travels under in the SDK's `authInfo.extra`. */
 const PRINCIPAL_KEY = "principal";
 
-export interface HttpTransportDeps extends BuildMcpServerOptions {
+export interface HttpTransportDeps
+  extends Pick<McpServerFactoryDeps, "instructions" | "extensions"> {
   client: ToolClient;
   logger?: Logger;
 }
@@ -134,7 +135,7 @@ export function createHttpTransportHandler(deps: HttpTransportDeps): McpTranspor
       client: deps.client,
       logger,
       ...(deps.instructions !== undefined ? { instructions: deps.instructions } : {}),
-      ...(deps.attach ? { attach: deps.attach } : {}),
+      ...(deps.extensions ? { extensions: deps.extensions } : {}),
       principal: (ctx) => ctx.authInfo?.extra?.[PRINCIPAL_KEY] as Principal,
     }),
     {

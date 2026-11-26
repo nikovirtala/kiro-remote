@@ -38,6 +38,7 @@ export {
   type TranscriptResult,
   type WaitForEventsResult,
 } from "./events.ts";
+export { loadExtensions, type McpExtension } from "./extensions.ts";
 export {
   type FetchLike,
   HttpClient,
@@ -47,6 +48,7 @@ export {
 } from "./http-client.ts";
 // Transports.
 export { createHttpTransportHandler, type HttpTransportDeps } from "./http-transport.ts";
+export { INSTRUCTIONS, SKILL_URI } from "./instructions.ts";
 export {
   defaultTokenPath,
   FileKeychain,
@@ -73,17 +75,21 @@ export {
   type TokenSet,
 } from "./oauth.ts";
 export {
+  type BuildMcpServerOptions,
   buildMcpServer,
   type CallToolOutcome,
   callTool,
+  createMcpServerFactory,
   InsufficientScopeError,
   type Logger,
   listTools,
+  type McpServerFactoryDeps,
   redactingLogger,
   SERVER_NAME,
   SERVER_VERSION,
   silentLogger,
 } from "./server.ts";
+export { loadSkillCatalog, SKILLS_CACHE_HINT } from "./skills.ts";
 export { localPrincipal, type RunStdioDeps, runStdio } from "./stdio.ts";
 export {
   decodeTokenForDisplay,

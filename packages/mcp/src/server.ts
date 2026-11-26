@@ -24,37 +24,15 @@ import {
 } from "@modelcontextprotocol/server";
 import { ForbiddenError, type Principal, redact } from "@nikovirtala/kiro-remote-core";
 import type { ToolClient } from "./client.ts";
+import { loadExtensions, type McpExtension } from "./extensions.ts";
+import { INSTRUCTIONS } from "./instructions.ts";
+import { type Logger, redactingLogger, silentLogger } from "./logger.ts";
 import { authorizeTool, findTool, type ToolResult, toolListEntries } from "./tools.ts";
+
+export { type Logger, redactingLogger, silentLogger };
 
 export const SERVER_NAME = "kiro-remote";
 export const SERVER_VERSION = "0.0.0";
-
-/** Minimal logger surface; defaults to a redaction-safe console logger. */
-export interface Logger {
-  info(message: string, meta?: unknown): void;
-  error(message: string, meta?: unknown): void;
-}
-
-/** A logger that routes every message and meta object through core's redact. */
-export const redactingLogger: Logger = {
-  info(message, meta) {
-    if (meta !== undefined) {
-      console.error(redact(message), redact(meta));
-    } else {
-      console.error(redact(message));
-    }
-  },
-  error(message, meta) {
-    if (meta !== undefined) {
-      console.error(redact(message), redact(meta));
-    } else {
-      console.error(redact(message));
-    }
-  },
-};
-
-/** A logger that drops everything (used in tests). */
-export const silentLogger: Logger = { info() {}, error() {} };
 
 /**
  * A ProtocolError subtype that carries the OAuth `insufficient_scope` error so the
@@ -131,8 +109,8 @@ export function listTools() {
 export interface BuildMcpServerOptions {
   /** Shown to clients in `initialize` and `server/discover`. */
   instructions?: string;
-  /** Called once with the new server, before it is connected (an extension attaches here). */
-  attach?: (server: McpServer) => void;
+  /** Attached to the new server, in order, before it is connected. */
+  extensions?: readonly McpExtension[];
 }
 
 /**
@@ -166,27 +144,38 @@ export function buildMcpServer(
     return (await callTool(client, getPrincipal(), name, args, logger)) as never;
   });
 
-  options.attach?.(mcp);
+  for (const extension of options.extensions ?? []) {
+    extension.attach(mcp);
+  }
+  // An extension that serves resources declares that their list can change. No
+  // transport can push that (the HTTP seam has no stream), so say it does not.
+  if (mcp.server.getCapabilities().resources) {
+    mcp.server.registerCapabilities({ resources: { listChanged: false } });
+  }
   return mcp;
 }
 
-/** What {@link createMcpServerFactory} needs besides the options of {@link buildMcpServer}. */
-export interface McpServerFactoryDeps extends BuildMcpServerOptions {
+/** What {@link createMcpServerFactory} needs. */
+export interface McpServerFactoryDeps {
   client: ToolClient;
   logger?: Logger;
   /** The caller of the exchange the new server will serve. */
   principal: (ctx: McpRequestContext) => Principal;
+  /** Replaces the instructions every server carries (tests). */
+  instructions?: string;
+  /** Replaces the extensions every server carries (tests). */
+  extensions?: () => Promise<readonly McpExtension[]>;
 }
 
 /**
  * The factory both serving entries call: createMcpHandler once per HTTP
  * request, serveStdio once per connection. The same factory serves every
- * protocol era, so tools, instructions and extensions are defined once.
+ * protocol era, so tools, instructions and extensions are defined once, here.
  */
 export function createMcpServerFactory(deps: McpServerFactoryDeps): McpServerFactory {
-  return (ctx) =>
+  return async (ctx) =>
     buildMcpServer(deps.client, () => deps.principal(ctx), deps.logger ?? silentLogger, {
-      ...(deps.instructions !== undefined ? { instructions: deps.instructions } : {}),
-      ...(deps.attach ? { attach: deps.attach } : {}),
+      instructions: deps.instructions ?? INSTRUCTIONS,
+      extensions: await (deps.extensions ?? loadExtensions)(),
     });
 }
