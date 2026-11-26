@@ -170,7 +170,12 @@ describe("the extension on /mcp (2026-07-28)", () => {
       status: "completed",
       result: {
         content: [{ type: "text", text: "Fixed it." }],
-        structuredContent: { sessionId: "s1", turnId: "turn-1", status: "completed" },
+        structuredContent: {
+          sessionId: "s1",
+          turnId: "turn-1",
+          status: "completed",
+          text: "Fixed it.",
+        },
       },
     });
     expect(GetTaskResultV2Schema.safeParse(done.json.result).success).toBe(true);

@@ -77,8 +77,8 @@ status and failure reason.
 If your client supports the MCP Tasks extension, `kiro_send_prompt` with
 `whenBusy: "queue"` answers with a task for the turn instead of `{ turn }`. The client
 polls the task on its own, and the tool result you receive is the turn's final text
-plus `structuredContent { sessionId, turnId, status }`: the same text
-`kiro_get_transcript` gives for that turn. You then skip `kiro_wait_for_events` and
+plus `structuredContent { sessionId, turnId, status, text }` (the text is in both):
+the same text `kiro_get_transcript` gives for that turn. You then skip `kiro_wait_for_events` and
 `kiro_get_transcript` for it. A turn that fails is a failed task whose error names
 the reason. The wait and transcript loop is for clients without Tasks, and for
 `kiro_launch_session`, whose answer is always `{ sessionId, turnId: null }`. A

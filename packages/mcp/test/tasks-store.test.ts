@@ -87,7 +87,12 @@ describe("TurnTaskStore: every turn status", () => {
       result: {
         resultType: "complete",
         content: [{ type: "text", text: "Done: all green." }],
-        structuredContent: { sessionId: s, turnId: "t1", status: "completed" },
+        structuredContent: {
+          sessionId: s,
+          turnId: "t1",
+          status: "completed",
+          text: "Done: all green.",
+        },
       },
     });
     expect(DetailedTaskV2Schema.safeParse(task).success).toBe(true);

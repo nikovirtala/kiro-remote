@@ -16,4 +16,9 @@ export {
   TasksExtension,
   type TasksExtensionOptions,
 } from "./tasks-extension.ts";
-export { TurnTaskStore, type TurnTaskStoreDeps, taskForTurn } from "./turn-store.ts";
+export {
+  completedResult,
+  TurnTaskStore,
+  type TurnTaskStoreDeps,
+  taskForTurn,
+} from "./turn-store.ts";

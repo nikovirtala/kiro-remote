@@ -108,6 +108,7 @@ describe("ext-tasks requester over /mcp", () => {
       sessionId: SESSION,
       turnId: TURN,
       status: "completed",
+      text: "Renamed the flag and updated the docs.",
     });
     // The turn was read while queued, while running and when completed.
     expect(reads).toEqual(expect.arrayContaining(["queued", "running", "completed"]));

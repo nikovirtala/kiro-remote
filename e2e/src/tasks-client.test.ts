@@ -106,7 +106,7 @@ describe("connectTasks", () => {
     expect(outcome).toMatchObject({
       status: "completed",
       text: "All done.",
-      structured: { sessionId: SESSION, turnId: TURN, status: "completed" },
+      structured: { sessionId: SESSION, turnId: TURN, status: "completed", text: "All done." },
     });
     await tasks.close();
     // The call, then tasks/get named by the task id, every one with the bearer.
