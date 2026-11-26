@@ -355,9 +355,9 @@ other than that token file.
   with the extension's own requester (`@modelcontextprotocol/ext-tasks/client`),
   calls `kiro_send_prompt` with `whenBusy: "queue"`. The answer must be a task.
   The step polls it until it is `completed` and needs a result whose
-  `structuredContent` is `{ sessionId, turnId, status }`, whose text contains the
-  prompt's marker and is exactly the text `kiro_get_transcript` gives for that
-  turn. A task that ends `failed` or `cancelled`, or an ordinary result, fails the step.
+  `structuredContent` is `{ sessionId, turnId, status, text }`, whose text contains the
+  prompt's marker and whose text block and `structuredContent.text` are both exactly
+  the text `kiro_get_transcript` gives for that turn. A task that ends `failed` or `cancelled`, or an ordinary result, fails the step.
 - `mcp-no-tasks`: The same call from the 2025-era SDK client, which does not
   declare the extension, must answer as it always did (`{ turn }`, no task). The
   step then waits for the turn with `kiro_wait_for_events` and finds its marker

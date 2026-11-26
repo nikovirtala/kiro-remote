@@ -643,7 +643,9 @@ const mcpTasks: Step<HarnessContext> = {
       }
       const structured = outcome.structured;
       if (!structured || structured.sessionId !== s.id || structured.status !== "completed") {
-        throw new Error("the task result's structuredContent is not { sessionId, turnId, status }");
+        throw new Error(
+          "the task result's structuredContent is not { sessionId, turnId, status, text }",
+        );
       }
       const turnId = str(structured, "turnId", "the task result structuredContent");
       if (!outcome.text.includes(marker)) {
@@ -653,6 +655,12 @@ const mcpTasks: Step<HarnessContext> = {
       const turn = turns.find((t) => t.turnId === turnId);
       if (!turn || turn.text !== outcome.text) {
         throw new Error("the task result is not the text kiro_get_transcript gives for that turn");
+      }
+      // A host that shows only structuredContent must see the answer too.
+      if (structured.text !== turn.text) {
+        throw new Error(
+          "the task result's structuredContent.text is not the text kiro_get_transcript gives for that turn",
+        );
       }
       return { turnId, taskMs: ctx.deps.now() - start, textLength: outcome.text.length };
     } finally {

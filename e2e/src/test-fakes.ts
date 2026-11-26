@@ -82,6 +82,8 @@ export interface FakeKiroOptions {
   noTasks?: boolean;
   /** A task's result text is not what kiro_get_transcript gives. */
   taskTextDiffers?: boolean;
+  /** The task's structuredContent.text is not what kiro_get_transcript gives (the text block is). */
+  structuredTextDiffers?: boolean;
   /** The task ends failed. */
   taskFails?: boolean;
   /** The ordinary kiro_send_prompt answers with a task although no extension was declared. */
@@ -340,7 +342,12 @@ export class FakeKiro {
             return {
               status: "completed",
               text: this.opts.taskTextDiffers ? `${text ?? ""} (edited)` : (text ?? ""),
-              structured: { sessionId, turnId: turn.id, status: "completed" },
+              structured: {
+                sessionId,
+                turnId: turn.id,
+                status: "completed",
+                text: this.opts.structuredTextDiffers ? `${text ?? ""} (edited)` : (text ?? ""),
+              },
             };
           },
         };

@@ -132,15 +132,7 @@ export class TurnTaskStore implements TaskStore {
       }) as DetailedTaskV2;
     }
     const text = transcript.turns.find((t) => t.turnId === ref.turnId)?.text ?? "";
-    return {
-      ...snapshot.task,
-      status: "completed",
-      result: {
-        resultType: "complete",
-        content: [{ type: "text", text }],
-        structuredContent: { sessionId: ref.sessionId, turnId: ref.turnId, status: "completed" },
-      },
-    };
+    return { ...snapshot.task, status: "completed", result: completedResult(ref, text) };
   }
 
   /**
@@ -190,6 +182,25 @@ export class TurnTaskStore implements TaskStore {
     }
     return { task: taskForTurn(ref, turn), turn };
   }
+}
+
+/**
+ * The result of a completed task. The answer is in `structuredContent` as well
+ * as in the text block: the spec treats the text block as a copy of
+ * `structuredContent` for older clients, and hosts such as claude.ai show the
+ * model only `structuredContent`. Both read the one `text`, so they cannot drift.
+ */
+export function completedResult(ref: TaskRef, text: string) {
+  return {
+    resultType: "complete" as const,
+    content: [{ type: "text" as const, text }],
+    structuredContent: {
+      sessionId: ref.sessionId,
+      turnId: ref.turnId,
+      status: "completed" as const,
+      text,
+    },
+  };
 }
 
 /** The ISO time of the later of two ISO times. */

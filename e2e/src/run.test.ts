@@ -263,6 +263,11 @@ describe("runHarness", () => {
   it.each([
     ["a server that returns no task", { noTasks: true }, "did not return a task"],
     ["a task whose text is not the transcript's", { taskTextDiffers: true }, "kiro_get_transcript"],
+    [
+      "a task whose structuredContent.text is not the transcript's",
+      { structuredTextDiffers: true },
+      "structuredContent.text",
+    ],
     ["a task that fails", { taskFails: true }, "the task ended failed: turn failed"],
   ] as const)(
     "(j) %s fails mcp-tasks, still deletes the session, and exits 1",

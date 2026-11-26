@@ -449,17 +449,31 @@ state between requests). A malformed id is `-32602 Task not found`.
 **Status.** A task reads the same records as `GET /sessions/{id}/turns/{turnId}`
 (the turn row, or the queued prompt while it waits):
 
-| Turn                 | Task        | Detail                                                                                                                                                                        |
-| -------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `queued`, `running`  | `working`   | `statusMessage` says which.                                                                                                                                                   |
-| `completed`          | `completed` | `result` is a tool result: the turn's final text (what `kiro_get_transcript` gives for that turn) and `structuredContent { sessionId, turnId, status }`.                      |
-| `failed`, `refused`  | `failed`    | `error` is `-32603` with `data { sessionId, turnId, status, reason }`. A prompt that failed on the queue gives `session_deleted`, `session_failed` or `not_sent` as `reason`. |
-| `cancelled`          | `cancelled` |                                                                                                                                                                               |
-| any, session deleted | `failed`    | `reason: session_deleted`, as long as the session's records exist. A turn that had already failed or been cancelled keeps its own status.                                     |
+| Turn                 | Task        | Detail                                                                                                                                                                            |
+| -------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`, `running`  | `working`   | `statusMessage` says which.                                                                                                                                                       |
+| `completed`          | `completed` | `result` is a tool result: the turn's final text (what `kiro_get_transcript` gives for that turn) as a text block and as `structuredContent { sessionId, turnId, status, text }`. |
+| `failed`, `refused`  | `failed`    | `error` is `-32603` with `data { sessionId, turnId, status, reason }`. A prompt that failed on the queue gives `session_deleted`, `session_failed` or `not_sent` as `reason`.     |
+| `cancelled`          | `cancelled` |                                                                                                                                                                                   |
+| any, session deleted | `failed`    | `reason: session_deleted`, as long as the session's records exist. A turn that had already failed or been cancelled keeps its own status.                                         |
 
 `input_required` is never used: a cloud turn does not ask for input. `tasks/update`
 acknowledges any `inputResponses`, since every key is one the task never issued,
 and ignores them.
+
+The text is in `structuredContent.text` as well as in the text block because
+hosts such as claude.ai show the model only `structuredContent` and drop the
+text block, which the spec treats as a copy of `structuredContent` for older
+clients. Both read one string, so they are always equal.
+
+A failed task's error carries the reason (`message`, and `data.reason`), not the
+turn's text: a failed turn did not finish its answer, and whatever the agent said
+before it failed stays readable with `kiro_get_transcript`.
+
+The same rule holds for every result this server builds: when a result has both
+`structuredContent` and a text block, `structuredContent` holds everything the
+text block says (`packages/mcp/test/result-parity.test.ts`). A tool result's text
+block is the JSON of its `structuredContent`; a tool error has a text block only.
 
 The text is not cut: it is exactly what `kiro_get_transcript` returns for the
 turn, which has no bound of its own (only the event pages it reads).
