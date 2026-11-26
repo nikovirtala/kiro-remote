@@ -1,0 +1,607 @@
+{
+  "tools": [
+    {
+      "name": "kiro_capabilities",
+      "description": "Report the control plane's advertised capabilities, the kiro-cli version, and the caller's active cloud-session count.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "title": "Capabilities",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_list_models",
+      "description": "List the model ids the running agent advertises.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "title": "List Models",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_launch_session",
+      "description": "Launch a new Kiro cloud session against one or more repos with an initial prompt. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repos": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[^/\\s]+\\/[^/\\s]+$"
+            }
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "effort": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["prompt", "repos"]
+      },
+      "annotations": {
+        "title": "Launch Session",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_list_sessions",
+      "description": "List the caller's sessions, newest first, with an optional status filter and pagination cursor.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "provisioning"
+              },
+              {
+                "type": "string",
+                "const": "running"
+              },
+              {
+                "type": "string",
+                "const": "idle"
+              },
+              {
+                "type": "string",
+                "const": "awaiting_permission"
+              },
+              {
+                "type": "string",
+                "const": "failed"
+              },
+              {
+                "type": "string",
+                "const": "deleted"
+              }
+            ]
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "annotations": {
+        "title": "List Sessions",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_adopt_session",
+      "description": "Adopt an existing Kiro cloud session (started elsewhere) into the control plane. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "kiroSessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["kiroSessionId"]
+      },
+      "annotations": {
+        "title": "Adopt Session",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_get_session",
+      "description": "Fetch a single session the caller owns, with its linked pull requests (links), the pull requests it waits for (waits) and its prompt queue (queue: each prompt sent with whenBusy queue, with its turn id and status queued, delivered, started or failed, and the reason it failed).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "Get Session",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_send_prompt",
+      "description": "Send a prompt to a session. A session is busy while a turn runs and while prompts are queued. whenBusy \"queue\" keeps the prompt on the session's queue and runs it as its own turn, in order, after the turn in front of it; it ends as a turn or as a visible failure (turn.failed on the event log, shown in kiro_get_session's queue), never silently. \"reject\" refuses a busy session in the call. \"steer\" (the default) cannot be applied to a running cloud turn: for a busy session it fails in the call (steer_unsupported, use \"queue\" instead), stores nothing and leaves the queue as it is. The result's turn id is the id the turn runs under. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "whenBusy": {
+            "default": "steer",
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "steer"
+              },
+              {
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "type": "string",
+                "const": "reject"
+              }
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["prompt", "sessionId"]
+      },
+      "annotations": {
+        "title": "Send Prompt",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_wait_for_events",
+      "description": "Long-poll a session's event log (at most 20s). Returns at most 30 events and 8000 chars of text, reports truncation, and includes nextCursor, turnStatus, and the pending-permission count so an agent can poll cheaply.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "after": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "Wait For Events",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_get_transcript",
+      "description": "Return the assistant's FINAL text for each completed turn in a session (not raw events).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "Get Transcript",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_list_permissions",
+      "description": "List a session's permission requests, optionally filtered by status (e.g. pending).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "List Permissions",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_answer_permission",
+      "description": "Answer a pending permission request by returning one of the agent-supplied optionIds (plus optional persistent consent). Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "optionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "consent": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resource": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workspaceRoot": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["scope", "resource", "workspaceRoot"]
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["optionId", "sessionId", "requestId"]
+      },
+      "annotations": {
+        "title": "Answer Permission",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_set_config",
+      "description": "Change a session's model, effort level, and/or mode. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "effort": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "Set Config",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_link_pull_request",
+      "description": "Link a pull request (owner/repo#n or a github.com URL) to a session so GitHub activity on it wakes the session. The PR's repo must be one of the session's repos; a PR links to at most one session. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "pr": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["pr", "sessionId"]
+      },
+      "annotations": {
+        "title": "Link Pull Request",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_unlink_pull_request",
+      "description": "Remove a pull request link from a session. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "pr": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["pr", "sessionId"]
+      },
+      "annotations": {
+        "title": "Unlink Pull Request",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_wait_for_pull_request",
+      "description": "Wake a session once when a pull request it depends on, but does not own, is merged or closed (owner/repo#n or a github.com URL). The PR's repo must be allowed but need not be one of the session's repos. A PR already merged or closed wakes the session at once. Any number of sessions can wait for one PR. kiro_get_session lists a session's waits. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "pr": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["pr", "sessionId"]
+      },
+      "annotations": {
+        "title": "Wait For Pull Request",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_stop_waiting_for_pull_request",
+      "description": "Remove a session's wait for a pull request. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "pr": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["pr", "sessionId"]
+      },
+      "annotations": {
+        "title": "Stop Waiting For Pull Request",
+        "readOnlyHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_list_events",
+      "description": "Read the account's change feed: links and waits added, removed or changed, and every wake with its cause, in order. Pass after (the nextCursor of the last page, 0 to start) and limit (default 50, at most 200). Each event has id, seq (no gaps), ts, type, effect (state: moves state a reader follows; annotation: may be skipped if the type is unknown), sessionId, pr, source and a small typed payload. Events are kept 35 days.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "after": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "default": 50,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        }
+      },
+      "annotations": {
+        "title": "List Events",
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "kiro_cancel_turn",
+      "description": "Cancel the active turn on a session. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "Cancel Turn",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "kiro_delete_session",
+      "description": "Permanently delete a session and its cloud sandbox. Pass idempotencyKey (the same value on every retry of this call) so a retry runs at most once within 24 hours; reusing a key with different input is refused.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:-]+$",
+            "description": "Optional. Reuse the same key when retrying this exact call and it runs at most once in 24 hours; the same key with different input is refused."
+          }
+        },
+        "required": ["sessionId"]
+      },
+      "annotations": {
+        "title": "Delete Session",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": true
+      }
+    }
+  ]
+}
