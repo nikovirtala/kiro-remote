@@ -414,6 +414,92 @@ The `/mcp` seam is request and response, so it serves no streams:
 advertises `listChanged: false`. Extensions attach in one place
 ([`extensions.ts`](../packages/mcp/src/extensions.ts)).
 
+## Tasks: the turn's answer as the tool result
+
+A client that supports the
+[Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview)
+(`io.modelcontextprotocol/tasks`, SEP-2663) does not have to drive
+`kiro_wait_for_events` and `kiro_get_transcript` itself. It calls
+`kiro_send_prompt`, the server answers with a **task handle** for the Kiro turn,
+the client polls `tasks/get` on its own, and the model receives the turn's final
+text as the tool result. Claude (web) and Claude Code support the extension.
+
+Everything here is 2026-07-28 only. A 2025-era client gets the tool results it
+always got, and `tasks/get`, `tasks/update` and `tasks/cancel` answer `-32601`
+on that era. The module is
+[`packages/mcp/src/tasks/`](../packages/mcp/src/tasks), written to the design of
+the SDK's own `ext/tasks`
+([typescript-sdk#2782](https://github.com/modelcontextprotocol/typescript-sdk/pull/2782),
+not released) so that the swap is mechanical.
+
+**Which calls return a task.** `kiro_send_prompt`, when the request declares the
+extension in its `_meta` client capabilities **and** the prompt left a stored
+record before the call answered. That is a prompt sent with `whenBusy: "queue"`
+(its queue row is written first). A `steer` or `reject` prompt to an idle
+session is only a command on its way to the bridge until the bridge writes the
+turn row, so there is nothing a `tasks/get` could read: it answers `{ turn }`
+as without Tasks. `kiro_launch_session` returns no task yet (its answer has no
+turn id until the sandbox starts), and a GitHub wake turn has none, since no
+tool call starts it. The other 17 tools, and every tool schema, are unchanged.
+
+**The task id** is opaque: it encodes the session id, the turn id, the creation
+time and the TTL, so `tasks/get` needs no lookup table (the API Lambda keeps no
+state between requests). A malformed id is `-32602 Task not found`.
+
+**Status.** A task reads the same records as `GET /sessions/{id}/turns/{turnId}`
+(the turn row, or the queued prompt while it waits):
+
+| Turn                 | Task        | Detail                                                                                                                                                                        |
+| -------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`, `running`  | `working`   | `statusMessage` says which.                                                                                                                                                   |
+| `completed`          | `completed` | `result` is a tool result: the turn's final text (what `kiro_get_transcript` gives for that turn) and `structuredContent { sessionId, turnId, status }`.                      |
+| `failed`, `refused`  | `failed`    | `error` is `-32603` with `data { sessionId, turnId, status, reason }`. A prompt that failed on the queue gives `session_deleted`, `session_failed` or `not_sent` as `reason`. |
+| `cancelled`          | `cancelled` |                                                                                                                                                                               |
+| any, session deleted | `failed`    | `reason: session_deleted`, as long as the session's records exist. A turn that had already failed or been cancelled keeps its own status.                                     |
+
+`input_required` is never used: a cloud turn does not ask for input. `tasks/update`
+acknowledges any `inputResponses`, since every key is one the task never issued,
+and ignores them.
+
+The text is not cut: it is exactly what `kiro_get_transcript` returns for the
+turn, which has no bound of its own (only the event pages it reads).
+
+**Who may read a task.** Only the session's owner. Another user's task id, a
+task of a deleted session whose records are gone, an expired task and a task id
+that never existed all answer `-32602 Task not found`, so a task id does not
+reveal whether it exists. `tasks/*` do not check the scope of the tool that
+created the task; they read as the caller, so `sessions:read` is needed
+(`insufficient_scope` otherwise), and cancelling needs `sessions:write`, as
+`kiro_cancel_turn` does. A request that does not declare the extension is
+refused with `-32021` (HTTP 400) and `data.requiredCapabilities`, whether or not
+the task exists.
+
+**Cancelling.** `tasks/cancel` is cooperative and answers with an empty result.
+For a running turn it makes the same call as `kiro_cancel_turn`; a cloud session
+refuses a cancel while its turn runs, so the task then reaches `completed` or
+`failed` by itself. Nothing is sent for a turn that has settled, nor for a
+prompt still waiting on the queue (a cancel acts on the session's running turn,
+which is another turn).
+
+**Polling and retention.** Each task carries `pollIntervalMs: 5000` and
+`ttlMs: 86400000` (24 hours), both in
+[`constants.ts`](../packages/mcp/src/tasks/constants.ts). A follow-up turn takes
+about 9 seconds, so polling faster only costs requests. Turn rows have no TTL of
+their own, so the 24 hours is the task handle's: after it the id is `Task not
+found`, and the answer stays readable with `kiro_get_transcript`.
+`notifications/tasks` is not sent (the `/mcp` seam has no stream): clients poll.
+
+**Both transports.** `/mcp` and `kiro-remote mcp` (stdio) serve the extension
+from the same server factory, and per-request client capabilities travel in each
+2026-07-28 request on both. One difference: the stdio server reads through the
+REST API, which hides a deleted session, so there a task of a deleted session is
+`Task not found` at once instead of `failed`.
+
+**Trying it.** `packages/mcp/test/tasks-interop.test.ts` drives both transports
+with the extension's own requester (`@modelcontextprotocol/ext-tasks/client`),
+and the live e2e harness does the same against the deployed `/mcp`
+([testing](testing.md)).
+
 ## Scopes and secrets
 
 MCP calls use your Cognito OAuth token and are gated by the same scopes as the REST

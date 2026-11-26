@@ -72,6 +72,19 @@ rather drop the prompt than wait. A queued prompt ends as a turn or as a visible
 `turn.failed` event, and `kiro_get_session` lists the queue with each prompt's
 status and failure reason.
 
+### Clients that support Tasks
+
+If your client supports the MCP Tasks extension, `kiro_send_prompt` with
+`whenBusy: "queue"` answers with a task for the turn instead of `{ turn }`. The client
+polls the task on its own, and the tool result you receive is the turn's final text
+plus `structuredContent { sessionId, turnId, status }`: the same text
+`kiro_get_transcript` gives for that turn. You then skip `kiro_wait_for_events` and
+`kiro_get_transcript` for it. A turn that fails is a failed task whose error names
+the reason. The wait and transcript loop is for clients without Tasks, and for
+`kiro_launch_session`, whose answer is always `{ sessionId, turnId: null }`. A
+`steer` or `reject` prompt has no stored record to follow, so it always answers
+`{ turn }` and you read it with the loop.
+
 ## Retrying safely
 
 Every tool that changes something takes `idempotencyKey` (1 to 128 characters from
