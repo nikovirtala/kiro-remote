@@ -92,6 +92,14 @@ export {
 export { loadSkillCatalog, SKILLS_CACHE_HINT } from "./skills.ts";
 export { localPrincipal, type RunStdioDeps, runStdio } from "./stdio.ts";
 export {
+  TASK_POLL_INTERVAL_MS,
+  TASK_TTL_MS,
+  type TaskStore,
+  TasksExtension,
+  type TasksExtensionOptions,
+  TurnTaskStore,
+} from "./tasks/index.ts";
+export {
   decodeTokenForDisplay,
   KeychainTokenProvider,
   type KeychainTokenProviderDeps,

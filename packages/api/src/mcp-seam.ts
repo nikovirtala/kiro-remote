@@ -193,6 +193,15 @@ export interface KiroRemoteClient {
     opts?: WriteOptions,
   ): Promise<ClientTurn>;
 
+  /**
+   * Where one turn stands: its row, or the prompt still on the session's queue (or failed there,
+   * `stopReason` then names why). `null` when the session is not the caller's or the turn does not
+   * exist, the same answer for both. The in-process client also answers for a deleted session the
+   * caller owned (a turn that had not settled is `failed`, `stopReason` "session_deleted"); the
+   * REST API hides a deleted session, so the HTTP client answers `null` for it.
+   */
+  getTurn(principal: Principal, sessionId: string, turnId: string): Promise<ClientTurn | null>;
+
   getEvents(
     principal: Principal,
     sessionId: string,

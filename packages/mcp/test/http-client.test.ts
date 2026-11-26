@@ -40,6 +40,26 @@ describe("HttpClient", () => {
     expect(recorded[0].headers["idempotency-key"]).toBeUndefined();
   });
 
+  it("getTurn reads GET /sessions/{id}/turns/{turnId}, and a 404 is null", async () => {
+    const turn = {
+      id: "t1",
+      sessionId: "s1",
+      status: "running",
+      stopReason: null,
+      startedAt: null,
+      endedAt: null,
+    };
+    const { client, recorded } = clientWith({
+      "GET /v1/sessions/s1/turns/t1": { status: 200, body: turn },
+      "GET /v1/sessions/s1/turns/gone": { status: 404, body: { title: "Turn Not Found" } },
+      "GET /v1/sessions/s1/turns/boom": { status: 500, body: {} },
+    });
+    expect(await client.getTurn(P, "s1", "t1")).toEqual(turn);
+    expect(recorded[0].url).toBe("https://host/v1/sessions/s1/turns/t1");
+    expect(await client.getTurn(P, "s1", "gone")).toBeNull();
+    await expect(client.getTurn(P, "s1", "boom")).rejects.toBeInstanceOf(HttpClientError);
+  });
+
   it("adds an Idempotency-Key to writes", async () => {
     const { client, recorded } = clientWith({
       "POST /v1/sessions": { status: 202, body: { sessionId: "s1", turnId: null } },

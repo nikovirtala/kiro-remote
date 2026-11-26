@@ -1,0 +1,17 @@
+envelope: ledger/v1
+kind: decision
+schema: decision/v1
+id: 01M8CTSQW9FK98MWNKPAEKH9S1
+subject: wacaw8qk
+type: proposed
+at: 2026-11-26T21:04:49Z
+actor:
+  kind: agent
+  name: kiro
+  email: null
+  agent: kiro
+  on_behalf_of: niko.virtala@hey.com
+data:
+  title: Serve the MCP Tasks extension from a module backed by the turn records
+  template: nygard
+  template_version: 1

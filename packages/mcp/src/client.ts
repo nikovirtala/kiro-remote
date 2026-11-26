@@ -40,6 +40,7 @@ import {
   deleteSession as svcDelete,
   listFeedEvents as svcFeed,
   getSession as svcGetSession,
+  getTurnState as svcGetTurnState,
   launchSession as svcLaunch,
   linkPullRequest as svcLink,
   listSessions as svcListSessions,
@@ -201,6 +202,14 @@ export class InProcessClient implements KiroRemoteClient {
           source: "mcp",
         })) as ClientTurn,
     );
+  }
+
+  async getTurn(
+    principal: Principal,
+    sessionId: string,
+    turnId: string,
+  ): Promise<ClientTurn | null> {
+    return (await svcGetTurnState(this.service, principal, sessionId, turnId)) as ClientTurn | null;
   }
 
   async getEvents(

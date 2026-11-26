@@ -1,0 +1,19 @@
+envelope: ledger/v1
+kind: decision
+schema: decision/v1
+id: 01M8CTSYEFM78SH5FXQWP8G70R
+subject: wacaw8qk
+type: scoped
+at: 2026-11-26T21:04:56Z
+actor:
+  kind: agent
+  name: kiro
+  email: null
+  agent: kiro
+  on_behalf_of: niko.virtala@hey.com
+data:
+  set:
+    - packages/api/src/mcp-seam.ts
+    - packages/mcp/src/extensions.ts
+    - packages/mcp/src/server.ts
+    - packages/mcp/src/tasks/**

@@ -15,6 +15,7 @@
     "lint": "biome check ."
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-tasks": "0.2.3",
     "@modelcontextprotocol/server": "2.4.0",
     "@nikovirtala/kiro-remote-api": "workspace:*",
     "@nikovirtala/kiro-remote-auth": "workspace:*",
