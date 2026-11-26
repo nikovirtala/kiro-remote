@@ -16,6 +16,7 @@ import type { KiroRemoteClient } from "@nikovirtala/kiro-remote-api";
 import type { Principal } from "@nikovirtala/kiro-remote-core";
 import { HttpClientError, TOOL_NAMES, type TokenProvider } from "@nikovirtala/kiro-remote-mcp";
 import type { ObtainedToken } from "./auth.ts";
+import { type InspectorCall, parseInspectorToolNames, parseSkillReports } from "./inspector.ts";
 import type { McpSession } from "./mcp-client.ts";
 import type { Report } from "./report.ts";
 import type { Step } from "./runner.ts";
@@ -26,6 +27,11 @@ export interface HarnessDeps {
   fetch: typeof fetch;
   /** Run the MCP Inspector `tools/list` (with its own browser sign-in); return the tool names. */
   inspector(baseUrl: string): Promise<string[]>;
+  /**
+   * Run one more MCP Inspector CLI call (its own browser sign-in) and return its stdout.
+   * A non-zero exit throws.
+   */
+  inspectorRun(baseUrl: string, call: InspectorCall): Promise<string>;
   obtainToken(baseUrl: string): Promise<ObtainedToken>;
   connectMcp(baseUrl: string, tokens: TokenProvider): Promise<McpSession>;
   rest(baseUrl: string, tokens: TokenProvider): KiroRemoteClient;
@@ -419,6 +425,51 @@ const mcpInspector: Step<HarnessContext> = {
   async run(ctx) {
     const names = await ctx.deps.inspector(baseOf(ctx));
     assertToolSet(names, "Inspector tools/list");
+    return { toolCount: names.length };
+  },
+};
+
+/** The skill the server must offer: the one that teaches a model to use these tools. */
+const SKILL_NAME = "kiro-remote-sessions";
+
+const mcpSkills: Step<HarnessContext> = {
+  id: "mcp-skills",
+  name: "MCP Inspector CLI: skills/list --verify (SEP-2640 conformance, sizes, digests)",
+  requires: ["baseUrl"],
+  needs: ["discovery"],
+  async run(ctx) {
+    const stdout = await ctx.deps.inspectorRun(baseOf(ctx), {
+      method: "skills/list",
+      verify: true,
+    });
+    const reports = parseSkillReports(stdout);
+    const names = reports.map((r) => r.name);
+    if (!names.includes(SKILL_NAME)) {
+      throw new Error(`skills/list does not offer ${SKILL_NAME} (offers ${names.length} skill(s))`);
+    }
+    const bad = reports.filter((r) => !r.ok || r.outcome !== "verified");
+    if (bad.length > 0) {
+      throw new Error(
+        `skills not verified: ${bad.map((r) => `${r.name} (${r.outcome})`).join(", ")}`,
+      );
+    }
+    const fileCount = reports.reduce((n, r) => n + r.files.length, 0);
+    return { skillCount: reports.length, fileCount };
+  },
+};
+
+const mcpModernTools: Step<HarnessContext> = {
+  id: "mcp-modern-tools",
+  name: "MCP Inspector CLI: tools/list in the 2026-07-28 protocol era",
+  requires: ["baseUrl"],
+  needs: ["discovery"],
+  async run(ctx) {
+    const stdout = await ctx.deps.inspectorRun(baseOf(ctx), {
+      method: "tools/list",
+      era: "modern",
+    });
+    const names = parseInspectorToolNames(stdout);
+    assertToolSet(names, "Inspector tools/list (modern era)");
     return { toolCount: names.length };
   },
 };
@@ -1946,6 +1997,8 @@ export const GITHUB_STEPS: readonly Step<HarnessContext>[] = [
 export const STEPS: readonly Step<HarnessContext>[] = [
   discovery,
   mcpInspector,
+  mcpSkills,
+  mcpModernTools,
   login,
   mcpTools,
   mcpLaunch,

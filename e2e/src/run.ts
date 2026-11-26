@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { FileKeychain, HttpClient } from "@nikovirtala/kiro-remote-mcp";
 import { defaultLogin, nodeFetch, obtainToken } from "./auth.ts";
 import { loadConfig } from "./config.ts";
-import { defaultInspectorSpawn, runInspectorToolsList } from "./inspector.ts";
+import { defaultInspectorSpawn, runInspector, runInspectorToolsList } from "./inspector.ts";
 import { connectMcp } from "./mcp-client.ts";
 import { makeScrubber, Report, type RunReport } from "./report.ts";
 import { runSteps } from "./runner.ts";
@@ -43,6 +43,7 @@ function realDeps(progress: (line: string) => void): HarnessDeps {
   return {
     fetch: globalThis.fetch,
     inspector: (u) => runInspectorToolsList(u, { spawn: defaultInspectorSpawn, progress }),
+    inspectorRun: (u, call) => runInspector(u, call, { spawn: defaultInspectorSpawn, progress }),
     obtainToken: (u) => {
       const keychain = new FileKeychain();
       return obtainToken(u, {

@@ -11,11 +11,13 @@ The part I'm most excited about: the MCP server lets a chat client such as Claud
 - read back each turn's final answer (`kiro_get_transcript`),
 - and list and delete sessions (`kiro_list_sessions`, `kiro_delete_session`). Some tools (for example cancelling a running turn) are not supported on cloud sessions; see [the MCP guide](./docs/mcp.md#the-19-tools). Every tool that changes something takes an optional `idempotencyKey`, so a retried call runs at most once in 24 hours ([details](./docs/mcp.md#retrying-safely-idempotencykey)).
 
+The server also offers a skill, `kiro-remote-sessions`, through the MCP Skills extension: it teaches the connected model the launch, wait and transcript loop, the cloud-session limits, safe retries and pull request linking, so it does not have to learn them by trial and error. Claude (web), Claude Code and VS Code Copilot load it; clients without Skills support (Claude Desktop, Kiro) get the essentials as the server's `instructions`. See [the skill and the protocol eras](./docs/mcp.md#the-skill-and-the-protocol-eras).
+
 Optionally, GitHub activity on a pull request the agent opened (merged, closed, changes requested, a comment from you, failing checks) can wake the session with a new turn: see [GitHub wake](./docs/github.md).
 
 You deploy it once into your own AWS account. After that, you (and the MCP clients you authorize) can do all of the above either over the REST API or through the 19 MCP tools. Both MCP transports expose the same tools.
 
-Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
+Remote MCP clients connect to `<host>/mcp` over Streamable HTTP and sign in through the bundled OAuth 2.1 facade (Dynamic Client Registration is supported, which is what a client's "Register automatically" option uses). Both the 2025 and the 2026-07-28 MCP protocol eras are served. Local clients can run the stdio `kiro-remote mcp` command instead. See [Using the MCP server](./docs/mcp.md).
 
 How sign-in works:
 

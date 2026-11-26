@@ -1,5 +1,6 @@
 /**
- * Run the MCP Inspector CLI once: `tools/list` over Streamable HTTP.
+ * Run the MCP Inspector CLI once over Streamable HTTP: `tools/list`, or
+ * `skills/list --verify`, in the era asked for.
  *
  * The Inspector does what Claude does on a first connection: the server
  * answers 401, the Inspector follows the RFC 9728 resource metadata to the RFC
@@ -19,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** The pinned Inspector release (its CLI flags and env vars were checked against this one). */
-export const INSPECTOR_PACKAGE = "@modelcontextprotocol/inspector@2.14.0";
+export const INSPECTOR_PACKAGE = "@modelcontextprotocol/inspector@2.16.0";
 /** Upper bound for the whole Inspector run, including the browser sign-in. */
 export const INSPECTOR_TIMEOUT_MS = 300_000;
 
@@ -29,8 +30,23 @@ export interface InspectorInvocation {
   env: Record<string, string>;
 }
 
-/** The command line and extra env for one `tools/list` run. Carries no secret. */
-export function inspectorInvocation(baseUrl: string, storageDir: string): InspectorInvocation {
+/**
+ * One Inspector run: the method, the protocol era (the Inspector's default for
+ * a URL is the 2025 era) and, for `skills/list`, the SEP-2640 checks.
+ */
+export interface InspectorCall {
+  method: "tools/list" | "skills/list";
+  era?: "legacy" | "auto" | "modern";
+  /** `--verify`: conformance, sizes and digests of every skill; exit 7 or 8 when one fails. */
+  verify?: boolean;
+}
+
+/** The command line and extra env for one run (`tools/list` by default). Carries no secret. */
+export function inspectorInvocation(
+  baseUrl: string,
+  storageDir: string,
+  call: InspectorCall = { method: "tools/list" },
+): InspectorInvocation {
   return {
     command: "npx",
     args: [
@@ -40,10 +56,12 @@ export function inspectorInvocation(baseUrl: string, storageDir: string): Inspec
       `${baseUrl}/mcp`,
       "--transport",
       "http",
+      ...(call.era ? ["--protocol-era", call.era] : []),
       "--method",
-      "tools/list",
-      "--format",
-      "json",
+      call.method,
+      ...(call.verify ? ["--verify"] : []),
+      // `--verify` prints one JSON report per skill on its own; the format flag is for tools.
+      ...(call.verify ? [] : ["--format", "json"]),
     ],
     env: {
       MCP_STORAGE_DIR: storageDir,
@@ -143,16 +161,49 @@ export interface InspectorDeps {
   timeoutMs?: number;
 }
 
-/** Run `tools/list` through the Inspector and return the advertised tool names. */
-export async function runInspectorToolsList(
+/** One skill's `--verify` report, as far as the harness reads it. */
+export interface SkillReport {
+  name: string;
+  ok: boolean;
+  outcome: string;
+  files: unknown[];
+}
+
+/** Read the per-skill reports `--verify` prints: one JSON object per line. */
+export function parseSkillReports(stdout: string): SkillReport[] {
+  const reports = stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("{"))
+    .map((l) => {
+      try {
+        return JSON.parse(l) as Partial<SkillReport>;
+      } catch {
+        throw new Error("MCP Inspector --verify printed a report that is not JSON");
+      }
+    });
+  return reports.map((r) => {
+    if (typeof r.name !== "string" || typeof r.ok !== "boolean" || !Array.isArray(r.files)) {
+      throw new Error("MCP Inspector --verify printed a report without name, ok and files");
+    }
+    return { name: r.name, ok: r.ok, outcome: String(r.outcome), files: r.files };
+  });
+}
+
+/**
+ * Run one Inspector call (with its own browser sign-in) and return its stdout.
+ * A non-zero exit throws, with the exit status and the error envelope.
+ */
+export async function runInspector(
   baseUrl: string,
+  call: InspectorCall,
   deps: InspectorDeps,
-): Promise<string[]> {
+): Promise<string> {
   const mkdtemp = deps.mkdtemp ?? fsMkdtemp;
   const rm = deps.rm ?? fsRm;
   const dir = await mkdtemp(join(tmpdir(), "kiro-e2e-inspector-"));
   try {
-    const inv = inspectorInvocation(baseUrl, dir);
+    const inv = inspectorInvocation(baseUrl, dir, call);
     const res = await deps.spawn(inv.command, inv.args, {
       env: { ...process.env, ...inv.env },
       timeoutMs: deps.timeoutMs ?? INSPECTOR_TIMEOUT_MS,
@@ -161,8 +212,19 @@ export async function runInspectorToolsList(
     if (res.exitStatus !== 0) {
       throw new Error(describeFailure(res.exitStatus, res.stderrTail));
     }
-    return parseInspectorToolNames(res.stdout);
+    return res.stdout;
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+/** Run `tools/list` through the Inspector and return the advertised tool names. */
+export async function runInspectorToolsList(
+  baseUrl: string,
+  deps: InspectorDeps,
+  era?: InspectorCall["era"],
+): Promise<string[]> {
+  return parseInspectorToolNames(
+    await runInspector(baseUrl, { method: "tools/list", ...(era ? { era } : {}) }, deps),
+  );
 }

@@ -2,7 +2,8 @@
  * @nikovirtala/kiro-remote-e2e
  *
  * The live end-to-end harness for a deployed kiro-remote stack. MCP first:
- * discovery + OAuth + tools/list through the MCP Inspector CLI, then launch,
+ * discovery + OAuth + tools/list, the skills' conformance and tools/list in the
+ * 2026-07-28 era through the MCP Inspector CLI, then launch,
  * turn settle, follow-up and delete through the MCP SDK client; then the same
  * flow over REST. The bearer comes from the `kiro-remote login` keychain, the
  * target repo only from the environment, and neither is ever printed.
@@ -26,12 +27,16 @@ export {
   defaultInspectorSpawn,
   INSPECTOR_PACKAGE,
   INSPECTOR_TIMEOUT_MS,
+  type InspectorCall,
   type InspectorDeps,
   type InspectorInvocation,
   type InspectorSpawn,
   inspectorInvocation,
   parseInspectorToolNames,
+  parseSkillReports,
+  runInspector,
   runInspectorToolsList,
+  type SkillReport,
 } from "./inspector.ts";
 export { connectMcp, type McpSession, type ToolCallResult } from "./mcp-client.ts";
 export {

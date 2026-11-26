@@ -114,6 +114,26 @@ KIRO_REMOTE_EMULATOR_TEST=1 mise exec -- pnpm --filter @nikovirtala/kiro-remote-
 The tests create and delete their own table and refuse to run unless
 `AWS_ENDPOINT_URL` is a loopback address, so they cannot reach real AWS.
 
+## The MCP servers against the Inspector (offline)
+
+`packages/mcp/test/inspector.test.ts` runs the MCP Inspector CLI
+(`@modelcontextprotocol/inspector@2.16.0`, fetched with `npx`, so it needs the
+npm registry) against the real servers on this machine: the stdio server
+(`test/fixtures/stdio-server.ts`) and the `/mcp` handler served on a local port
+(`test/local-http.ts`, the API's seam over `node:http`), each in `--protocol-era
+legacy` and `modern`. Per case it runs `skills/list --verify` (SEP-2640
+conformance, sizes, digests), `initialize` (the instructions) and `tools/list`
+(the 19 tools). There is no sign-in: the servers hold every scope. The live
+harness below proves the sign-in.
+
+To serve `/mcp` locally and point any client at it:
+
+```bash
+mise exec -- node packages/mcp/test/local-http.ts   # prints http://127.0.0.1:<port>/mcp
+npx @modelcontextprotocol/inspector@2.16.0 --cli <that url> --transport http \
+  --protocol-era modern --method skills/list --verify
+```
+
 ## Synthesizing the CDK stack
 
 The CDK unit tests synthesize the stack with test props and run the cdk-nag
@@ -245,7 +265,7 @@ the exit code non-zero.
 
 - A deployed stack.
 - Node 26 with `npx` and network access. The first run downloads
-  `@modelcontextprotocol/inspector@2.14.0`.
+  `@modelcontextprotocol/inspector@2.16.0`.
 - A desktop browser for the sign-ins.
 - Port 6276 free on `127.0.0.1`. It is the Inspector CLI's fixed OAuth
   callback.
@@ -264,9 +284,11 @@ bearer.
 
 ### Sign-in
 
-A run asks for up to two browser sign-ins:
+A run asks for up to four browser sign-ins: one for each of the three
+Inspector steps (`mcp-inspector`, `mcp-skills`, `mcp-modern-tools`) and one for
+the login step:
 
-1. **The Inspector step** always opens one. The harness runs the Inspector with
+1. **Each Inspector step** always opens one. The harness runs the Inspector with
    its in-memory secret store and a temporary storage directory that it
    deletes afterwards, so the Inspector's tokens are gone when it exits. By
    default the Inspector would keep them in the OS keychain or
@@ -295,6 +317,15 @@ other than that token file.
   (`--cli <url>/mcp --transport http --method tools/list`) completes
   discovery, registration and the browser sign-in, and lists exactly the 19
   registered tools.
+- `mcp-skills`: The Inspector CLI (`--method skills/list --verify`) signs in
+  again and runs the SEP-2640 checks over every skill the server offers: the
+  frontmatter, and the size and digest of each file. The step needs
+  `kiro-remote-sessions` among them, every skill `verified`, and the Inspector
+  to exit 0 (it exits 7 when a check fails and 8 when one could not be made).
+- `mcp-modern-tools`: The Inspector CLI
+  (`--protocol-era modern --method tools/list`) signs in again and lists exactly
+  the 19 tools through the 2026-07-28 protocol era. The other Inspector and SDK
+  steps speak the 2025 era, so both eras are exercised on the live stack.
 - `login`: A token with the three scopes, from the token file or a browser
   login. `captured.source` says which.
 - `mcp-tools`: The MCP SDK client connects over Streamable HTTP with that token.
@@ -335,13 +366,13 @@ minutes per launch.
 ### The GitHub wake scenario (opt-in)
 
 With `KIRO_API_E2E_GITHUB=1` the harness appends 15 steps in three sessions
-(28 in total, plus `cleanup` when sessions were left behind): the single-PR
+(30 in total, plus `cleanup` when sessions were left behind): the single-PR
 flow (`gh-launch` to `gh-cleanup`), a chain of two dependent PRs
 (`gh-chain-*`), and failing checks plus a PR closed unmerged (`gh-checks-*`,
 `gh-close-wake`). They need the GitHub App installed on
 the repo and the GitHub CLI logged in as a trusted login. See
 [GitHub wake](./github.md#live-end-to-end-scenario-opt-in). Without the flag
-they are not in the step list at all, so a normal run has 13 steps and none
+they are not in the step list at all, so a normal run has 15 steps and none
 skipped.
 
 ### Output and exit codes
@@ -358,7 +389,7 @@ whether the repo is set) and `steps[]`, each with `id`, `name`, `status`
 - **0**: every step passed;
 - **1**: a step failed, or the harness crashed;
 - **2**: nothing failed, but some steps were skipped. For example, without
-  `KIRO_REMOTE_URL` all 13 steps are skipped with `KIRO_REMOTE_URL is unset`.
+  `KIRO_REMOTE_URL` all 15 steps are skipped with `KIRO_REMOTE_URL is unset`.
 
 `pnpm e2e` reports any non-zero code from the script as 1.
 

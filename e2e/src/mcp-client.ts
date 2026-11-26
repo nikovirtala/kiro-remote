@@ -1,6 +1,11 @@
 /**
  * A thin MCP client over the official SDK (Streamable HTTP) for the tool flow.
  *
+ * This is the v1 SDK client (@modelcontextprotocol/sdk 1.x) on purpose, while the
+ * server moved to @modelcontextprotocol/server 2.x: v1 speaks the 2025 protocol
+ * era, so this client is the live probe that existing clients keep working. The
+ * 2026-07-28 era is probed by the `mcp-modern-tools` step (Inspector, `--protocol-era modern`).
+ *
  * The bearer comes from the {@link TokenProvider} on every request (so a silent
  * refresh is picked up), is set on a copy of the request headers, and is never
  * logged.

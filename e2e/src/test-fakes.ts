@@ -337,6 +337,7 @@ export function throwingDeps(): Partial<HarnessDeps> {
   return {
     fetch: boom("fetch") as unknown as typeof fetch,
     inspector: boom("inspector"),
+    inspectorRun: boom("inspectorRun"),
     obtainToken: boom("obtainToken"),
     connectMcp: boom("connectMcp"),
     rest: boom("rest"),
@@ -355,6 +356,16 @@ export function fakeDeps(
   return {
     fetch: discoveryFetch(base),
     inspector: async () => [...TOOL_NAMES],
+    inspectorRun: async (_url, call) =>
+      call.method === "skills/list"
+        ? `${JSON.stringify({
+            uri: "skill://kiro-remote-sessions/SKILL.md",
+            name: "kiro-remote-sessions",
+            files: [{ status: "verified" }],
+            ok: true,
+            outcome: "verified",
+          })}\n`
+        : JSON.stringify({ result: { tools: TOOL_NAMES.map((name) => ({ name })) } }),
     obtainToken: async () => ({
       tokens: { accessToken: async () => FAKE_TOKEN },
       source: "keychain",

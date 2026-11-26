@@ -104,9 +104,15 @@ export function parseResourceAttributes(text: string | undefined): Record<string
   return out;
 }
 
-async function http(ctx: CheckContext, url: string): Promise<{ status: number; json: unknown }> {
+async function http(
+  ctx: CheckContext,
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; json: unknown; challenge: string | null }> {
   const res = await ctx.fetch(url, {
-    method: "GET",
+    method: init.method ?? "GET",
+    ...(init.headers ? { headers: init.headers } : {}),
+    ...(init.body !== undefined ? { body: init.body } : {}),
     redirect: "manual",
     signal: AbortSignal.timeout(15_000),
   });
@@ -116,8 +122,55 @@ async function http(ctx: CheckContext, url: string): Promise<{ status: number; j
   } catch {
     json = undefined;
   }
-  return { status: res.status, json };
+  return { status: res.status, json, challenge: res.headers.get("www-authenticate") };
 }
+
+/**
+ * A request to /mcp in each protocol era, with no token. The 2025 era opens with `initialize`;
+ * the 2026-07-28 era sends the version header, the method header and the `_meta` envelope on
+ * every request. Neither carries a credential, and neither may be answered.
+ */
+export const UNAUTHENTICATED_MCP_PROBES: ReadonlyArray<{
+  era: string;
+  headers: Record<string, string>;
+  body: string;
+}> = [
+  {
+    era: "2025-06-18",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "kiro-remote-smoke", version: "0" },
+      },
+    }),
+  },
+  {
+    era: "2026-07-28",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/list",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "kiro-remote-smoke", version: "0" },
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+  },
+];
 
 export const CHECKS: readonly SmokeCheck[] = [
   {
@@ -260,6 +313,23 @@ export const CHECKS: readonly SmokeCheck[] = [
           `GET ${path} without a token is refused`,
           r.status === 401 ? "PASS" : "FAIL",
           `HTTP ${r.status}`,
+        );
+      }
+      // /mcp never answers without a token, in either protocol era: a 401 whose challenge
+      // names the protected resource metadata, so a client can find where to sign in. Smoke
+      // cannot sign in, so it cannot list the skills; the live e2e harness does.
+      for (const probe of UNAUTHENTICATED_MCP_PROBES) {
+        const r = await http(ctx, `${origin}/mcp`, {
+          method: "POST",
+          headers: probe.headers,
+          body: probe.body,
+        });
+        const challenged = r.challenge?.includes("resource_metadata=") === true;
+        ctx.add(
+          "api",
+          `POST /mcp (${probe.era}) without a token is refused with a resource_metadata challenge`,
+          r.status === 401 && challenged ? "PASS" : "FAIL",
+          `HTTP ${r.status}${challenged ? "" : ", no resource_metadata challenge"}`,
         );
       }
       // The default endpoint serves the same API (docs/deploy.md, Option A).

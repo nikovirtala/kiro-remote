@@ -46,6 +46,8 @@ interface World {
     tracing?: string;
   }>;
   status: Record<string, number>;
+  /** What a POST to /mcp without a token gets, per protocol era. */
+  mcp: Record<"legacy" | "modern", { status: number; challenge?: string }>;
 }
 
 const zip = (logicalId: string, extra: Record<string, string> = {}) => ({
@@ -101,6 +103,16 @@ function healthy(): World {
       "/.well-known/oauth-authorization-server": 200,
       "/v1/sessions": 401,
       "/mcp": 401,
+    },
+    mcp: {
+      legacy: {
+        status: 401,
+        challenge: `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/mcp"`,
+      },
+      modern: {
+        status: 401,
+        challenge: `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/mcp"`,
+      },
     },
   };
 }
@@ -201,11 +213,25 @@ function fakeAccount(w: World) {
     if (service === "sqs") return { Attributes: { ApproximateNumberOfMessages: "0" } };
     throw new Error(`unexpected call aws ${service} ${command}`);
   };
-  const fetchImpl = (async (input: string | URL | Request) => {
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
     );
-    calls.push(`GET ${url.origin === API ? "api:" : ""}${url.pathname}`);
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url.origin === API ? "api:" : ""}${url.pathname}`);
+    // A POST to /mcp is answered by its own entry, per era (the 2026-07-28 request names its version).
+    const headers = new Headers(init?.headers);
+    const era = headers.get("mcp-protocol-version") === "2026-07-28" ? "modern" : "legacy";
+    if (method === "POST" && url.pathname === "/mcp") {
+      const answer = w.mcp[era];
+      return new Response(JSON.stringify({}), {
+        status: answer.status,
+        headers: {
+          "content-type": "application/json",
+          ...(answer.challenge ? { "www-authenticate": answer.challenge } : {}),
+        },
+      });
+    }
     const status = w.status[url.pathname] ?? 404;
     const body =
       url.pathname === "/openapi.json"
@@ -364,6 +390,27 @@ describe("the smoke checks", () => {
       },
       "api",
     ],
+    [
+      "/mcp answering a 2026-07-28 request without a token",
+      (w: World) => {
+        w.mcp.modern = { status: 200 };
+      },
+      "api",
+    ],
+    [
+      "/mcp answering a 2025-06-18 request without a token",
+      (w: World) => {
+        w.mcp.legacy = { status: 200 };
+      },
+      "api",
+    ],
+    [
+      "a 401 from /mcp that does not name the resource metadata",
+      (w: World) => {
+        w.mcp.modern = { status: 401, challenge: "Bearer" };
+      },
+      "api",
+    ],
     ["a missing named output", (w: World) => void delete w.outputs.FacadeClientId, "outputs"],
     [
       "a function off Node 26",
@@ -422,7 +469,9 @@ describe("the smoke role and the checks", () => {
   it("every AWS call of every check is a read-only call the smoke role is granted", async () => {
     const { aws, fetch, calls } = fakeAccount(healthy());
     await runChecks(CHECKS, { aws, fetch });
-    const awsCalls = [...new Set(calls.filter((c) => !c.startsWith("GET ")))];
+    const awsCalls = [
+      ...new Set(calls.filter((c) => !c.startsWith("GET ") && !c.startsWith("POST "))),
+    ];
     expect(awsCalls.length).toBeGreaterThan(4);
     const granted = new Set(
       smokeStatements({ account: "1", region: REGION })

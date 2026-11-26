@@ -10,6 +10,8 @@ const ENV = { KIRO_REMOTE_URL: BASE, KIRO_API_E2E_REPO: REPO };
 const STEP_IDS = [
   "discovery",
   "mcp-inspector",
+  "mcp-skills",
+  "mcp-modern-tools",
   "login",
   "mcp-tools",
   "mcp-launch",
@@ -107,6 +109,70 @@ describe("runHarness", () => {
       "mcp-inspector",
     ]);
     expect(exitCode).toBe(1);
+  });
+
+  it("(d2) a skills/list --verify that exits non-zero fails its step, and only that step", async () => {
+    const kiro = new FakeKiro();
+    const fake = fakeDeps(BASE, kiro);
+    const deps = fakeDeps(BASE, kiro, {
+      inspectorRun: async (url, call) => {
+        if (call.verify) {
+          throw new Error("MCP Inspector exited 7: skill digest mismatch");
+        }
+        return fake.inspectorRun?.(url, call) ?? "";
+      },
+    });
+    const { report, exitCode } = await runHarness({ env: ENV, deps });
+    expect(step(report, "mcp-skills").status).toBe("failed");
+    expect(step(report, "mcp-skills").reason).toContain("exited 7");
+    expect(report.steps.filter((s) => s.status !== "passed").map((s) => s.id)).toEqual([
+      "mcp-skills",
+    ]);
+    expect(exitCode).toBe(1);
+  });
+
+  it("(d3) skills that do not verify, or a missing kiro-remote-sessions, fail the step", async () => {
+    const kiro = new FakeKiro();
+    const report = (name: string, ok: boolean) =>
+      `${JSON.stringify({ name, ok, outcome: ok ? "verified" : "failed", files: [] })}\n`;
+    for (const [stdout, reason] of [
+      [report("kiro-remote-sessions", false), "not verified"],
+      [report("another-skill", true), "does not offer kiro-remote-sessions"],
+      ["", "does not offer kiro-remote-sessions"],
+    ] as const) {
+      const deps = fakeDeps(BASE, kiro, { inspectorRun: async () => stdout });
+      const { report: run } = await runHarness({ env: ENV, deps });
+      expect(step(run, "mcp-skills").status).toBe("failed");
+      expect(step(run, "mcp-skills").reason).toContain(reason);
+    }
+  });
+
+  it("(d4) the modern-era tools/list must list exactly the 19 tools", async () => {
+    const kiro = new FakeKiro();
+    const deps = fakeDeps(BASE, kiro, {
+      inspectorRun: async () =>
+        JSON.stringify({ result: { tools: [{ name: "kiro_capabilities" }] } }),
+    });
+    const { report, exitCode } = await runHarness({ env: ENV, deps });
+    expect(step(report, "mcp-modern-tools").status).toBe("failed");
+    expect(exitCode).toBe(1);
+  });
+
+  it("(d5) the two Inspector steps ask for the era and the check they name", async () => {
+    const kiro = new FakeKiro();
+    const calls: unknown[] = [];
+    const fake = fakeDeps(BASE, kiro);
+    const deps = fakeDeps(BASE, kiro, {
+      inspectorRun: async (url, call) => {
+        calls.push(call);
+        return fake.inspectorRun?.(url, call) ?? "";
+      },
+    });
+    await runHarness({ env: ENV, deps });
+    expect(calls).toEqual([
+      { method: "skills/list", verify: true },
+      { method: "tools/list", era: "modern" },
+    ]);
   });
 
   it("(e) without a repo the launch steps are skipped and the rest pass, exit 2", async () => {
